@@ -5,7 +5,11 @@ import type { HealthProbe } from './db';
 import { errorBody } from './errors';
 import { healthRoute } from './routes/health';
 import { fundDetailRoute, fundSearchRoute } from './routes/funds';
+import { latestNavRoute, navHistoryRoute } from './routes/nav';
+import { marketStatusRoute } from './routes/market-status';
 import { createFundService } from './market/funds';
+import { createNavService } from './market/nav';
+import { marketStatus } from './market/status';
 import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
 import { ANONYMOUS_MARKET_RATE_LIMIT, rateLimit } from './rate-limit';
 
@@ -62,8 +66,10 @@ export function createApp(deps: AppDeps = {}): App {
   });
 
   const funds = createFundService({ upstream: resolved.upstream, clock: resolved.clock });
+  const nav = createNavService({ upstream: resolved.upstream, clock: resolved.clock });
   const marketRateLimit = rateLimit(ANONYMOUS_MARKET_RATE_LIMIT, resolved.clock);
   app.use('/v1/funds/*', marketRateLimit);
+  app.use('/v1/market/*', marketRateLimit);
 
   app.openapi(fundSearchRoute, async (c) => {
     const { q } = c.req.valid('query');
@@ -77,6 +83,33 @@ export function createApp(deps: AppDeps = {}): App {
       return c.json(errorBody('fund_not_found', `没有代码为 ${code} 的基金`), 404);
     }
     return c.json(fund, 200);
+  });
+
+  app.openapi(latestNavRoute, async (c) => {
+    const { code } = c.req.valid('param');
+    const latest = await nav.latest(code);
+    if (!latest) {
+      return c.json(errorBody('fund_not_found', `没有代码为 ${code} 的基金净值数据`), 404);
+    }
+    return c.json(latest, 200);
+  });
+
+  app.openapi(navHistoryRoute, async (c) => {
+    const { code } = c.req.valid('param');
+    const { range } = c.req.valid('query');
+    const points = await nav.history(code, range);
+    if (points === null) {
+      return c.json(errorBody('fund_not_found', `没有代码为 ${code} 的基金净值数据`), 404);
+    }
+    return c.json({ points }, 200);
+  });
+
+  app.openapi(marketStatusRoute, async (c) => {
+    const now = resolved.clock.now();
+    return c.json(
+      { status: marketStatus(now, resolved.tradingCalendar), time: now.toISOString() },
+      200,
+    );
   });
 
   app.notFound((c) => c.json(errorBody('not_found', `未找到 ${c.req.path}`), 404));

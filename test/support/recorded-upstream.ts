@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -12,6 +12,10 @@ const FIXTURES = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../
 /** 读取一份录制的上游响应体。 */
 export function sample(name: string): string {
   return readFileSync(path.join(FIXTURES, name), 'utf8');
+}
+
+function exists(name: string): boolean {
+  return existsSync(path.join(FIXTURES, name));
 }
 
 /** 对一个上游请求的回放：返回响应体文本，或抛出给定的上游错误。 */
@@ -55,7 +59,7 @@ const BASE_INFO_SAMPLES: Record<string, string> = {
   '999999': 'eastmoney/base-999999.json',
 };
 
-/** 东方财富的录制样本：基金搜索与基金基础信息。 */
+/** 东方财富的录制样本：基金搜索、基金基础信息与净值。 */
 export const eastmoneySamples: Replay = (url) => {
   if (url.hostname === 'fundsuggest.eastmoney.com') {
     const file = SEARCH_SAMPLES[url.searchParams.get('key') ?? ''];
@@ -65,7 +69,26 @@ export const eastmoneySamples: Replay = (url) => {
     const file = BASE_INFO_SAMPLES[url.searchParams.get('FCODE') ?? ''];
     if (file) return sample(file);
   }
+  if (url.hostname === 'api.fund.eastmoney.com') {
+    const code = url.searchParams.get('fundCode') ?? '';
+    const pageSize = url.searchParams.get('pageSize');
+    const pageIndex = url.searchParams.get('pageIndex') ?? '1';
+    if (pageSize === '1') {
+      const file = NAV_LATEST_SAMPLES[code];
+      if (file) return sample(file);
+    }
+    if (pageSize === '20') {
+      const startDate = url.searchParams.get('startDate') ?? '';
+      const file = `eastmoney/nav-${code}-history-${startDate}-p${pageIndex}.json`;
+      if (exists(file)) return sample(file);
+    }
+  }
   throw new Error(`no recorded sample for ${url.href}`);
+};
+
+const NAV_LATEST_SAMPLES: Record<string, string> = {
+  '000001': 'eastmoney/nav-000001-latest.json',
+  '999999': 'eastmoney/nav-999999-latest.json',
 };
 
 /** 所有上游请求都失败（默认是超时）。 */

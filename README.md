@@ -50,11 +50,14 @@ docker compose up -d
 - `GET /v1/openapi` — 由请求/响应 schema 自动生成的 OpenAPI 文档（JSON）。
 - `GET /v1/funds/search?q=` — 基金搜索，按基金代码、名称或拼音首字母匹配，只返回基金（过滤上游混入的股票、指数）。
 - `GET /v1/funds/{code}` — 基金基础信息：名称、代码、类别（`domestic` 境内 / `qdii` / `etf_feeder` ETF 联接，QDII 的 ETF 联接归为 `qdii`）与 T+N 确认规则；上游取不到 T+N 时按类别默认（境内与 ETF 联接 T+1，QDII T+2），并以 `settlement.source` 标明来源。
+- `GET /v1/funds/{code}/nav` — 基金最新净值：单位净值、累计净值、净值日期与当日涨跌幅（净值保留 4 位小数，用字符串表示以规避二进制浮点误差）。
+- `GET /v1/funds/{code}/nav/history?range=1m|3m|1y` — 基金历史净值走势，按区间（近 1 月 / 3 月 / 1 年）返回净值序列（最新在前）。
+- `GET /v1/market/status` — 市场状态：`trading` 交易中、`closed` 已收盘、`holiday` 休市、`pre_market` 盘前。四种状态都是显式枚举，不以 0 表示。
 
 ### 行情接口
 
 - **匿名只读 + 限流：** `/v1/funds/*` 不需要登录，按客户端 IP 每分钟 60 次（固定窗口，进程内），超出返回 429 `rate_limited` 与 `Retry-After`。客户端 IP 取 `X-Forwarded-For` 的最右一项（部署时 core 位于 Caddy 之后，由 Caddy 追加），没有该请求头时取连接对端地址；因此 core 不应绕过 Caddy 直接暴露在公网上。
-- **缓存：** 搜索结果按 Asia/Shanghai 日期在进程内缓存一天（空结果也缓存，上游失败不缓存），到上海时间零点失效。
+- **缓存：** 搜索结果按 Asia/Shanghai 日期在进程内缓存一天（空结果也缓存，上游失败不缓存），到上海时间零点失效。净值缓存到当天净值公布窗口（以 19:00 Asia/Shanghai 为界，公布前的请求沿用上一个公布日的缓存，公布窗口一到即重新抓取）。
 - **统一上游抓取适配器：** 所有上游请求都经过 `src/market/upstream.ts` 的 `UpstreamFetcher`。默认实现 `HttpUpstreamFetcher` 负责浏览器请求头与各上游的 Referer、超时（5 秒）、重试（超时、网络错误、5xx、429、空响应体最多再试 2 次，其他 4xx 不重试）和编码（请求指定或按 `Content-Type` 的 charset 解码，支持 GBK）。上游失败统一返回 502 `upstream_unavailable`，诊断详情只写服务端日志。上游地址属于行情模块内部细节。
 - **测试：** 适配器通过 `createApp({ upstream })` 整体替换为 `test/support/recorded-upstream.ts` 的录制样本回放（样本说明见 `test/fixtures/upstream/README.md`）。
 
@@ -77,7 +80,25 @@ pnpm test:watch  # watch 模式
 
 ## 依赖注入
 
-时钟（`Clock`）、交易日历（`TradingCalendar`）与统一上游抓取适配器（`UpstreamFetcher`）是可注入的依赖，默认实现是 `SystemClock`、`ChineseTradingCalendar`（按 Asia/Shanghai 判断交易日；节假日导入在后续票据补齐）与 `HttpUpstreamFetcher`。测试可注入替身，例如固定时钟。
+时钟（`Clock`）、交易日历（`TradingCalendar`）与统一上游抓取适配器（`UpstreamFetcher`）是可注入的依赖，默认实现是 `SystemClock`、`ChineseTradingCalendar`（按 Asia/Shanghai 判断工作日，并排除已导入的休市日）与 `HttpUpstreamFetcher`。测试可注入替身，例如固定时钟。
+
+## 交易日历
+
+A 股交易日历由 core 自己维护：休市日按年导入到 `trading_holidays` 表，`ChineseTradingCalendar` 在判断交易日时排除这些日期（周末恒为休市，不需要导入）。仓库内置了 `data/holidays/2026.json`（2026 年工作日休市日，来源为上海证券交易所的年度休市安排）。
+
+- 导入某一年（默认读取 `data/holidays/<年份>.json`，重复执行幂等）：
+
+  ```bash
+  pnpm trading-calendar:import 2026
+  ```
+
+- 导入自定义文件：
+
+  ```bash
+  pnpm trading-calendar:import 2026 --file /path/to/holidays.json
+  ```
+
+- 启动服务时 `src/index.ts` 会从 `trading_holidays` 表加载已导入的休市日，注入给 `ChineseTradingCalendar`，供市场状态等接口使用。
 
 ## 错误结构
 
@@ -85,13 +106,14 @@ pnpm test:watch  # watch 模式
 
 ## 常用脚本
 
-| 命令                      | 说明                       |
-| ------------------------- | -------------------------- |
-| `pnpm dev` / `pnpm start` | 启动服务（watch / 单次）   |
-| `pnpm typecheck`          | 类型检查（`tsc --noEmit`） |
-| `pnpm lint`               | ESLint                     |
-| `pnpm format:check`       | 格式检查（Prettier）       |
-| `pnpm db:generate`        | 生成迁移 SQL               |
-| `pnpm db:migrate`         | 应用迁移                   |
-| `pnpm test`               | 全部测试                   |
-| `docker compose up -d`    | 起本地开发数据库           |
+| 命令                                | 说明                       |
+| ----------------------------------- | -------------------------- |
+| `pnpm dev` / `pnpm start`           | 启动服务（watch / 单次）   |
+| `pnpm typecheck`                    | 类型检查（`tsc --noEmit`） |
+| `pnpm lint`                         | ESLint                     |
+| `pnpm format:check`                 | 格式检查（Prettier）       |
+| `pnpm db:generate`                  | 生成迁移 SQL               |
+| `pnpm db:migrate`                   | 应用迁移                   |
+| `pnpm trading-calendar:import 2026` | 按年导入休市日             |
+| `pnpm test`                         | 全部测试                   |
+| `docker compose up -d`              | 起本地开发数据库           |

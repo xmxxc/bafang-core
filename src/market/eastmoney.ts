@@ -6,6 +6,8 @@ import { UpstreamError, type UpstreamFetcher } from './upstream';
 const REFERER = 'https://fund.eastmoney.com/';
 const SEARCH_URL = 'https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchAPI.ashx';
 const BASE_INFO_URL = 'https://fundmobapi.eastmoney.com/FundMApi/FundBaseTypeInformation.ashx';
+const NAV_REFERER = 'https://fundf10.eastmoney.com/';
+const NAV_URL = 'https://api.fund.eastmoney.com/f10/lsjz';
 
 /** 搜索接口里基金条目的 CATEGORY；其余是股票、指数等。 */
 const FUND_CATEGORY = 700;
@@ -119,4 +121,64 @@ function parse<T extends { ErrCode: number }>(schema: z.ZodType<T>, text: string
     throw new UpstreamError('bad_response', `upstream returned ErrCode ${result.data.ErrCode}`);
   }
   return result.data;
+}
+
+const NavResponseSchema = z.object({
+  ErrCode: z.number(),
+  Data: z
+    .object({
+      LSJZList: z
+        .array(
+          z.object({
+            FSRQ: z.string(),
+            DWJZ: z.string(),
+            LJJZ: z.string().nullish(),
+            JZZZL: z.string().nullish(),
+          }),
+        )
+        .nullish(),
+    })
+    .nullish(),
+});
+
+export interface UpstreamNavPoint {
+  /** 净值日期，YYYY-MM-DD。 */
+  date: string;
+  /** 单位净值，保留 4 位小数的字符串。 */
+  unitNav: string;
+  /** 累计净值，缺失时为 null。 */
+  cumulativeNav: string | null;
+  /** 当日涨跌幅（百分比），无前一日净值时为 0。 */
+  dailyChange: number;
+}
+
+/** 抓取一页历史净值（按日期倒序，最新在前）。 */
+export async function fetchNavPage(
+  upstream: UpstreamFetcher,
+  code: string,
+  pageIndex: number,
+  pageSize: number,
+  startDate?: string,
+): Promise<UpstreamNavPoint[]> {
+  const url = new URL(NAV_URL);
+  url.searchParams.set('fundCode', code);
+  url.searchParams.set('pageIndex', String(pageIndex));
+  url.searchParams.set('pageSize', String(pageSize));
+  if (startDate) url.searchParams.set('startDate', startDate);
+  const body = parse(
+    NavResponseSchema,
+    await upstream.fetchText({ url: url.href, referer: NAV_REFERER }),
+  );
+  return (body.Data?.LSJZList ?? []).map((item) => ({
+    date: item.FSRQ,
+    unitNav: item.DWJZ,
+    cumulativeNav: item.LJJZ ?? null,
+    dailyChange: parsePercent(item.JZZZL),
+  }));
+}
+
+function parsePercent(value: string | null | undefined): number {
+  if (value === null || value === undefined || value === '') return 0;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
