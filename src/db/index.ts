@@ -11,6 +11,8 @@ export type DbConfig = {
   user: string;
   password: string;
   database: string;
+  /** 可选的 PostgreSQL schema；设置后连接使用该 search_path。 */
+  schema?: string;
 };
 
 export const MIGRATIONS_FOLDER = path.resolve(
@@ -25,6 +27,7 @@ export function createPool(config: DbConfig): Pool {
     user: config.user,
     password: config.password,
     database: config.database,
+    options: config.schema ? `-c search_path=${config.schema}` : undefined,
   });
 }
 

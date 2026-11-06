@@ -8,6 +8,13 @@
       "when": 1793893580511,
       "tag": "0000_quick_colleen_wing",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1793946831416,
+      "tag": "0001_redundant_prowler",
+      "breakpoints": true
     }
   ]
 }

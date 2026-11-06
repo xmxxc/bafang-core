@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { ErrorResponseSchema } from '../errors';
 
-const FundCodeSchema = z
+export const FundCodeSchema = z
   .string()
   .regex(/^\d{6}$/, '基金代码为 6 位数字')
   .openapi({ example: '000001', description: '6 位基金代码' });

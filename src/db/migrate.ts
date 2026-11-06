@@ -5,7 +5,7 @@ async function main() {
   const config = loadConfig();
   const pool = createPool(toDbConfig(config));
   try {
-    await migrateSchema(pool, MIGRATIONS_FOLDER, 'public');
+    await migrateSchema(pool, MIGRATIONS_FOLDER, config.PGSCHEMA ?? 'public');
     console.log('migrations applied');
   } finally {
     await pool.end();
