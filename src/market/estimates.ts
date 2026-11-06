@@ -83,9 +83,10 @@ interface CacheEntry {
  *
  * 基准核对：一条估值只有当它的基准净值就是「估值日期之前最近一期已公布净值」时才采纳，
  * 否则它估的是一个已经结算过的交易日（例如 QDII 净值晚到、来源还在用更早的基准），按无估值处理：
- * 一级过期就回退二级，二级也过期就是 unavailable。来源没给基准（天天基金在当天净值公布后）时
- * 不核对。净值模块取不到时（上游失败或没有净值数据）不因此判为不可用：照常采纳，但只按短缓存
- * 持有，净值恢复后会重新核对。
+ * 一级过期就回退二级，二级也过期就是 unavailable。核对不了的估值同样不采纳：来源没给出可核对的
+ * 基准（见 estimate-sources），或者净值模块给不出期望的基准（净值上游失败且没有缓存、基金没有
+ * 净值数据）。净值模块自己的缓存仍可用，所以此前已取到的净值在净值上游故障期间照常用于核对。
+ * 因此被采纳的估值一定核对过基准，收盘估值可以放心长缓存。
  *
  * 缓存先放在进程内，按基金代码作键、带到期时间，以后换成 Redis 时用同样的键与 TTL 即可。
  */
@@ -130,24 +131,20 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
             ? await verify(
                 await trySource('sina', () => fetchSinaEstimates(deps.upstream, rest, today)),
               )
-            : new Map<string, Accepted>();
+            : new Map<string, SourceEstimate>();
 
         const closeAt = new Date(`${today}T15:00:00+08:00`).getTime();
         const nextOpenMs = nextMarketOpen(now, deps.calendar).getTime();
         for (const code of missing) {
           const fromPrimary = primary.get(code);
           const fromSecondary = secondary.get(code);
-          const accepted = fromPrimary ?? fromSecondary;
           const estimate = fromPrimary
-            ? toEstimate(fromPrimary.source, 'tiantian', false)
+            ? toEstimate(fromPrimary, 'tiantian', false)
             : fromSecondary
-              ? toEstimate(fromSecondary.source, 'sina', true)
+              ? toEstimate(fromSecondary, 'sina', true)
               : null;
           const closingEstimate =
-            status === 'closed' &&
-            estimate !== null &&
-            accepted?.baseChecked === true &&
-            Date.parse(estimate.time) >= closeAt;
+            status === 'closed' && estimate !== null && Date.parse(estimate.time) >= closeAt;
           remember(code, {
             estimate,
             expiresAt: closingEstimate ? nextOpenMs : nowMs + TRADING_TTL_MS,
@@ -184,14 +181,9 @@ function toEstimate(source: SourceEstimate, name: EstimateSource, fallback: bool
   };
 }
 
-interface Accepted {
-  source: SourceEstimate;
-  /** 基准已核对（或来源没给基准、无需核对）；false 表示净值取不到、暂未核对。 */
-  baseChecked: boolean;
-}
-
 /**
- * 按「估值日期之前最近一期已公布净值」核对每条估值的基准，去掉过期的估值。
+ * 按「估值日期之前最近一期已公布净值」核对每条估值的基准，只留下基准相符的估值；
+ * 过期的、以及期望基准查不到（净值上游失败或没有净值数据）的估值都去掉。
  * 同一批次里对同一只基金的净值查询只做一次。
  */
 function baseVerifier(nav: NavService) {
@@ -203,7 +195,7 @@ function baseVerifier(nav: NavService) {
     if (!lookup) {
       lookup = nav.latestBefore(code, date).catch((error: unknown) => {
         if (!(error instanceof UpstreamError)) throw error;
-        console.warn('[bafang-core] estimate base check skipped', code, error.kind, error.message);
+        console.warn('[bafang-core] estimate base unavailable', code, error.kind, error.message);
         return null;
       });
       lookups.set(key, lookup);
@@ -211,20 +203,19 @@ function baseVerifier(nav: NavService) {
     return lookup;
   }
 
-  return async (candidates: Map<string, SourceEstimate>): Promise<Map<string, Accepted>> => {
+  return async (candidates: Map<string, SourceEstimate>): Promise<Map<string, SourceEstimate>> => {
     const checked = await Promise.all(
-      [...candidates].map(async ([code, source]): Promise<[string, Accepted | null]> => {
-        if (!source.base) return [code, { source, baseChecked: true }];
+      [...candidates].map(async ([code, source]) => {
         const expected = await expectedBase(code, shanghaiDate(source.time));
-        if (!expected) return [code, { source, baseChecked: false }];
         const matches =
+          expected !== null &&
           formatNav(expected.unitNav) === source.base.unitNav &&
           (source.base.date === null || source.base.date === expected.date);
-        return [code, matches ? { source, baseChecked: true } : null];
+        return [code, matches ? source : null] as const;
       }),
     );
-    const accepted = new Map<string, Accepted>();
-    for (const [code, entry] of checked) if (entry) accepted.set(code, entry);
+    const accepted = new Map<string, SourceEstimate>();
+    for (const [code, source] of checked) if (source) accepted.set(code, source);
     return accepted;
   };
 }

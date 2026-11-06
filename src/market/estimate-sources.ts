@@ -15,10 +15,10 @@ export interface SourceEstimate {
   /** 估值时间。 */
   time: Date;
   /**
-   * 来源给出的估值基准：估值是在这一期单位净值上推算的涨跌。
-   * date 为 null 表示来源只给了基准净值、没给日期；整个 base 为 null 表示来源的响应里没有基准。
+   * 来源给出的估值基准：估值是在这一期单位净值上推算的涨跌。没有可核对基准的估值不会出现在
+   * 结果里。date 为 null 表示来源只给了基准净值、没给日期（新浪）。
    */
-  base: { unitNav: string; date: string | null } | null;
+  base: { unitNav: string; date: string | null };
 }
 
 const TIANTIAN_URL = 'https://fundcomapi.tiantianfunds.com/mm/newCore/FundValuationLast';
@@ -46,9 +46,12 @@ const TiantianRowSchema = z.object({
 });
 
 /**
- * 天天基金批量估值。行里的 NAV / PDATE 是天天基金已知的最近一期净值：PDATE 早于估值日期时，
- * 它就是这条估值的基准，作为 base 交给调用方核对；PDATE 已经是估值当天（当天净值已公布）时，
- * 行里不再有基准，base 为 null。
+ * 天天基金批量估值。行里的 NAV / PDATE 是天天基金已知的最近一期净值。只有 PDATE 是合法日期、
+ * 严格早于估值日期，且 NAV 合法时，它才是这条估值的基准，交给调用方核对。
+ * 其余情况都没有可核对的基准，这条估值不采纳、由调用方回退：
+ * - NAV 或 PDATE 缺失、不可解析；
+ * - PDATE 晚于估值日期（数据自相矛盾）；
+ * - PDATE 等于估值日期：当天净值已公布，行里只剩当天净值，看不出估值用的是哪一期基准。
  * 返回有当天估值的基金；上游没给、字段缺失或不是当天的估值都不在结果里，
  * 由调用方回退。整个请求失败（网络、非 JSON、success 为 false）时抛出 UpstreamError。
  */
@@ -73,10 +76,8 @@ export async function fetchTiantianEstimates(
     const [date, time] = (row.data.GZTIME ?? '').trim().split(/\s+/);
     const navDate = row.data.PDATE?.trim() ?? '';
     const baseNav = formatNav(row.data.NAV);
-    const base =
-      date && /^\d{4}-\d{2}-\d{2}$/.test(navDate) && navDate < date && baseNav
-        ? { unitNav: baseNav, date: navDate }
-        : null;
+    if (!date || !isIsoDate(navDate) || navDate >= date || !baseNav) continue;
+    const base = { unitNav: baseNav, date: navDate };
     const estimate = toEstimate(row.data.GSZZL, row.data.GSZ, date, time, today, base);
     if (estimate) result.set(row.data.FCODE, estimate);
   }
@@ -136,6 +137,13 @@ function toEstimate(
   const at = new Date(`${date}T${time.length === 5 ? `${time}:00` : time}+08:00`);
   if (Number.isNaN(at.getTime())) return null;
   return { changePercent: change, value: value.toFixed(4), time: at, base };
+}
+
+/** 是否为真实存在的 YYYY-MM-DD 日期。 */
+function isIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 /** 把单位净值规整成 4 位小数字符串；缺失、不可解析或不为正时返回 null。 */
