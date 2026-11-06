@@ -24,7 +24,6 @@ const shanghaiTimeFormatter = new Intl.DateTimeFormat('en-US', {
   timeZone: 'Asia/Shanghai',
   hour: 'numeric',
   minute: 'numeric',
-  hour12: false,
   hourCycle: 'h23',
 });
 

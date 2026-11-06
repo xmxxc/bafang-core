@@ -66,7 +66,11 @@ export function createApp(deps: AppDeps = {}): App {
   });
 
   const funds = createFundService({ upstream: resolved.upstream, clock: resolved.clock });
-  const nav = createNavService({ upstream: resolved.upstream, clock: resolved.clock });
+  const nav = createNavService({
+    upstream: resolved.upstream,
+    clock: resolved.clock,
+    calendar: resolved.tradingCalendar,
+  });
   const marketRateLimit = rateLimit(ANONYMOUS_MARKET_RATE_LIMIT, resolved.clock);
   app.use('/v1/funds/*', marketRateLimit);
   app.use('/v1/market/*', marketRateLimit);

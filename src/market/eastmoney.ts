@@ -148,8 +148,8 @@ export interface UpstreamNavPoint {
   unitNav: string;
   /** 累计净值，缺失时为 null。 */
   cumulativeNav: string | null;
-  /** 当日涨跌幅（百分比），无前一日净值时为 0。 */
-  dailyChange: number;
+  /** 当日涨跌幅（百分比），上游缺失或不可解析时为 null。 */
+  dailyChange: number | null;
 }
 
 /** 抓取一页历史净值（按日期倒序，最新在前）。 */
@@ -177,8 +177,14 @@ export async function fetchNavPage(
   }));
 }
 
-function parsePercent(value: string | null | undefined): number {
-  if (value === null || value === undefined || value === '') return 0;
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : 0;
+/**
+ * 解析当日涨跌幅。上游在无前一日净值或数据缺失时会给出 null、缺失、空串或「--」等占位，
+ * 这些都不是「涨跌幅为 0」，而是「无涨跌幅」，因此返回 null 以明确区分；真实的 0% 仍是 0。
+ */
+function parsePercent(value: string | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  if (trimmed === '' || trimmed === '--') return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
 }

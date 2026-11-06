@@ -47,6 +47,16 @@ describe('GET /v1/market/status over in-process HTTP', () => {
     expect(((await res.json()) as MarketStatusResponse).status).toBe('pre_market');
   });
 
+  it('reports pre_market in the hour just after midnight on a trading day', async () => {
+    // 2026-11-06 00:30 Asia/Shanghai; before the fix this was misread as 24:30 and became closed.
+    const res = await app(
+      { tradingCalendar: alwaysTrading },
+      fixedClock('2026-11-05T16:30:00.000Z'),
+    ).request('/v1/market/status');
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as MarketStatusResponse).status).toBe('pre_market');
+  });
+
   it('reports trading during 09:30–15:00 on a trading day', async () => {
     const res = await app(
       { tradingCalendar: alwaysTrading },

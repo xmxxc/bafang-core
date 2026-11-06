@@ -15,9 +15,9 @@ const NavAmountSchema = z
     description: '净值，保留最多 4 位小数；用字符串表示以规避二进制浮点误差',
   });
 
-const NavDailyChangeSchema = z.number().openapi({
+const NavDailyChangeSchema = z.number().nullable().openapi({
   example: 1.83,
-  description: '当日涨跌幅（百分比）；无前一日净值时为 0',
+  description: '当日涨跌幅（百分比）；上游缺失或不可解析时为 null，表示无涨跌幅',
 });
 
 export const LatestNavSchema = z
@@ -65,7 +65,7 @@ export const latestNavRoute = createRoute({
   tags: ['market'],
   summary: '基金最新净值',
   description:
-    '返回最新已公布的单位净值、净值日期与当日涨跌幅（含累计净值）。匿名可用并限流；结果缓存到当天净值公布窗口。',
+    '返回最新已公布的单位净值、净值日期与当日涨跌幅（含累计净值）。匿名可用并限流；结果缓存到当天净值公布窗口，窗口内当天净值尚未公布时按短间隔重新抓取。',
   request: {
     params: z.object({ code: FundCodeSchema }),
   },
