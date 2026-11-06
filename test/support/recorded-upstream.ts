@@ -95,3 +95,26 @@ const NAV_LATEST_SAMPLES: Record<string, string> = {
 export function upstreamDown(error = new UpstreamError('timeout', 'recorded timeout')): Replay {
   return () => error;
 }
+
+/**
+ * 股票与指数行情的录制样本：腾讯批量报价（主来源）与同花顺快照、分时（备用）。
+ * 腾讯样本含四个指数，替身原样返回，由适配器按请求的代码取用。
+ */
+export const quoteSamples: Replay = (url) => {
+  if (url.hostname === 'qt.gtimg.cn') return sample('tencent/indices.txt');
+  if (url.hostname === 'd.10jqka.com.cn') {
+    const match = /^\/v6\/(realhead|time)\/([A-Za-z0-9_]+)\/last\.js$/.exec(url.pathname);
+    const file = match ? `ths/${match[1]}-${match[2]}.jsonp` : '';
+    if (file && exists(file)) return sample(file);
+  }
+  throw new Error(`no recorded sample for ${url.href}`);
+};
+
+/** 对某个上游主机的请求一律失败（默认超时），其余按给定回放处理。 */
+export function hostDown(
+  hostname: string,
+  replay: Replay,
+  error = new UpstreamError('timeout', 'recorded timeout'),
+): Replay {
+  return (url) => (url.hostname === hostname ? error : replay(url));
+}

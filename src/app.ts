@@ -7,9 +7,11 @@ import { healthRoute } from './routes/health';
 import { fundDetailRoute, fundSearchRoute } from './routes/funds';
 import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
+import { marketIndicesRoute } from './routes/market-indices';
 import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
 import { marketStatus } from './market/status';
+import { createIndexService } from './market/indices';
 import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
 import { ANONYMOUS_MARKET_RATE_LIMIT, rateLimit } from './rate-limit';
 
@@ -114,6 +116,16 @@ export function createApp(deps: AppDeps = {}): App {
       { status: marketStatus(now, resolved.tradingCalendar), time: now.toISOString() },
       200,
     );
+  });
+
+  const indices = createIndexService({
+    upstream: resolved.upstream,
+    clock: resolved.clock,
+    calendar: resolved.tradingCalendar,
+  });
+  app.openapi(marketIndicesRoute, async (c) => {
+    const items = await indices.list();
+    return c.json({ items, time: resolved.clock.now().toISOString() }, 200);
   });
 
   app.notFound((c) => c.json(errorBody('not_found', `未找到 ${c.req.path}`), 404));

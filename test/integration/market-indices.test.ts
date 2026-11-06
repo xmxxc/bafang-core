@@ -1,0 +1,455 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createApp, type AppDeps } from '../../src/app';
+import { createHealthProbe } from '../../src/db';
+import { UpstreamError } from '../../src/market/upstream';
+import type { MarketIndexResponse, MarketIndicesResponse } from '../../src/routes/market-indices';
+import { ChineseTradingCalendar } from '../../src/trading-calendar';
+import {
+  hostDown,
+  quoteSamples,
+  RecordedUpstream,
+  sample,
+  upstreamDown,
+  type Replay,
+} from '../support/recorded-upstream';
+import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
+
+function movableClock(iso: string) {
+  let now = new Date(iso);
+  return {
+    now: () => now,
+    set: (next: string) => {
+      now = new Date(next);
+    },
+  };
+}
+
+const TENCENT = 'qt.gtimg.cn';
+
+/** 录制样本（2026-11-06 收盘后）里的四个指数，按腾讯来源。 */
+const TENCENT_CLOSE = {
+  '000001.SH': {
+    point: '3649.18',
+    prevClose: '3689.91',
+    change: '-40.73',
+    changePercent: -1.1,
+    quoteTime: '2026-11-06T08:14:01.000Z',
+  },
+  '399001.SZ': {
+    point: '11175.78',
+    prevClose: '11471.09',
+    change: '-295.31',
+    changePercent: -2.57,
+    quoteTime: '2026-11-06T08:14:42.000Z',
+  },
+  '399006.SZ': {
+    point: '2465.23',
+    prevClose: '2566.80',
+    change: '-101.57',
+    changePercent: -3.96,
+    quoteTime: '2026-11-06T08:14:57.000Z',
+  },
+  'HSI.HK': {
+    point: '24481.86',
+    prevClose: '24796.98',
+    change: '-315.12',
+    changePercent: -1.27,
+    quoteTime: '2026-11-06T10:30:50.000Z',
+  },
+} as const;
+
+/** 同花顺分时的最后一个点：A 股 15:00，港股 16:10。 */
+const THS_QUOTE_TIME = {
+  '000001.SH': '2026-11-06T07:00:00.000Z',
+  '399001.SZ': '2026-11-06T07:00:00.000Z',
+  '399006.SZ': '2026-11-06T07:00:00.000Z',
+  'HSI.HK': '2026-11-06T08:10:00.000Z',
+} as const;
+
+const CODES = ['000001.SH', '399001.SZ', '399006.SZ', 'HSI.HK'] as const;
+
+/** 改写腾讯样本：去掉或替换某只证券的那一行。 */
+function tencentWith(symbol: string, line: string | null): Replay {
+  return (url) => {
+    if (url.hostname !== TENCENT) return quoteSamples(url);
+    const kept = sample('tencent/indices.txt')
+      .split('\n')
+      .map((row) => (row.startsWith(`v_${symbol}=`) ? line : row))
+      .filter((row): row is string => row !== null);
+    return kept.join('\n');
+  };
+}
+
+describe('GET /v1/market/indices over in-process HTTP against a real PostgreSQL test database', () => {
+  let db: TestSchema;
+  let upstream: RecordedUpstream;
+  let clock: ReturnType<typeof movableClock>;
+
+  function app(deps: AppDeps = {}) {
+    return createApp({
+      db: createHealthProbe(db.pool),
+      upstream,
+      clock,
+      tradingCalendar: new ChineseTradingCalendar(),
+      ...deps,
+    });
+  }
+
+  async function indices(target = app()): Promise<MarketIndicesResponse> {
+    const res = await target.request('/v1/market/indices');
+    expect(res.status).toBe(200);
+    return (await res.json()) as MarketIndicesResponse;
+  }
+
+  function byCode(body: MarketIndicesResponse, code: string): MarketIndexResponse {
+    const item = body.items.find((entry) => entry.code === code);
+    if (!item) throw new Error(`index ${code} missing`);
+    return item;
+  }
+
+  beforeEach(async () => {
+    db = await createTestSchema();
+    upstream = new RecordedUpstream(quoteSamples);
+    // Friday 2026-11-06 21:00 Asia/Shanghai — both markets have closed for the day.
+    clock = movableClock('2026-11-06T13:00:00.000Z');
+  });
+
+  afterEach(async () => {
+    await dropTestSchema(db);
+  });
+
+  describe('primary source', () => {
+    it('returns point, change and change percent for the four indices from Tencent', async () => {
+      const body = await indices();
+      expect(body.time).toBe('2026-11-06T13:00:00.000Z');
+      expect(body.items.map((item) => [item.code, item.name, item.market])).toEqual([
+        ['000001.SH', '上证指数', 'cn'],
+        ['399001.SZ', '深证成指', 'cn'],
+        ['399006.SZ', '创业板指', 'cn'],
+        ['HSI.HK', '恒生指数', 'hk'],
+      ]);
+      for (const code of CODES) {
+        expect(byCode(body, code)).toEqual({
+          code,
+          name: expect.any(String),
+          market: code === 'HSI.HK' ? 'hk' : 'cn',
+          marketStatus: 'closed',
+          available: true,
+          ...TENCENT_CLOSE[code],
+          tradeDate: '2026-11-06',
+          source: 'tencent',
+          fallback: false,
+        });
+      }
+    });
+
+    it('reports trading for both markets during the morning session', async () => {
+      clock.set('2026-11-06T02:00:00.000Z'); // Friday 10:00
+      const body = await indices();
+      for (const code of CODES) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'trading',
+          available: true,
+          source: 'tencent',
+        });
+      }
+    });
+
+    it('keeps Hong Kong trading after the A-share close, until 16:10', async () => {
+      clock.set('2026-11-06T07:30:00.000Z'); // Friday 15:30
+      const afternoon = await indices();
+      expect(byCode(afternoon, '000001.SH').marketStatus).toBe('closed');
+      expect(byCode(afternoon, 'HSI.HK').marketStatus).toBe('trading');
+
+      clock.set('2026-11-06T08:15:00.000Z'); // Friday 16:15
+      expect(byCode(await indices(app()), 'HSI.HK').marketStatus).toBe('closed');
+    });
+  });
+
+  describe('fallback to the backup source', () => {
+    it.each<[string, Replay]>([
+      ['times out', hostDown(TENCENT, quoteSamples)],
+      [
+        'responds 502',
+        hostDown(TENCENT, quoteSamples, new UpstreamError('http_status', 'recorded 502', 502)),
+      ],
+      [
+        'returns an unrecognizable body',
+        (url) => (url.hostname === TENCENT ? '<html>busy</html>' : quoteSamples(url)),
+      ],
+    ])('falls back to 同花顺 for every index when Tencent %s', async (_name, replay) => {
+      upstream.use(replay);
+      const body = await indices();
+      for (const code of CODES) {
+        const values = { ...TENCENT_CLOSE[code], quoteTime: THS_QUOTE_TIME[code] };
+        expect(byCode(body, code)).toMatchObject({
+          ...values,
+          tradeDate: '2026-11-06',
+          available: true,
+          marketStatus: 'closed',
+          source: 'ths',
+          fallback: true,
+        });
+      }
+    });
+
+    it('falls back only for the index Tencent did not return', async () => {
+      upstream.use(tencentWith('hkHSI', 'v_pv_none_match="1";'));
+      const body = await indices();
+      expect(byCode(body, 'HSI.HK')).toMatchObject({
+        point: '24481.86',
+        change: '-315.12',
+        source: 'ths',
+        fallback: true,
+      });
+      for (const code of ['000001.SH', '399001.SZ', '399006.SZ']) {
+        expect(byCode(body, code)).toMatchObject({ source: 'tencent', fallback: false });
+      }
+    });
+
+    it.each([
+      [
+        'a placeholder price',
+        'v_sh000001="1~上证指数~000001~--~3689.91~~~~~~~~~~~~~~~~~~~~~~~~~~~~20261106161401~~~";',
+      ],
+      [
+        'a zero price',
+        'v_sh000001="1~上证指数~000001~0.00~3689.91~~~~~~~~~~~~~~~~~~~~~~~~~~~~20261106161401~~~";',
+      ],
+      ['a missing quote time', 'v_sh000001="1~上证指数~000001~3649.18~3689.91";'],
+    ])('falls back when Tencent gives %s instead of a usable quote', async (_name, line) => {
+      upstream.use(tencentWith('sh000001', line));
+      const body = await indices();
+      expect(byCode(body, '000001.SH')).toMatchObject({
+        point: '3649.18',
+        change: '-40.73',
+        changePercent: -1.1,
+        source: 'ths',
+        fallback: true,
+      });
+      expect(byCode(body, '399001.SZ').source).toBe('tencent');
+    });
+
+    it('rejects a 同花顺 quote whose previous close disagrees with its snapshot (stale CDN node)', async () => {
+      // Recorded anomaly: the intraday response carried a months-old previous close (26361.07)
+      // with today's prices, which would otherwise show a fake −7% day.
+      upstream.use((url) => {
+        if (url.hostname === TENCENT) return new UpstreamError('timeout', 'recorded timeout');
+        if (url.pathname === '/v6/time/hk_HSI/last.js') {
+          return sample('ths/time-hk_HSI-stale-pre.jsonp');
+        }
+        return quoteSamples(url);
+      });
+      const body = await indices();
+      expect(byCode(body, 'HSI.HK')).toMatchObject({
+        available: false,
+        point: null,
+        change: null,
+        changePercent: null,
+        source: null,
+      });
+      expect(byCode(body, '000001.SH')).toMatchObject({ available: true, source: 'ths' });
+    });
+
+    it('rejects a 同花顺 quote whose snapshot price is far from its intraday price', async () => {
+      // Both responses stale in the recorded way: the snapshot is a months-old pair (26519.50 over
+      // 26361.07) and the intraday previous close matches it, but the intraday prices are today's.
+      upstream.use((url) => {
+        if (url.hostname === TENCENT) return new UpstreamError('timeout', 'recorded timeout');
+        if (url.pathname === '/v6/time/hk_HSI/last.js') {
+          return sample('ths/time-hk_HSI-stale-pre.jsonp');
+        }
+        if (url.pathname === '/v6/realhead/hk_HSI/last.js') {
+          return sample('ths/realhead-hk_HSI.jsonp')
+            .replace('"10":"24481.86"', '"10":"26519.50"')
+            .replace('"6":"24796.98"', '"6":"26361.07"');
+        }
+        return quoteSamples(url);
+      });
+      expect(byCode(await indices(), 'HSI.HK')).toMatchObject({ available: false, point: null });
+    });
+
+    it('marks an index unavailable when 同花顺 has no intraday points either', async () => {
+      upstream.use((url) => {
+        if (url.hostname === TENCENT) return new UpstreamError('timeout', 'recorded timeout');
+        if (url.pathname === '/v6/time/zs_399006/last.js') {
+          return 'quotebridge_v6_time_zs_399006_last({"zs_399006":{"pre":"2566.80","date":"20261106","data":""}})';
+        }
+        return quoteSamples(url);
+      });
+      const body = await indices();
+      expect(byCode(body, '399006.SZ')).toMatchObject({ available: false, point: null });
+      expect(byCode(body, '399001.SZ')).toMatchObject({ available: true, source: 'ths' });
+    });
+
+    it('marks every index unavailable with null values when both sources fail', async () => {
+      upstream.use(upstreamDown());
+      const body = await indices();
+      for (const code of CODES) {
+        expect(byCode(body, code)).toEqual({
+          code,
+          name: expect.any(String),
+          market: code === 'HSI.HK' ? 'hk' : 'cn',
+          marketStatus: 'closed',
+          available: false,
+          point: null,
+          prevClose: null,
+          change: null,
+          changePercent: null,
+          tradeDate: null,
+          quoteTime: null,
+          source: null,
+          fallback: true,
+        });
+      }
+    });
+  });
+
+  describe('outside trading hours', () => {
+    it("returns Friday's close and holiday for both markets on Saturday", async () => {
+      clock.set('2026-11-07T02:00:00.000Z'); // Saturday 10:00
+      const body = await indices();
+      for (const code of CODES) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'holiday',
+          available: true,
+          tradeDate: '2026-11-06',
+          point: TENCENT_CLOSE[code].point,
+          change: TENCENT_CLOSE[code].change,
+        });
+      }
+    });
+
+    it("returns the previous close and pre_market before Monday's open", async () => {
+      clock.set('2026-11-09T00:00:00.000Z'); // Monday 08:00
+      const body = await indices();
+      for (const code of CODES) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'pre_market',
+          available: true,
+          tradeDate: '2026-11-06',
+          point: TENCENT_CLOSE[code].point,
+        });
+      }
+    });
+
+    it('treats an A-share weekday holiday from the trading calendar as holiday with the last close', async () => {
+      clock.set('2026-11-09T02:00:00.000Z'); // Monday 10:00, closed for A-shares in this calendar
+      const body = await indices(
+        app({ tradingCalendar: new ChineseTradingCalendar(['2026-11-09']) }),
+      );
+      for (const code of ['000001.SH', '399001.SZ', '399006.SZ']) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'holiday',
+          available: true,
+          tradeDate: '2026-11-06',
+          point: TENCENT_CLOSE[code as keyof typeof TENCENT_CLOSE].point,
+        });
+      }
+    });
+
+    it('infers a Hong Kong holiday when no quote for today appears after the open', async () => {
+      clock.set('2026-11-09T01:32:00.000Z'); // Monday 09:32 — still within the grace minutes
+      expect(byCode(await indices(app()), 'HSI.HK')).toMatchObject({
+        marketStatus: 'pre_market',
+        available: true,
+      });
+
+      clock.set('2026-11-09T02:00:00.000Z'); // Monday 10:00 — quote still dated Friday
+      expect(byCode(await indices(app()), 'HSI.HK')).toMatchObject({
+        marketStatus: 'holiday',
+        available: true,
+        tradeDate: '2026-11-06',
+        point: '24481.86',
+      });
+    });
+
+    it('marks A-share indices unavailable rather than showing a stale close during trading hours', async () => {
+      clock.set('2026-11-09T02:00:00.000Z'); // Monday 10:00, a trading day; both sources dated Friday
+      const body = await indices();
+      for (const code of ['000001.SH', '399001.SZ', '399006.SZ']) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'trading',
+          available: false,
+          point: null,
+          source: null,
+          fallback: true,
+        });
+      }
+    });
+
+    it('marks the Hang Seng index unavailable when its quote is more than a week old', async () => {
+      clock.set('2026-11-16T02:00:00.000Z'); // Monday ten days later
+      expect(byCode(await indices(), 'HSI.HK')).toMatchObject({
+        available: false,
+        point: null,
+        change: null,
+      });
+    });
+  });
+
+  describe('caching', () => {
+    it('serves cached quotes for a few minutes after the close, then refetches', async () => {
+      const target = app();
+      const first = await indices(target);
+      upstream.use(upstreamDown());
+
+      clock.set('2026-11-06T13:04:00.000Z');
+      expect((await indices(target)).items).toEqual(first.items);
+
+      clock.set('2026-11-06T13:05:01.000Z');
+      const expired = await indices(target);
+      for (const item of expired.items) expect(item.available).toBe(false);
+    });
+
+    it('caches quotes for only seconds during trading hours', async () => {
+      clock.set('2026-11-06T02:00:00.000Z');
+      const target = app();
+      const first = await indices(target);
+      upstream.use(upstreamDown());
+
+      clock.set('2026-11-06T02:00:09.000Z');
+      expect((await indices(target)).items).toEqual(first.items);
+
+      clock.set('2026-11-06T02:00:10.000Z');
+      for (const item of (await indices(target)).items) expect(item.available).toBe(false);
+    });
+
+    it('retries soon after both sources fail instead of caching unavailable for long', async () => {
+      const target = app();
+      upstream.use(upstreamDown());
+      expect(byCode(await indices(target), '000001.SH').available).toBe(false);
+
+      upstream.use(quoteSamples);
+      clock.set('2026-11-06T13:00:11.000Z');
+      expect(byCode(await indices(target), '000001.SH')).toMatchObject({
+        available: true,
+        source: 'tencent',
+      });
+    });
+
+    it('caches the backup result with the same lifetime as the primary', async () => {
+      const target = app();
+      upstream.use(hostDown(TENCENT, quoteSamples));
+      expect(byCode(await indices(target), 'HSI.HK').source).toBe('ths');
+
+      upstream.use(quoteSamples);
+      clock.set('2026-11-06T13:04:00.000Z');
+      expect(byCode(await indices(target), 'HSI.HK').source).toBe('ths');
+      clock.set('2026-11-06T13:05:01.000Z');
+      expect(byCode(await indices(target), 'HSI.HK').source).toBe('tencent');
+    });
+  });
+
+  it('documents the route and its schemas in the OpenAPI document', async () => {
+    const res = await app().request('/v1/openapi');
+    const doc = (await res.json()) as {
+      paths: Record<string, { get?: { responses: Record<string, unknown> } }>;
+      components: { schemas: Record<string, unknown> };
+    };
+    const responses = doc.paths['/v1/market/indices']?.get?.responses;
+    for (const status of ['200', '429', '500']) expect(responses?.[status]).toBeDefined();
+    expect(doc.components.schemas.MarketIndex).toBeDefined();
+    expect(doc.components.schemas.MarketIndices).toBeDefined();
+  });
+});
