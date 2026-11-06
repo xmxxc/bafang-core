@@ -60,7 +60,7 @@ export function createApp(deps: AppDeps = {}): App {
     return c.json(errorBody('internal_error', '内部错误'), 500);
   });
 
-  app.doc('/openapi', {
+  app.doc('/v1/openapi', {
     openapi: '3.1.0',
     info: {
       title: 'bafang-core',

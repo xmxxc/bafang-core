@@ -15,7 +15,7 @@ export type HealthResponse = z.infer<typeof HealthResponseSchema>;
 
 export const healthRoute = createRoute({
   method: 'get',
-  path: '/health',
+  path: '/v1/health',
   tags: ['health'],
   summary: '健康检查',
   description: '返回服务存活状态与数据库连通性。',

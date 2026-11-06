@@ -46,8 +46,10 @@ docker compose up -d
 
 ## 接口
 
-- `GET /health` — 健康检查，返回存活状态与数据库连通性。
-- `GET /openapi` — 由请求/响应 schema 自动生成的 OpenAPI 文档（JSON）。
+- `GET /v1/health` — 健康检查，返回存活状态与数据库连通性。
+- `GET /v1/openapi` — 由请求/响应 schema 自动生成的 OpenAPI 文档（JSON）。
+
+公开接口按父 spec 的 API 约定使用版本前缀（`/v1/...`）。健康检查接口没有版本豁免，因此挂在 `/v1/health`；OpenAPI 文档也统一放在 `/v1/openapi`，让 studio / glance 与监控只面对 `/v1` 一个版本化入口，无需额外记忆未版本化的路径。旧路径 `/health` 与 `/openapi` 不再注册，会返回统一的 404。
 
 ## 测试
 
