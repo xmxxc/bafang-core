@@ -1,5 +1,5 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
-import { setCookie } from 'hono/cookie';
+import { setCookie, deleteCookie } from 'hono/cookie';
 import { SystemClock, type Clock } from './clock';
 import { ChineseTradingCalendar, type TradingCalendar } from './trading-calendar';
 import { type Db, type HealthProbe } from './db';
@@ -16,9 +16,10 @@ import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './mark
 import {
   ANONYMOUS_MARKET_RATE_LIMIT,
   EMAIL_CODE_REQUEST_RATE_LIMIT,
+  EMAIL_LOGIN_RATE_LIMIT,
   rateLimit,
 } from './rate-limit';
-import { DevLogMailer, type Mailer } from './auth/mailer';
+import { MissingMailer, type Mailer } from './auth/mailer';
 import {
   AuthError,
   createAuthService,
@@ -26,7 +27,7 @@ import {
   SESSION_TTL_MS,
   type AuthService,
 } from './auth/service';
-import { extractSessionToken, getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
+import { getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
 
 export interface AppDeps {
   db?: HealthProbe;
@@ -53,7 +54,7 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
   return {
     db: deps.db,
     database: deps.database,
-    mailer: deps.mailer ?? new DevLogMailer(),
+    mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
     upstream: deps.upstream ?? new HttpUpstreamFetcher(),
@@ -149,6 +150,7 @@ export function createApp(deps: AppDeps = {}): App {
   const requireLogin = auth ? requireAuth(auth) : null;
 
   app.use('/v1/auth/email/request', rateLimit(EMAIL_CODE_REQUEST_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/email/login', rateLimit(EMAIL_LOGIN_RATE_LIMIT, resolved.clock));
 
   app.openapi(emailCodeRequestRoute, async (c) => {
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
@@ -188,11 +190,9 @@ export function createApp(deps: AppDeps = {}): App {
 
   app.openapi(logoutRoute, async (c) => {
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
-    const token = extractSessionToken(c);
-    if (!token) {
-      return c.json(errorBody('unauthorized', '未登录'), 401);
-    }
-    await auth.logout(token);
+    const { sessionId } = getAuth(c);
+    deleteCookie(c, SESSION_COOKIE, { path: '/', secure: true });
+    await auth.logout(sessionId);
     return c.body(null, 204);
   });
 

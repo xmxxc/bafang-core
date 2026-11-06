@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import { and, count, desc, eq, gte, isNull } from 'drizzle-orm';
+import { and, count, desc, eq, gt, gte, isNull, lt, sql } from 'drizzle-orm';
 import { shanghaiDate, type Clock } from '../clock';
 import type { Db } from '../db';
 import { channels, emailVerificationCodes, loginMethods, sessions, users } from '../db/schema';
@@ -52,7 +52,7 @@ export interface AuthService {
     code: string,
     device: Device,
   ): Promise<{ userId: string; token: string; device: Device; expiresAt: Date }>;
-  logout(token: string): Promise<void>;
+  logout(sessionId: string): Promise<void>;
   authenticate(token: string): Promise<SessionInfo | null>;
   me(userId: string): Promise<{
     id: string;
@@ -83,52 +83,73 @@ export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }
     async requestCode(email) {
       const normalized = normalizeEmail(email);
       const now = clock.now();
-
-      const [latest] = await db
-        .select({ createdAt: emailVerificationCodes.createdAt })
-        .from(emailVerificationCodes)
-        .where(eq(emailVerificationCodes.email, normalized))
-        .orderBy(desc(emailVerificationCodes.createdAt))
-        .limit(1);
-      if (latest && latest.createdAt.getTime() + EMAIL_CODE_COOLDOWN_MS > now.getTime()) {
-        throw new AuthError('email_code_cooldown', '验证码请求过于频繁，请稍后再试', 429);
-      }
-
-      const dayStart = shanghaiDayStart(now);
-      const [todayCount] = await db
-        .select({ n: count() })
-        .from(emailVerificationCodes)
-        .where(
-          and(
-            eq(emailVerificationCodes.email, normalized),
-            gte(emailVerificationCodes.createdAt, dayStart),
-          ),
-        );
-      if ((todayCount?.n ?? 0) >= EMAIL_CODE_DAILY_LIMIT) {
-        throw new AuthError('email_code_daily_limit', '今日验证码请求次数已达上限', 429);
-      }
-
       const code = generateVerificationCode();
       const codeHash = sha256Hex(code);
       const expiresAt = new Date(now.getTime() + EMAIL_CODE_TTL_MS);
 
-      // 新验证码作废该邮箱此前尚未使用的验证码，保证只有最新一个可用。
-      await db
-        .update(emailVerificationCodes)
-        .set({ usedAt: now })
-        .where(
-          and(eq(emailVerificationCodes.email, normalized), isNull(emailVerificationCodes.usedAt)),
-        );
-      await db
-        .insert(emailVerificationCodes)
-        .values({ email: normalized, codeHash, expiresAt, createdAt: now });
-      await mailer.sendVerificationCode(normalized, code);
+      // 同一邮箱的并发请求用事务级 advisory lock 串行化，持锁完成冷却/每日上限检查与插入；
+      // 发信放到事务提交之后，避免在事务里做网络调用。
+      const insertedId = await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${normalized}))`);
+
+        const [latest] = await tx
+          .select({ createdAt: emailVerificationCodes.createdAt })
+          .from(emailVerificationCodes)
+          .where(eq(emailVerificationCodes.email, normalized))
+          .orderBy(desc(emailVerificationCodes.createdAt))
+          .limit(1);
+        if (latest && latest.createdAt.getTime() + EMAIL_CODE_COOLDOWN_MS > now.getTime()) {
+          throw new AuthError('email_code_cooldown', '验证码请求过于频繁，请稍后再试', 429);
+        }
+
+        const dayStart = shanghaiDayStart(now);
+        const [todayCount] = await tx
+          .select({ n: count() })
+          .from(emailVerificationCodes)
+          .where(
+            and(
+              eq(emailVerificationCodes.email, normalized),
+              gte(emailVerificationCodes.createdAt, dayStart),
+            ),
+          );
+        if ((todayCount?.n ?? 0) >= EMAIL_CODE_DAILY_LIMIT) {
+          throw new AuthError('email_code_daily_limit', '今日验证码请求次数已达上限', 429);
+        }
+
+        // 新验证码作废该邮箱此前尚未使用的验证码，保证只有最新一个可用。
+        await tx
+          .update(emailVerificationCodes)
+          .set({ usedAt: now })
+          .where(
+            and(
+              eq(emailVerificationCodes.email, normalized),
+              isNull(emailVerificationCodes.usedAt),
+            ),
+          );
+
+        const [inserted] = await tx
+          .insert(emailVerificationCodes)
+          .values({ email: normalized, codeHash, expiresAt, createdAt: now })
+          .returning({ id: emailVerificationCodes.id });
+        return inserted?.id;
+      });
+
+      try {
+        await mailer.sendVerificationCode(normalized, code);
+      } catch (error) {
+        // 发信失败回滚这条验证码，不占用冷却和每日次数（E9）。
+        if (insertedId) {
+          await db.delete(emailVerificationCodes).where(eq(emailVerificationCodes.id, insertedId));
+        }
+        throw error;
+      }
     },
 
     async loginWithEmail(email, code, device) {
       const normalized = normalizeEmail(email);
       const trimmedCode = code.trim();
       const now = clock.now();
+      const candidateHash = sha256Hex(trimmedCode);
 
       const [latest] = await db
         .select()
@@ -148,27 +169,71 @@ export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }
       if (latest.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
         throw new AuthError('verification_code_max_attempts', '验证码已作废，请重新获取', 400);
       }
-      if (!hashMatches(latest.codeHash, sha256Hex(trimmedCode))) {
-        const nextAttempts = latest.attempts + 1;
-        await db
+
+      if (!hashMatches(latest.codeHash, candidateHash)) {
+        // 原子自增尝试次数：只有仍活跃且未达上限的验证码才被计入（E1）。
+        const [updated] = await db
           .update(emailVerificationCodes)
-          .set({ attempts: nextAttempts })
-          .where(eq(emailVerificationCodes.id, latest.id));
-        if (nextAttempts >= EMAIL_CODE_MAX_ATTEMPTS) {
-          throw new AuthError('verification_code_max_attempts', '验证码错误次数过多，已作废', 400);
+          .set({ attempts: sql`${emailVerificationCodes.attempts} + 1` })
+          .where(
+            and(
+              eq(emailVerificationCodes.id, latest.id),
+              isNull(emailVerificationCodes.usedAt),
+              gt(emailVerificationCodes.expiresAt, now),
+              lt(emailVerificationCodes.attempts, EMAIL_CODE_MAX_ATTEMPTS),
+            ),
+          )
+          .returning({ attempts: emailVerificationCodes.attempts });
+        if (updated) {
+          if (updated.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
+            throw new AuthError(
+              'verification_code_max_attempts',
+              '验证码错误次数过多，已作废',
+              400,
+            );
+          }
+          throw new AuthError('verification_code_invalid', '验证码不正确', 400);
         }
-        throw new AuthError('verification_code_invalid', '验证码不正确', 400);
+        // 并发竞争下没有更新到行：验证码已被消费/过期/作废，重读以给出准确的错误码。
+        const [current] = await db
+          .select({
+            usedAt: emailVerificationCodes.usedAt,
+            attempts: emailVerificationCodes.attempts,
+            expiresAt: emailVerificationCodes.expiresAt,
+          })
+          .from(emailVerificationCodes)
+          .where(eq(emailVerificationCodes.id, latest.id))
+          .limit(1);
+        if (current?.usedAt) {
+          throw new AuthError('verification_code_used', '验证码已使用', 400);
+        }
+        if (current && current.expiresAt <= now) {
+          throw new AuthError('verification_code_expired', '验证码已过期', 400);
+        }
+        throw new AuthError('verification_code_max_attempts', '验证码已作废，请重新获取', 400);
       }
 
       const token = generateSessionToken();
       const tokenHash = sha256Hex(token);
       const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
 
-      const { userId } = await db.transaction(async (tx) => {
-        await tx
+      const result = await db.transaction(async (tx): Promise<{ userId: string } | null> => {
+        // 原子消费验证码：只有仍活跃且未达上限时才消费成功；并发同码登录只有一个能拿到（E2）。
+        const [consumed] = await tx
           .update(emailVerificationCodes)
           .set({ usedAt: now })
-          .where(eq(emailVerificationCodes.id, latest.id));
+          .where(
+            and(
+              eq(emailVerificationCodes.id, latest.id),
+              isNull(emailVerificationCodes.usedAt),
+              gt(emailVerificationCodes.expiresAt, now),
+              lt(emailVerificationCodes.attempts, EMAIL_CODE_MAX_ATTEMPTS),
+            ),
+          )
+          .returning({ id: emailVerificationCodes.id });
+        if (!consumed) {
+          return null;
+        }
 
         const [method] = await tx
           .select()
@@ -195,15 +260,14 @@ export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }
         return { userId };
       });
 
-      return { userId, token, device, expiresAt };
+      if (!result) {
+        throw new AuthError('verification_code_used', '验证码已使用', 400);
+      }
+      return { userId: result.userId, token, device, expiresAt };
     },
 
-    async logout(token) {
-      const tokenHash = sha256Hex(token);
-      await db
-        .update(sessions)
-        .set({ revokedAt: clock.now() })
-        .where(eq(sessions.tokenHash, tokenHash));
+    async logout(sessionId) {
+      await db.update(sessions).set({ revokedAt: clock.now() }).where(eq(sessions.id, sessionId));
     },
 
     async authenticate(token) {

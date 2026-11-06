@@ -15,6 +15,9 @@ export const ANONYMOUS_MARKET_RATE_LIMIT: RateLimitPolicy = { limit: 60, windowM
 /** 请求邮箱验证码接口对每个客户端 IP 的限流：每分钟 5 次。 */
 export const EMAIL_CODE_REQUEST_RATE_LIMIT: RateLimitPolicy = { limit: 5, windowMs: 60_000 };
 
+/** 邮箱验证码登录接口对每个客户端 IP 的限流：每分钟 10 次。 */
+export const EMAIL_LOGIN_RATE_LIMIT: RateLimitPolicy = { limit: 10, windowMs: 60_000 };
+
 interface Bucket {
   windowStart: number;
   count: number;

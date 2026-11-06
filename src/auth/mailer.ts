@@ -17,6 +17,15 @@ export class DevLogMailer implements Mailer {
   }
 }
 
+/** 未配置发信方式时的占位实现：一旦被调用就报错，绝不把验证码写进日志。 */
+export class MissingMailer implements Mailer {
+  async sendVerificationCode(): Promise<void> {
+    throw new Error(
+      '发信适配器未配置：请设置 RESEND_API_KEY/RESEND_FROM 或 MAIL_TRANSPORT=dev-log',
+    );
+  }
+}
+
 /** 通过 Resend API 发信。 */
 export class ResendMailer implements Mailer {
   constructor(
@@ -45,18 +54,29 @@ export class ResendMailer implements Mailer {
 }
 
 /**
- * 按配置选择发信适配器：配置了 RESEND_API_KEY 就用 Resend；否则用开发模式的假发信。
- * 生产环境缺少 Resend 配置时直接报错，保证假发信绝不会在生产配置下生效。
+ * 按配置选择发信适配器。发信方式必须显式配置：
+ * - 配置了 `RESEND_API_KEY`（非空）→ 用 Resend（必须同时配置 `RESEND_FROM`）；
+ * - 否则只有显式配置了 `MAIL_TRANSPORT=dev-log`，或 `NODE_ENV` 明确等于 `development`/`test`
+ *   时，才用开发模式的假发信；
+ * - 其余情况（例如生产机没设 NODE_ENV、或密钥为空）一律拒绝启动，绝不退回假发信。
  */
 export function createMailer(config: Config): Mailer {
-  if (config.RESEND_API_KEY) {
-    if (!config.RESEND_FROM) {
+  const apiKey = config.RESEND_API_KEY?.trim() || undefined;
+  const from = config.RESEND_FROM?.trim() || undefined;
+  if (apiKey) {
+    if (!from) {
       throw new Error('配置了 RESEND_API_KEY 时必须同时配置 RESEND_FROM');
     }
-    return new ResendMailer(config.RESEND_API_KEY, config.RESEND_FROM);
+    return new ResendMailer(apiKey, from);
   }
-  if (config.NODE_ENV === 'production') {
-    throw new Error('生产环境必须配置 RESEND_API_KEY 与 RESEND_FROM，不能用开发发信');
+  if (
+    config.MAIL_TRANSPORT === 'dev-log' ||
+    config.NODE_ENV === 'development' ||
+    config.NODE_ENV === 'test'
+  ) {
+    return new DevLogMailer();
   }
-  return new DevLogMailer();
+  throw new Error(
+    '未配置发信方式：请设置 RESEND_API_KEY 与 RESEND_FROM，或显式设置 MAIL_TRANSPORT=dev-log（开发用假发信）',
+  );
 }

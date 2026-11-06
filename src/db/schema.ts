@@ -47,7 +47,7 @@ export const loginMethods = pgTable(
   },
   (t) => [
     uniqueIndex('login_methods_type_external_uidx').on(t.type, t.externalId),
-    index('login_methods_user_idx').on(t.userId),
+    uniqueIndex('login_methods_user_type_uidx').on(t.userId, t.type),
   ],
 );
 
@@ -69,7 +69,8 @@ export const sessions = pgTable('sessions', {
 
 /**
  * 邮箱验证码：6 位，10 分钟过期，最多输错 5 次，使用一次后失效。
- * 数据库只存验证码的哈希；同一邮箱 60 秒内只能请求一次，每天有上限。
+ * `code_hash` 存的是无盐 sha256：对 6 位数字码来说，泄露库仍可枚举反查（10⁶ 种），
+ * 并不能像会话令牌那样提供真正的不可逆性；安全主要靠 10 分钟过期、一次性、新码作废旧码兜底。
  */
 export const emailVerificationCodes = pgTable(
   'email_verification_codes',

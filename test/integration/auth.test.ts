@@ -77,10 +77,11 @@ describe('email verification-code login and sessions over in-process HTTP agains
     email: string,
     code: string,
     device: 'web' | 'miniprogram',
+    ip?: string,
   ) {
     return target.request('/v1/auth/email/login', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...(ip ? { 'X-Forwarded-For': ip } : {}) },
       body: JSON.stringify({ email, code, device }),
     });
   }
@@ -343,6 +344,111 @@ describe('email verification-code login and sessions over in-process HTTP agains
       const res = await app().request('/v1/auth/logout', { method: 'POST' });
       expect(res.status).toBe(401);
       expect(((await res.json()) as ErrorResponse).error.code).toBe('unauthorized');
+    });
+
+    it('logout clears the web session cookie', async () => {
+      const target = app();
+      await requestCode(target, 'user@example.com');
+      const web = await login(
+        target,
+        'user@example.com',
+        await latestCode('user@example.com'),
+        'web',
+      );
+      const logoutRes = await target.request('/v1/auth/logout', {
+        method: 'POST',
+        headers: { Cookie: `bafang_session=${sessionCookie(web)}` },
+      });
+      expect(logoutRes.status).toBe(204);
+      const setCookie = logoutRes.headers.get('set-cookie') ?? '';
+      expect(setCookie).toContain('bafang_session=');
+      expect(setCookie).toContain('Max-Age=0');
+    });
+  });
+
+  describe('concurrency and additional rules', () => {
+    it('caps wrong-code attempts at 5 even under concurrency, then rejects the correct code', async () => {
+      const target = app();
+      await requestCode(target, 'user@example.com');
+      const code = await latestCode('user@example.com');
+      const wrong = code === '000000' ? '111111' : '000000';
+
+      const responses = await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          login(target, 'user@example.com', wrong, 'web', `10.0.0.${i}`),
+        ),
+      );
+      const bodies = (await Promise.all(responses.map((r) => r.json()))) as ErrorResponse[];
+      const invalid = bodies.filter((b) => b.error.code === 'verification_code_invalid').length;
+      const max = bodies.filter((b) => b.error.code === 'verification_code_max_attempts').length;
+      expect(responses.every((r) => r.status === 400)).toBe(true);
+      expect(invalid).toBe(4);
+      expect(max).toBe(16);
+
+      const correct = await login(target, 'user@example.com', code, 'web');
+      expect(correct.status).toBe(400);
+      expect(((await correct.json()) as ErrorResponse).error.code).toBe(
+        'verification_code_max_attempts',
+      );
+    });
+
+    it('rate limits the login endpoint per IP', async () => {
+      const target = app();
+      for (let i = 0; i < 10; i++) {
+        const res = await login(target, 'nobody@example.com', '000000', 'web', '198.51.100.7');
+        expect(res.status).toBe(400);
+      }
+      const limited = await login(target, 'nobody@example.com', '000000', 'web', '198.51.100.7');
+      expect(limited.status).toBe(429);
+      expect(((await limited.json()) as ErrorResponse).error.code).toBe('rate_limited');
+    });
+
+    it('consumes a code exactly once under concurrent login', async () => {
+      const target = app();
+      await requestCode(target, 'user@example.com');
+      const code = await latestCode('user@example.com');
+
+      const responses = await Promise.all([
+        login(target, 'user@example.com', code, 'web', '10.1.0.1'),
+        login(target, 'user@example.com', code, 'web', '10.1.0.2'),
+      ]);
+      const statuses = responses.map((r) => r.status).sort();
+      expect(statuses).toEqual([200, 400]);
+
+      const bodies = (await Promise.all(responses.map((r) => r.json()))) as Array<
+        EmailLoginResponse | ErrorResponse
+      >;
+      const ok = bodies.find((b) => !('error' in b)) as EmailLoginResponse;
+      const err = bodies.find((b) => 'error' in b) as ErrorResponse;
+      expect(ok.user.id).toBeTruthy();
+      expect(err.error.code).toBe('verification_code_used');
+    });
+
+    it('serializes concurrent code requests for the same email so only one is sent', async () => {
+      const target = app();
+      const responses = await Promise.all(
+        Array.from({ length: 20 }, (_, i) =>
+          requestCode(target, 'spam@example.com', `10.2.0.${i}`),
+        ),
+      );
+      expect(responses.filter((r) => r.status === 200)).toHaveLength(1);
+      expect(mailer.sent.filter((m) => m.email === 'spam@example.com')).toHaveLength(1);
+    });
+
+    it('does not consume cooldown when sending the code fails', async () => {
+      const failing = {
+        async sendVerificationCode() {
+          throw new Error('smtp down');
+        },
+      };
+      const target = app({ mailer: failing });
+      const failed = await requestCode(target, 'a@example.com');
+      expect(failed.status).toBe(500);
+
+      // 发信失败后这条验证码被回滚，同一邮箱立即可再请求。
+      const ok = await requestCode(app(), 'a@example.com');
+      expect(ok.status).toBe(200);
+      expect(mailer.sent.filter((m) => m.email === 'a@example.com')).toHaveLength(1);
     });
   });
 });
