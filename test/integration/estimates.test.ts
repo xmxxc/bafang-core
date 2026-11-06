@@ -67,15 +67,6 @@ const SINA_110020 = {
   fallback: true,
   referenceOnly: true,
 };
-const SINA_040046 = {
-  changePercent: -0.4899,
-  value: '7.7757',
-  time: '2026-11-06T08:03:00.000Z',
-  source: 'sina',
-  sourceName: '新浪财经',
-  fallback: true,
-  referenceOnly: true,
-};
 
 describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL test database', () => {
   let db: TestSchema;
@@ -117,7 +108,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       expect(body.items).toEqual([
         { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
         { code: '000001', status: 'estimated', estimate: SINA_000001 },
-        { code: '040046', status: 'estimated', estimate: SINA_040046 },
+        { code: '040046', status: 'unavailable', estimate: null },
       ]);
     });
 
@@ -240,6 +231,105 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
         { code: '110020', status: 'unavailable', estimate: null },
         { code: '000001', status: 'unavailable', estimate: null },
       ]);
+    });
+  });
+
+  describe('estimate base check', () => {
+    it('marks a QDII estimate unavailable when its base NAV is older than the latest published NAV', async () => {
+      // Recorded 2026-11-06: Tiantian has no estimate for 040046; Sina's line estimates on base
+      // 7.8140, which is the 11-04 NAV, while the 11-05 NAV 7.3159 is already published.
+      const body = await get(app(), '040046');
+      expect(body.items).toEqual([{ code: '040046', status: 'unavailable', estimate: null }]);
+    });
+
+    it("adopts a regular fund's Sina estimate whose base is the latest published NAV", async () => {
+      // 000001: Sina base 1.0000 equals the latest published NAV (2026-11-05).
+      const body = await get(app(), '000001');
+      expect(body.items).toEqual([{ code: '000001', status: 'estimated', estimate: SINA_000001 }]);
+    });
+
+    it("checks the base against the previous NAV once the estimate day's NAV is already out", async () => {
+      // 110020's 2026-11-06 NAV is published; Sina's base 1.7030 is the 11-05 NAV, so it still matches.
+      upstream.use(estimateSamples({ tiantian: upstreamDown() }));
+      clock.set('2026-11-06T12:30:00.000Z'); // 20:30
+      const body = await get(app(), '110020');
+      expect(body.items).toEqual([{ code: '110020', status: 'estimated', estimate: SINA_110020 }]);
+    });
+
+    it('falls back to Sina when the Tiantian base NAV does not match the latest published NAV', async () => {
+      upstream.use(
+        estimateSamples({
+          tiantian: tiantianWith('110020', { PDATE: '2026-11-05', NAV: 1.6983 }),
+        }),
+      );
+      const body = await get(app(), '110020');
+      expect(body.items).toEqual([{ code: '110020', status: 'estimated', estimate: SINA_110020 }]);
+    });
+
+    it('falls back to Sina when the Tiantian base date is not the latest published NAV date', async () => {
+      upstream.use(
+        estimateSamples({
+          tiantian: tiantianWith('110020', { PDATE: '2026-11-04', NAV: 1.703 }),
+        }),
+      );
+      const body = await get(app(), '110020');
+      expect(body.items[0]?.estimate?.source).toBe('sina');
+    });
+
+    it('adopts the Tiantian estimate when its base matches the latest published NAV', async () => {
+      upstream.use(
+        estimateSamples({
+          tiantian: tiantianWith('110020', { PDATE: '2026-11-05', NAV: 1.703 }),
+        }),
+      );
+      const body = await get(app(), '110020');
+      expect(body.items).toEqual([
+        { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
+      ]);
+    });
+
+    it('ignores a Sina line without a usable base NAV', async () => {
+      upstream.use(
+        estimateSamples({
+          tiantian: upstreamDown(),
+          sina: () =>
+            'var hq_str_fu_000001="华夏成长混合A,16:02:00,0.9843,--,3.5730,0,-1.5738,2026-11-06,0.9805,-1.9459";',
+        }),
+      );
+      const body = await get(app(), '000001');
+      expect(body.items).toEqual([{ code: '000001', status: 'unavailable', estimate: null }]);
+    });
+
+    it('keeps serving estimates when the NAV upstream fails, re-checking once it recovers', async () => {
+      const target = app();
+      upstream.use(estimateSamples({ nav: upstreamDown() }));
+      const first = await get(target, '040046,000001');
+      // The base cannot be checked, so the estimates are not discarded…
+      expect(first.items.map((item) => [item.code, item.status, item.estimate?.source])).toEqual([
+        ['040046', 'estimated', 'sina'],
+        ['000001', 'estimated', 'sina'],
+      ]);
+
+      // …but they are only short-cached: once the NAV is reachable again the stale QDII
+      // estimate is caught, while the regular fund's estimate stays.
+      upstream.use(estimateSamples());
+      clock.set('2026-11-06T02:00:30.000Z');
+      const second = await get(target, '040046,000001');
+      expect(second.items).toEqual([
+        { code: '040046', status: 'unavailable', estimate: null },
+        { code: '000001', status: 'estimated', estimate: SINA_000001 },
+      ]);
+    });
+
+    it('does not keep an unchecked closing estimate until the next open', async () => {
+      const target = app();
+      upstream.use(estimateSamples({ nav: upstreamDown() }));
+      clock.set('2026-11-06T08:30:00.000Z'); // 16:30
+      expect((await get(target, '000001')).items[0]?.estimate).toEqual(SINA_000001);
+
+      upstream.use(upstreamDown());
+      clock.set('2026-11-06T08:30:30.000Z'); // 30 s later — re-fetched instead of cached
+      expect((await get(target, '000001')).items[0]?.status).toBe('unavailable');
     });
   });
 

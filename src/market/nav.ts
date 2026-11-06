@@ -36,6 +36,11 @@ export interface NavService {
   latest(code: string): Promise<LatestNav | null>;
   /** 按区间返回历史净值序列（最新在前）；基金无净值数据时返回 null。 */
   history(code: string, range: NavRange): Promise<NavPoint[] | null>;
+  /**
+   * 净值日期早于 date 的最近一期已公布净值（date 为 YYYY-MM-DD）；查不到时返回 null。
+   * 先看最新一期，最新一期已经是 date 当天或之后时再从近 1 月走势里找；两者都走同一套缓存。
+   */
+  latestBefore(code: string, date: string): Promise<NavPoint | null>;
 }
 
 export interface NavServiceDeps {
@@ -60,7 +65,7 @@ export function createNavService(deps: NavServiceDeps): NavService {
   const latestPoll = new PollCache<LatestNav>(NAV_PUBLISH_POLL_MS);
   const historyPoll = new PollCache<NavPoint[]>(NAV_PUBLISH_POLL_MS);
 
-  return {
+  const service: NavService = {
     async latest(code) {
       const now = deps.clock.now();
       const expectedDate = expectedPublishDate(now, deps.calendar);
@@ -107,6 +112,23 @@ export function createNavService(deps: NavServiceDeps): NavService {
       }
       return points;
     },
+
+    async latestBefore(code, date) {
+      const latest = await service.latest(code);
+      if (!latest) return null;
+      if (latest.navDate < date) return { date: latest.navDate, ...pick(latest) };
+      const points = await service.history(code, '1m');
+      return points?.find((point) => point.date < date) ?? null;
+    },
+  };
+  return service;
+}
+
+function pick(latest: LatestNav): Omit<NavPoint, 'date'> {
+  return {
+    unitNav: latest.unitNav,
+    cumulativeNav: latest.cumulativeNav,
+    dailyChange: latest.dailyChange,
   };
 }
 

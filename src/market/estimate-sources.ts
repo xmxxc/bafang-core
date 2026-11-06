@@ -14,6 +14,11 @@ export interface SourceEstimate {
   value: string;
   /** 估值时间。 */
   time: Date;
+  /**
+   * 来源给出的估值基准：估值是在这一期单位净值上推算的涨跌。
+   * date 为 null 表示来源只给了基准净值、没给日期；整个 base 为 null 表示来源的响应里没有基准。
+   */
+  base: { unitNav: string; date: string | null } | null;
 }
 
 const TIANTIAN_URL = 'https://fundcomapi.tiantianfunds.com/mm/newCore/FundValuationLast';
@@ -35,10 +40,16 @@ const TiantianRowSchema = z.object({
   GSZZL: NumberLike,
   /** 形如 "2026-11-06 14:30"。 */
   GZTIME: z.string().nullish(),
+  /** 天天基金已知的最近一期单位净值及其日期。 */
+  NAV: NumberLike,
+  PDATE: z.string().nullish(),
 });
 
 /**
- * 天天基金批量估值。返回有当天估值的基金；上游没给、字段缺失或不是当天的估值都不在结果里，
+ * 天天基金批量估值。行里的 NAV / PDATE 是天天基金已知的最近一期净值：PDATE 早于估值日期时，
+ * 它就是这条估值的基准，作为 base 交给调用方核对；PDATE 已经是估值当天（当天净值已公布）时，
+ * 行里不再有基准，base 为 null。
+ * 返回有当天估值的基金；上游没给、字段缺失或不是当天的估值都不在结果里，
  * 由调用方回退。整个请求失败（网络、非 JSON、success 为 false）时抛出 UpstreamError。
  */
 export async function fetchTiantianEstimates(
@@ -46,7 +57,7 @@ export async function fetchTiantianEstimates(
   codes: readonly string[],
   today: string,
 ): Promise<Map<string, SourceEstimate>> {
-  const url = `${TIANTIAN_URL}?FCODES=${codes.join(',')}&FIELDS=FCODE,GSZ,GSZZL,GZTIME`;
+  const url = `${TIANTIAN_URL}?FCODES=${codes.join(',')}&FIELDS=FCODE,GSZ,GSZZL,GZTIME,NAV,PDATE`;
   const body = parseJson(
     TiantianResponseSchema,
     await upstream.fetchText({ url, referer: TIANTIAN_REFERER }),
@@ -60,7 +71,13 @@ export async function fetchTiantianEstimates(
     const row = TiantianRowSchema.safeParse(raw);
     if (!row.success || !wanted.has(row.data.FCODE)) continue;
     const [date, time] = (row.data.GZTIME ?? '').trim().split(/\s+/);
-    const estimate = toEstimate(row.data.GSZZL, row.data.GSZ, date, time, today);
+    const navDate = row.data.PDATE?.trim() ?? '';
+    const baseNav = formatNav(row.data.NAV);
+    const base =
+      date && /^\d{4}-\d{2}-\d{2}$/.test(navDate) && navDate < date && baseNav
+        ? { unitNav: baseNav, date: navDate }
+        : null;
+    const estimate = toEstimate(row.data.GSZZL, row.data.GSZ, date, time, today, base);
     if (estimate) result.set(row.data.FCODE, estimate);
   }
   return result;
@@ -69,8 +86,9 @@ export async function fetchTiantianEstimates(
 const SINA_LINE = /var hq_str_fu_(\d{6})="([^"]*)"/g;
 
 /**
- * 新浪批量估值（`fu_` 行情）。每只基金一行，字段依次为：名称、估值时间、估值、上一净值、
- * 上一累计净值、（保留）、估值涨跌幅、估值日期……；没有估值的基金返回空串。
+ * 新浪批量估值（`fu_` 行情）。每只基金一行，字段依次为：名称、估值时间、估值、基准单位净值、
+ * 基准累计净值、（保留）、估值涨跌幅、估值日期……；没有估值的基金返回空串。
+ * 新浪不给基准日期，只给基准净值；没有可解析的基准净值的行无法核对，视为没有估值。
  * 返回有当天估值的基金；响应里一行都没有时视为上游失败，抛出 UpstreamError。
  */
 export async function fetchSinaEstimates(
@@ -89,7 +107,10 @@ export async function fetchSinaEstimates(
   for (const [, code, content] of lines) {
     if (!code || !content || !wanted.has(code)) continue;
     const fields = content.split(',');
-    const estimate = toEstimate(fields[6], fields[2], fields[7], fields[1], today);
+    const baseNav = formatNav(fields[3]);
+    if (!baseNav) continue;
+    const base = { unitNav: baseNav, date: null };
+    const estimate = toEstimate(fields[6], fields[2], fields[7], fields[1], today, base);
     if (estimate) result.set(code, estimate);
   }
   return result;
@@ -106,6 +127,7 @@ function toEstimate(
   date: string | undefined,
   time: string | undefined,
   today: string,
+  base: SourceEstimate['base'],
 ): SourceEstimate | null {
   const change = toFiniteNumber(changeRaw);
   const value = toFiniteNumber(valueRaw);
@@ -113,7 +135,13 @@ function toEstimate(
   if (date !== today || !time || !/^\d{2}:\d{2}(:\d{2})?$/.test(time)) return null;
   const at = new Date(`${date}T${time.length === 5 ? `${time}:00` : time}+08:00`);
   if (Number.isNaN(at.getTime())) return null;
-  return { changePercent: change, value: value.toFixed(4), time: at };
+  return { changePercent: change, value: value.toFixed(4), time: at, base };
+}
+
+/** 把单位净值规整成 4 位小数字符串；缺失、不可解析或不为正时返回 null。 */
+export function formatNav(raw: unknown): string | null {
+  const nav = toFiniteNumber(raw);
+  return nav !== null && nav > 0 ? nav.toFixed(4) : null;
 }
 
 function toFiniteNumber(raw: unknown): number | null {

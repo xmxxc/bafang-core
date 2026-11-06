@@ -77,6 +77,7 @@ export function createApp(deps: AppDeps = {}): App {
     upstream: resolved.upstream,
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
+    nav,
   });
   const marketRateLimit = rateLimit(ANONYMOUS_MARKET_RATE_LIMIT, resolved.clock);
   app.use('/v1/funds/*', marketRateLimit);

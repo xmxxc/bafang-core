@@ -89,6 +89,8 @@ export const eastmoneySamples: Replay = (url) => {
 const NAV_LATEST_SAMPLES: Record<string, string> = {
   '000001': 'eastmoney/nav-000001-latest.json',
   '999999': 'eastmoney/nav-999999-latest.json',
+  '040046': 'eastmoney/nav-040046-latest-2026-11-06.json',
+  '110020': 'eastmoney/nav-110020-latest-2026-11-06.json',
 };
 
 /** 所有上游请求都失败（默认是超时）。 */
@@ -147,10 +149,13 @@ export function byHost(replays: Record<string, Replay>): Replay {
   };
 }
 
-/** 估值两级来源都按录制样本回放。 */
-export function estimateSamples(overrides: { tiantian?: Replay; sina?: Replay } = {}): Replay {
+/** 估值两级来源，以及核对估值基准用的东方财富净值，都按录制样本回放。 */
+export function estimateSamples(
+  overrides: { tiantian?: Replay; sina?: Replay; nav?: Replay } = {},
+): Replay {
   return byHost({
     'fundcomapi.tiantianfunds.com': overrides.tiantian ?? tiantianSamples(),
     'hq.sinajs.cn': overrides.sina ?? sinaSamples(),
+    'api.fund.eastmoney.com': overrides.nav ?? eastmoneySamples,
   });
 }
