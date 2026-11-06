@@ -4,17 +4,24 @@ import { ChineseTradingCalendar, type TradingCalendar } from './trading-calendar
 import type { HealthProbe } from './db';
 import { errorBody } from './errors';
 import { healthRoute } from './routes/health';
+import { fundDetailRoute, fundSearchRoute } from './routes/funds';
+import { createFundService } from './market/funds';
+import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
+import { ANONYMOUS_MARKET_RATE_LIMIT, rateLimit } from './rate-limit';
 
 export interface AppDeps {
   db?: HealthProbe;
   clock?: Clock;
   tradingCalendar?: TradingCalendar;
+  /** 统一上游抓取适配器；测试时整体替换为录制样本。 */
+  upstream?: UpstreamFetcher;
 }
 
 export interface ResolvedDeps {
   db: HealthProbe | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
+  upstream: UpstreamFetcher;
 }
 
 export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
@@ -22,6 +29,7 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
     db: deps.db,
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
+    upstream: deps.upstream ?? new HttpUpstreamFetcher(),
   };
 }
 
@@ -53,9 +61,31 @@ export function createApp(deps: AppDeps = {}): App {
     );
   });
 
+  const funds = createFundService({ upstream: resolved.upstream, clock: resolved.clock });
+  const marketRateLimit = rateLimit(ANONYMOUS_MARKET_RATE_LIMIT, resolved.clock);
+  app.use('/v1/funds/*', marketRateLimit);
+
+  app.openapi(fundSearchRoute, async (c) => {
+    const { q } = c.req.valid('query');
+    return c.json({ items: await funds.search(q) }, 200);
+  });
+
+  app.openapi(fundDetailRoute, async (c) => {
+    const { code } = c.req.valid('param');
+    const fund = await funds.get(code);
+    if (!fund) {
+      return c.json(errorBody('fund_not_found', `没有代码为 ${code} 的基金`), 404);
+    }
+    return c.json(fund, 200);
+  });
+
   app.notFound((c) => c.json(errorBody('not_found', `未找到 ${c.req.path}`), 404));
 
   app.onError((err, c) => {
+    if (err instanceof UpstreamError) {
+      console.warn('[bafang-core] upstream failure', err.kind, err.status ?? '', err.message);
+      return c.json(errorBody('upstream_unavailable', '行情上游暂不可用，请稍后再试'), 502);
+    }
     console.error('[bafang-core] unhandled error', err);
     return c.json(errorBody('internal_error', '内部错误'), 500);
   });
