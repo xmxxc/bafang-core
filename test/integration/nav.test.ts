@@ -312,6 +312,25 @@ describe('fund NAV over in-process HTTP against a real PostgreSQL test database'
       expect(third.status).toBe(200);
       expect(((await third.json()) as NavHistoryResponse).points[0]!.date).toBe('2026-09-30');
     });
+
+    it('returns the correct range boundary after a long holiday', async () => {
+      const holidays = ['2026-10-01', '2026-10-02', '2026-10-05', '2026-10-06', '2026-10-07'];
+      const target = app({ tradingCalendar: new ChineseTradingCalendar(holidays) });
+      upstream.use(historyProbe('2026-09-30'));
+
+      // Wednesday 2026-09-30 20:00 — the day before National Day; 1m starts 2026-08-30.
+      clock.set('2026-09-30T12:00:00.000Z');
+      const first = await history(target, '000001', '1m');
+      expect(first.status).toBe(200);
+      expect(((await first.json()) as NavHistoryResponse).points.at(-1)?.date).toBe('2026-08-30');
+
+      // Wednesday 2026-10-07 10:00 — still inside the holiday; 1m must now start 2026-09-07,
+      // not keep returning the longer series cached before the holiday.
+      clock.set('2026-10-07T02:00:00.000Z');
+      const second = await history(target, '000001', '1m');
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as NavHistoryResponse).points.at(-1)?.date).toBe('2026-09-07');
+    });
   });
 
   describe('anonymous access', () => {
@@ -345,4 +364,20 @@ function navPage(date: string): string {
     ErrCode: 0,
     Data: { LSJZList: [{ FSRQ: date, DWJZ: '1.0000', LJJZ: '3.5730', JZZZL: '1.83' }] },
   });
+}
+
+/** 历史回放替身：返回两条记录（最新点 + 起点），起点取上游请求里的 startDate，用于观察区间边界。 */
+function historyProbe(latest: string): Replay {
+  return (url) => {
+    const startDate = url.searchParams.get('startDate') ?? '';
+    return JSON.stringify({
+      ErrCode: 0,
+      Data: {
+        LSJZList: [
+          { FSRQ: latest, DWJZ: '1.0000', LJJZ: '3.5730', JZZZL: '0.00' },
+          { FSRQ: startDate, DWJZ: '1.0000', LJJZ: '3.5730', JZZZL: '0.00' },
+        ],
+      },
+    });
+  };
 }

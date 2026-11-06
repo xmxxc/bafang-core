@@ -20,7 +20,7 @@
    cp .env.example .env
    ```
 
-   数据库连接使用分开的 `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` 字段（密码可能含逗号，不要拼成 URL）。
+   数据库连接使用分开的 `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` 字段（密码可能含逗号，不要拼成 URL），可选用 `PGSCHEMA` 指定 schema（默认 `public`，迁移与按年导入都会遵循它）。
 
 3. 执行迁移（在空库上建出初始结构，重复执行幂等）：
 
@@ -75,7 +75,7 @@ pnpm test:watch  # watch 模式
 ## 迁移与 schema
 
 - 修改 `src/db/schema.ts` 后用 `pnpm db:generate` 生成迁移 SQL（输出到 `drizzle/`）。
-- 用 `pnpm db:migrate` 应用迁移到默认 schema（`public`）。
+- 用 `pnpm db:migrate` 应用迁移；目标 schema 由 `PGSCHEMA` 决定，未设置时默认 `public`。应用启动与 `pnpm trading-calendar:import` 使用同一份 schema 配置，避免迁移建表在 `public`、而应用去别的 schema 找表。
 - 迁移运行器支持把迁移应用到任意 schema（测试里用它创建临时 schema）。
 
 ## 依赖注入

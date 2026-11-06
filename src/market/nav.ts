@@ -51,6 +51,8 @@ export interface NavServiceDeps {
  *   expectedDate 前进为止（下一个交易日的净值开始应公布）。
  * - 若取到的净值日期 < expectedDate，说明该交易日的净值因延迟（含跨午夜、周末、节假日、
  *   QDII 等）还没公布，只按 `NAV_PUBLISH_POLL_MS` 短缓存，间隔一到就重新抓取，直到拿到。
+ * history 的缓存键还带上区间起点（startDate），这样即便 expectedDate 在长假期间保持不变，
+ * 每次请求也会按自己的区间边界返回，不会把旧的更长区间原样命中。
  */
 export function createNavService(deps: NavServiceDeps): NavService {
   const latestCache = new DailyCache<LatestNav>();
@@ -84,11 +86,11 @@ export function createNavService(deps: NavServiceDeps): NavService {
     async history(code, range) {
       const now = deps.clock.now();
       const expectedDate = expectedPublishDate(now, deps.calendar);
-      const cacheKey = `${code}:${range}`;
+      const startDate = addMonths(shanghaiDate(now), -RANGE_MONTHS[range]);
+      const cacheKey = `${code}:${range}:${startDate}`;
       const cached =
         historyCache.get(expectedDate, cacheKey) ?? historyPoll.get(cacheKey, now.getTime());
       if (cached) return cached;
-      const startDate = addMonths(shanghaiDate(now), -RANGE_MONTHS[range]);
       const points: NavPoint[] = [];
       for (let pageIndex = 1; pageIndex <= MAX_PAGES; pageIndex++) {
         const page = await fetchNavPage(deps.upstream, code, pageIndex, PAGE_SIZE, startDate);
