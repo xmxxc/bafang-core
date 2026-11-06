@@ -31,6 +31,15 @@ function withoutConfirmDays(file: string): string {
   return JSON.stringify(body);
 }
 
+/** 上游业务错误：把录制样本的 ErrCode 改成非零；可同时清空 Datas。 */
+function withErrCode(file: string, errCode: number, datas?: null): string {
+  const body = JSON.parse(sample(file)) as Record<string, unknown>;
+  body.ErrCode = errCode;
+  body.ErrMsg = 'recorded upstream error';
+  if (datas === null) body.Datas = null;
+  return JSON.stringify(body);
+}
+
 describe('fund search and basic info over in-process HTTP against a real PostgreSQL test database', () => {
   let db: TestSchema;
   let upstream: RecordedUpstream;
@@ -110,6 +119,11 @@ describe('fund search and basic info over in-process HTTP against a real Postgre
       ['empty body', upstreamDown(new UpstreamError('empty_body', 'recorded empty body'))],
       ['non-JSON body', () => '<html>502 Bad Gateway</html>'],
       ['unexpected shape', () => '{"ErrCode":0,"Datas":{"unexpected":true}}'],
+      [
+        'non-zero ErrCode without Datas',
+        () => withErrCode('eastmoney/search-000001.json', -1, null),
+      ],
+      ['non-zero ErrCode with Datas', () => withErrCode('eastmoney/search-000001.json', 1)],
     ])('returns upstream_unavailable (502) when the upstream fails: %s', async (_name, replay) => {
       upstream.use(replay);
       const res = await search(app(), '000001');
@@ -165,6 +179,26 @@ describe('fund search and basic info over in-process HTTP against a real Postgre
       expect((await search(target, '000001')).status).toBe(502);
       upstream.use(eastmoneySamples);
       expect((await search(target, '000001')).status).toBe(200);
+    });
+
+    it('does not cache an upstream business error that carries Datas, and recovers once the upstream does', async () => {
+      const target = app();
+      upstream.use(() => withErrCode('eastmoney/search-000001.json', 1));
+      expect((await search(target, '000001')).status).toBe(502);
+
+      upstream.use(eastmoneySamples);
+      const recovered = await search(target, '000001');
+      expect(recovered.status).toBe(200);
+      const recoveredBody = await recovered.json();
+      expect((recoveredBody as FundSearchResponse).items).toEqual([
+        { code: '000001', name: '华夏成长混合', category: 'domestic', type: '混合型-灵活' },
+      ]);
+
+      // the recovered result is what got cached
+      upstream.use(upstreamDown());
+      const cached = await search(target, '000001');
+      expect(cached.status).toBe(200);
+      expect(await cached.json()).toEqual(recoveredBody);
     });
   });
 
@@ -244,6 +278,21 @@ describe('fund search and basic info over in-process HTTP against a real Postgre
       expect(res.status).toBe(502);
       expect(((await res.json()) as ErrorResponse).error.code).toBe('upstream_unavailable');
     });
+
+    it.each<[string, string]>([
+      ['without Datas', withErrCode('eastmoney/base-000001.json', -1, null)],
+      ['with Datas', withErrCode('eastmoney/base-000001.json', 1)],
+    ])(
+      'returns upstream_unavailable (502), not fund_not_found, on a non-zero upstream ErrCode %s',
+      async (_name, body) => {
+        upstream.use(() => body);
+        const res = await detail(app(), '000001');
+        expect(res.status).toBe(502);
+        const error = ((await res.json()) as ErrorResponse).error;
+        expect(error.code).toBe('upstream_unavailable');
+        expect(error.message).not.toContain('recorded');
+      },
+    );
   });
 
   describe('anonymous access and rate limiting', () => {

@@ -100,7 +100,11 @@ function parseConfirmDays(value: string | number | null | undefined): number | n
   return Number.isInteger(days) && days >= 0 && days <= 30 ? days : null;
 }
 
-function parse<T>(schema: z.ZodType<T>, text: string): T {
+/**
+ * 解析上游响应体。东方财富用 ErrCode 表示业务结果：只有 0 才是正常响应（包括空结果、
+ * 基金不存在），非零一律视为上游失败，不论是否带 Datas，避免把上游错误当成「无结果」或缓存下来。
+ */
+function parse<T extends { ErrCode: number }>(schema: z.ZodType<T>, text: string): T {
   let json: unknown;
   try {
     json = JSON.parse(text);
@@ -110,6 +114,9 @@ function parse<T>(schema: z.ZodType<T>, text: string): T {
   const result = schema.safeParse(json);
   if (!result.success) {
     throw new UpstreamError('bad_response', 'upstream response did not match the expected shape');
+  }
+  if (result.data.ErrCode !== 0) {
+    throw new UpstreamError('bad_response', `upstream returned ErrCode ${result.data.ErrCode}`);
   }
   return result.data;
 }
