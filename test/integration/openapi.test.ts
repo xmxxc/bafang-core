@@ -47,7 +47,26 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'not_found',
       'internal_error',
       'validation_error',
+      'fund_not_found',
+      'upstream_unavailable',
+      'rate_limited',
     ]);
+  });
+
+  it('documents the fund search and basic info routes with their error responses', async () => {
+    const app = createApp({ db: createHealthProbe(db.pool) });
+    const res = await app.request('/v1/openapi');
+    const doc = (await res.json()) as OpenApiDoc;
+    const search = doc.paths['/v1/funds/search']?.get?.responses;
+    const detail = doc.paths['/v1/funds/{code}']?.get?.responses;
+    for (const status of ['200', '400', '429', '500', '502']) {
+      expect(search?.[status]).toBeDefined();
+      expect(detail?.[status]).toBeDefined();
+    }
+    expect(detail?.['404']).toBeDefined();
+    for (const name of ['FundSummary', 'FundSearchResult', 'FundDetail']) {
+      expect(doc.components.schemas[name]).toBeDefined();
+    }
   });
 
   it('declares error responses on the health route', async () => {
