@@ -2,15 +2,13 @@ import { serve } from '@hono/node-server';
 import { createApp } from './app';
 import { createHealthProbe, createPool } from './db';
 import { loadConfig, toDbConfig } from './config';
-import { ChineseTradingCalendar } from './trading-calendar';
-import { loadHolidays } from './trading-calendar/holidays';
+import { loadTradingCalendar } from './trading-calendar';
 
 const config = loadConfig();
 const pool = createPool(toDbConfig(config));
-const holidays = await loadHolidays(pool);
 const app = createApp({
   db: createHealthProbe(pool),
-  tradingCalendar: new ChineseTradingCalendar(holidays),
+  tradingCalendar: await loadTradingCalendar(pool),
 });
 
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {

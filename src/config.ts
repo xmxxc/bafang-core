@@ -8,6 +8,7 @@ const EnvSchema = z.object({
   PGUSER: z.string().default('test_bafang'),
   PGPASSWORD: z.string(),
   PGDATABASE: z.string().default('test_bafang'),
+  PGSCHEMA: z.string().optional(),
   PORT: z.coerce.number().int().default(3000),
 });
 
@@ -24,5 +25,6 @@ export function toDbConfig(config: Config): DbConfig {
     user: config.PGUSER,
     password: config.PGPASSWORD,
     database: config.PGDATABASE,
+    schema: config.PGSCHEMA,
   };
 }

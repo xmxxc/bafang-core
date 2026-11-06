@@ -10,7 +10,7 @@ export interface TestSchema {
 
 export async function createTestSchema(): Promise<TestSchema> {
   const schema = `test_${randomUUID().replaceAll('-', '')}`;
-  const pool = createPool(toDbConfig(loadConfig()));
+  const pool = createPool({ ...toDbConfig(loadConfig()), schema });
   await migrateSchema(pool, MIGRATIONS_FOLDER, schema);
   return { pool, schema };
 }

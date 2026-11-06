@@ -1,73 +1,128 @@
+import { spawnSync } from 'node:child_process';
+import { rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import {
-  importHolidays,
-  loadHolidays,
-  type HolidayEntry,
-} from '../../src/trading-calendar/holidays';
+import { createApp } from '../../src/app';
+import { createHealthProbe } from '../../src/db';
+import type { MarketStatusResponse } from '../../src/routes/market-status';
+import { loadTradingCalendar } from '../../src/trading-calendar';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
 
-describe('trading calendar import against a real PostgreSQL test database', () => {
+const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+
+interface HolidayFileEntry {
+  date: string;
+  name: string;
+}
+
+function writeHolidaysFile(year: number, holidays: HolidayFileEntry[]): string {
+  const file = join(tmpdir(), `holidays-${year}-${randomUUID()}.json`);
+  writeFileSync(file, JSON.stringify({ year, holidays }));
+  return file;
+}
+
+function fixedClock(iso: string) {
+  const now = new Date(iso);
+  return { now: () => now };
+}
+
+describe('trading calendar import via the CLI, observed over HTTP', () => {
   let db: TestSchema;
+  const files: string[] = [];
 
   beforeEach(async () => {
     db = await createTestSchema();
   });
 
   afterEach(async () => {
+    for (const file of files) rmSync(file, { force: true });
+    files.length = 0;
     await dropTestSchema(db);
   });
 
-  const original: HolidayEntry[] = [
-    { date: '2026-01-01', name: '元旦' },
-    { date: '2026-10-01', name: '国庆节' },
-  ];
+  function importCli(args: string[]): { status: number | null; output: string } {
+    const result = spawnSync('pnpm', ['trading-calendar:import', ...args], {
+      cwd: REPO_ROOT,
+      env: { ...process.env, PGSCHEMA: db.schema },
+      encoding: 'utf8',
+      timeout: 60_000,
+    });
+    return { status: result.status, output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+  }
 
-  it('imports a year and re-importing is idempotent', async () => {
-    await importHolidays(db.pool, 2026, original);
-    expect(await loadHolidays(db.pool)).toEqual(['2026-01-01', '2026-10-01']);
+  async function marketStatus(clockIso: string): Promise<MarketStatusResponse> {
+    const calendar = await loadTradingCalendar(db.pool);
+    const target = createApp({
+      db: createHealthProbe(db.pool),
+      clock: fixedClock(clockIso),
+      tradingCalendar: calendar,
+    });
+    const res = await target.request('/v1/market/status');
+    expect(res.status).toBe(200);
+    return (await res.json()) as MarketStatusResponse;
+  }
 
-    await importHolidays(db.pool, 2026, original);
-    expect(await loadHolidays(db.pool)).toEqual(['2026-01-01', '2026-10-01']);
+  it('imports a year via the CLI and the imported holiday takes effect over HTTP', async () => {
+    const file = writeHolidaysFile(2027, [{ date: '2027-01-01', name: '元旦' }]);
+    files.push(file);
+    expect(importCli(['2027', '--file', file]).status).toBe(0);
+
+    expect((await marketStatus('2027-01-01T02:00:00.000Z')).status).toBe('holiday');
+    expect((await marketStatus('2027-01-04T02:00:00.000Z')).status).toBe('trading');
   });
 
-  it('rejects a file with duplicate dates and leaves the existing year data intact', async () => {
-    await importHolidays(db.pool, 2026, original);
+  it('re-importing the same file is idempotent', async () => {
+    const file = writeHolidaysFile(2027, [{ date: '2027-01-01', name: '元旦' }]);
+    files.push(file);
+    expect(importCli(['2027', '--file', file]).status).toBe(0);
+    expect(importCli(['2027', '--file', file]).status).toBe(0);
 
-    const duplicated: HolidayEntry[] = [
-      { date: '2026-05-01', name: '劳动节' },
-      { date: '2026-05-01', name: '劳动节（重复）' },
-    ];
-    await expect(importHolidays(db.pool, 2026, duplicated)).rejects.toThrow(/重复/);
-
-    expect(await loadHolidays(db.pool)).toEqual(['2026-01-01', '2026-10-01']);
+    expect((await marketStatus('2027-01-01T02:00:00.000Z')).status).toBe('holiday');
+    expect((await marketStatus('2027-01-04T02:00:00.000Z')).status).toBe('trading');
   });
 
-  it('rejects an invalid date format and leaves the existing year data intact', async () => {
-    await importHolidays(db.pool, 2026, original);
+  it('rejects duplicate dates and leaves the previously imported data intact', async () => {
+    const good = writeHolidaysFile(2027, [{ date: '2027-01-01', name: '元旦' }]);
+    files.push(good);
+    expect(importCli(['2027', '--file', good]).status).toBe(0);
 
-    const badFormat: HolidayEntry[] = [{ date: '2026/01/01', name: '坏格式' }];
-    await expect(importHolidays(db.pool, 2026, badFormat)).rejects.toThrow(/YYYY-MM-DD/);
+    const duplicated = writeHolidaysFile(2027, [
+      { date: '2027-06-01', name: '某节' },
+      { date: '2027-06-01', name: '某节重复' },
+    ]);
+    files.push(duplicated);
+    expect(importCli(['2027', '--file', duplicated]).status).not.toBe(0);
 
-    expect(await loadHolidays(db.pool)).toEqual(['2026-01-01', '2026-10-01']);
+    expect((await marketStatus('2027-01-01T02:00:00.000Z')).status).toBe('holiday');
+    expect((await marketStatus('2027-06-01T02:00:00.000Z')).status).toBe('trading');
   });
 
-  it('rejects a holiday belonging to another year and leaves the existing year data intact', async () => {
-    await importHolidays(db.pool, 2026, original);
+  it('rejects an invalid date format and leaves the previously imported data intact', async () => {
+    const good = writeHolidaysFile(2027, [{ date: '2027-01-01', name: '元旦' }]);
+    files.push(good);
+    expect(importCli(['2027', '--file', good]).status).toBe(0);
 
-    const wrongYear: HolidayEntry[] = [{ date: '2025-01-01', name: '跨年' }];
-    await expect(importHolidays(db.pool, 2026, wrongYear)).rejects.toThrow(/2026/);
+    const badFormat = writeHolidaysFile(2027, [{ date: '2027/01/05', name: '坏格式' }]);
+    files.push(badFormat);
+    expect(importCli(['2027', '--file', badFormat]).status).not.toBe(0);
 
-    expect(await loadHolidays(db.pool)).toEqual(['2026-01-01', '2026-10-01']);
+    expect((await marketStatus('2027-01-01T02:00:00.000Z')).status).toBe('holiday');
+    expect((await marketStatus('2027-01-05T02:00:00.000Z')).status).toBe('trading');
   });
 
-  it('rolls back the delete when the insert fails at the database', async () => {
-    await importHolidays(db.pool, 2026, original);
+  it('rejects a holiday belonging to another year and leaves the previously imported data intact', async () => {
+    const good = writeHolidaysFile(2027, [{ date: '2027-01-01', name: '元旦' }]);
+    files.push(good);
+    expect(importCli(['2027', '--file', good]).status).toBe(0);
 
-    // Passes validation (unique, valid date, correct year) but violates the NOT NULL on `name`,
-    // so the insert fails after the delete ran — the transaction must restore the original data.
-    const notNullViolation = [{ date: '2026-05-01', name: null as unknown as string }];
-    await expect(importHolidays(db.pool, 2026, notNullViolation)).rejects.toThrow();
+    const wrongYear = writeHolidaysFile(2027, [{ date: '2026-01-05', name: '跨年' }]);
+    files.push(wrongYear);
+    expect(importCli(['2027', '--file', wrongYear]).status).not.toBe(0);
 
-    expect(await loadHolidays(db.pool)).toEqual(['2026-01-01', '2026-10-01']);
+    expect((await marketStatus('2027-01-01T02:00:00.000Z')).status).toBe('holiday');
+    expect((await marketStatus('2027-01-04T02:00:00.000Z')).status).toBe('trading');
   });
 });

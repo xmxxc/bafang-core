@@ -1,4 +1,6 @@
 import { shanghaiDate } from './clock';
+import { loadHolidays } from './trading-calendar/holidays';
+import type { Pool } from 'pg';
 
 export interface TradingCalendar {
   isTradingDay(date: Date): boolean;
@@ -26,4 +28,9 @@ export class ChineseTradingCalendar implements TradingCalendar {
     if (weekday === 'Sat' || weekday === 'Sun') return false;
     return !this.holidays.has(shanghaiDate(date));
   }
+}
+
+/** 按启动流程从数据库加载休市日，构建交易日历。 */
+export async function loadTradingCalendar(pool: Pool): Promise<TradingCalendar> {
+  return new ChineseTradingCalendar(await loadHolidays(pool));
 }

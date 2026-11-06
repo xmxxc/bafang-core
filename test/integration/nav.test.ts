@@ -4,6 +4,7 @@ import { createHealthProbe } from '../../src/db';
 import type { ErrorResponse } from '../../src/errors';
 import { UpstreamError } from '../../src/market/upstream';
 import type { LatestNavResponse, NavHistoryResponse } from '../../src/routes/nav';
+import { ChineseTradingCalendar } from '../../src/trading-calendar';
 import {
   eastmoneySamples,
   RecordedUpstream,
@@ -126,6 +127,53 @@ describe('fund NAV over in-process HTTP against a real PostgreSQL test database'
       expect(await second.json()).toEqual(firstBody);
     });
 
+    it("keeps polling across midnight until the prior trading day's NAV is published", async () => {
+      const target = app();
+      // Friday 23:50 Asia/Shanghai — Friday's (11-06) NAV is not out yet; upstream still serves
+      // Thursday's, so the value is only short-cached.
+      clock.set('2026-11-06T15:50:00.000Z');
+      const first = await target.request('/v1/funds/000001/nav');
+      expect(first.status).toBe(200);
+      expect(((await first.json()) as LatestNavResponse).navDate).toBe('2026-11-05');
+
+      // Saturday 00:01 — the poll interval has elapsed, so it refetches; the stale value must stay
+      // short-cached (not promoted to a long cache) because Friday's NAV is still expected.
+      clock.set('2026-11-06T16:01:00.000Z');
+      const second = await target.request('/v1/funds/000001/nav');
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as LatestNavResponse).navDate).toBe('2026-11-05');
+
+      // Saturday 00:10 — Friday's NAV is now published; the next poll picks it up.
+      upstream.use(() => sample('eastmoney/nav-000001-latest-2026-11-06.json'));
+      clock.set('2026-11-06T16:10:00.000Z');
+      const third = await target.request('/v1/funds/000001/nav');
+      expect(third.status).toBe(200);
+      expect(((await third.json()) as LatestNavResponse).navDate).toBe('2026-11-06');
+    });
+
+    it("keeps polling through a holiday until the prior trading day's NAV is published", async () => {
+      const target = app({ tradingCalendar: new ChineseTradingCalendar(['2026-10-01']) });
+      // Wednesday 2026-09-30 23:50 — the trading day before National Day; its NAV is not out yet.
+      clock.set('2026-09-30T15:50:00.000Z');
+      upstream.use(() => navPage('2026-09-29'));
+      const first = await target.request('/v1/funds/000001/nav');
+      expect(first.status).toBe(200);
+      expect(((await first.json()) as LatestNavResponse).navDate).toBe('2026-09-29');
+
+      // Thursday 2026-10-01 00:01 (holiday) — still expects Wednesday's NAV, keeps short-polling.
+      clock.set('2026-09-30T16:01:00.000Z');
+      const second = await target.request('/v1/funds/000001/nav');
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as LatestNavResponse).navDate).toBe('2026-09-29');
+
+      // Thursday 2026-10-01 00:10 — Wednesday's NAV is published during the holiday.
+      upstream.use(() => navPage('2026-09-30'));
+      clock.set('2026-09-30T16:10:00.000Z');
+      const third = await target.request('/v1/funds/000001/nav');
+      expect(third.status).toBe(200);
+      expect(((await third.json()) as LatestNavResponse).navDate).toBe('2026-09-30');
+    });
+
     it.each<[string, string | undefined]>([
       ['missing', undefined],
       ['a placeholder', '--'],
@@ -224,6 +272,46 @@ describe('fund NAV over in-process HTTP against a real PostgreSQL test database'
       expect(res.status).toBe(502);
       expect(((await res.json()) as ErrorResponse).error.code).toBe('upstream_unavailable');
     });
+
+    it("keeps polling across midnight until the prior trading day's NAV appears in history", async () => {
+      const target = app();
+      clock.set('2026-11-06T15:50:00.000Z'); // Friday 23:50
+      upstream.use(() => navPage('2026-11-05'));
+      const first = await history(target, '000001', '1m');
+      expect(first.status).toBe(200);
+      expect(((await first.json()) as NavHistoryResponse).points[0]!.date).toBe('2026-11-05');
+
+      clock.set('2026-11-06T16:01:00.000Z'); // Saturday 00:01
+      const second = await history(target, '000001', '1m');
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as NavHistoryResponse).points[0]!.date).toBe('2026-11-05');
+
+      upstream.use(() => navPage('2026-11-06'));
+      clock.set('2026-11-06T16:10:00.000Z'); // Saturday 00:10
+      const third = await history(target, '000001', '1m');
+      expect(third.status).toBe(200);
+      expect(((await third.json()) as NavHistoryResponse).points[0]!.date).toBe('2026-11-06');
+    });
+
+    it("keeps polling through a holiday until the prior trading day's NAV appears in history", async () => {
+      const target = app({ tradingCalendar: new ChineseTradingCalendar(['2026-10-01']) });
+      clock.set('2026-09-30T15:50:00.000Z'); // Wednesday 23:50
+      upstream.use(() => navPage('2026-09-29'));
+      const first = await history(target, '000001', '1m');
+      expect(first.status).toBe(200);
+      expect(((await first.json()) as NavHistoryResponse).points[0]!.date).toBe('2026-09-29');
+
+      clock.set('2026-09-30T16:01:00.000Z'); // Thursday 00:01 (holiday)
+      const second = await history(target, '000001', '1m');
+      expect(second.status).toBe(200);
+      expect(((await second.json()) as NavHistoryResponse).points[0]!.date).toBe('2026-09-29');
+
+      upstream.use(() => navPage('2026-09-30'));
+      clock.set('2026-09-30T16:10:00.000Z'); // Thursday 00:10
+      const third = await history(target, '000001', '1m');
+      expect(third.status).toBe(200);
+      expect(((await third.json()) as NavHistoryResponse).points[0]!.date).toBe('2026-09-30');
+    });
   });
 
   describe('anonymous access', () => {
@@ -249,4 +337,12 @@ function latestNavWithChange(file: string, value: string | undefined): string {
   if (value === undefined) delete item.JZZZL;
   else item.JZZZL = value;
   return JSON.stringify(body);
+}
+
+/** 生成只含一条记录的净值响应体，用于覆盖「先旧后新」的净值公布场景。 */
+function navPage(date: string): string {
+  return JSON.stringify({
+    ErrCode: 0,
+    Data: { LSJZList: [{ FSRQ: date, DWJZ: '1.0000', LJJZ: '3.5730', JZZZL: '1.83' }] },
+  });
 }
