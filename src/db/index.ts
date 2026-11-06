@@ -35,6 +35,8 @@ export function createDb(pool: Pool) {
   return drizzle(pool, { schema });
 }
 
+export type Db = ReturnType<typeof createDb>;
+
 export interface HealthProbe {
   ping(): Promise<boolean>;
 }

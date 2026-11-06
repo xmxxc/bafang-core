@@ -10,6 +10,11 @@ const EnvSchema = z.object({
   PGDATABASE: z.string().default('test_bafang'),
   PGSCHEMA: z.string().optional(),
   PORT: z.coerce.number().int().default(3000),
+  NODE_ENV: z.string().default('development'),
+  /** Resend 发信的 API key；未配置时使用开发模式的假发信（仅在非生产环境）。 */
+  RESEND_API_KEY: z.string().optional(),
+  /** Resend 发信人地址；配置 RESEND_API_KEY 时必须同时配置。 */
+  RESEND_FROM: z.string().optional(),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

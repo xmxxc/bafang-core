@@ -12,6 +12,9 @@ export interface RateLimitPolicy {
 /** 行情只读接口对匿名用户的限流：每个客户端 IP 每分钟 60 次。 */
 export const ANONYMOUS_MARKET_RATE_LIMIT: RateLimitPolicy = { limit: 60, windowMs: 60_000 };
 
+/** 请求邮箱验证码接口对每个客户端 IP 的限流：每分钟 5 次。 */
+export const EMAIL_CODE_REQUEST_RATE_LIMIT: RateLimitPolicy = { limit: 5, windowMs: 60_000 };
+
 interface Bucket {
   windowStart: number;
   count: number;

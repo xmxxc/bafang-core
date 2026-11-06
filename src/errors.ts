@@ -8,6 +8,13 @@ export const ErrorCodeSchema = z.enum([
   'fund_not_found',
   'upstream_unavailable',
   'rate_limited',
+  'unauthorized',
+  'verification_code_expired',
+  'verification_code_invalid',
+  'verification_code_used',
+  'verification_code_max_attempts',
+  'email_code_cooldown',
+  'email_code_daily_limit',
 ]);
 
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
