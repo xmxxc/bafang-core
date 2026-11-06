@@ -69,6 +69,28 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     }
   });
 
+  it('documents the batch estimate route with its explicit statuses', async () => {
+    const app = createApp({ db: createHealthProbe(db.pool) });
+    const res = await app.request('/v1/openapi');
+    const doc = (await res.json()) as OpenApiDoc;
+    const responses = doc.paths['/v1/funds/estimates']?.get?.responses;
+    for (const status of ['200', '400', '429', '500']) {
+      expect(responses?.[status]).toBeDefined();
+    }
+    for (const name of ['EstimateBatch', 'EstimateItem', 'Estimate']) {
+      expect(doc.components.schemas[name]).toBeDefined();
+    }
+    const item = doc.components.schemas.EstimateItem as {
+      properties: { status: { enum: string[] } };
+    };
+    expect(item.properties.status.enum).toEqual([
+      'estimated',
+      'unavailable',
+      'pre_market',
+      'holiday',
+    ]);
+  });
+
   it('declares error responses on the health route', async () => {
     const app = createApp({ db: createHealthProbe(db.pool) });
     const res = await app.request('/v1/openapi');
