@@ -1,0 +1,2 @@
+CREATE ROLE test_bafang LOGIN PASSWORD 'changeme' NOCREATEDB NOSUPERUSER;
+CREATE DATABASE test_bafang OWNER test_bafang;
