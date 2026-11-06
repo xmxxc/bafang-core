@@ -2,6 +2,7 @@ node_modules
 dist
 drizzle
 pnpm-lock.yaml
+docker
 docs/agents/domain.md
 docs/agents/issue-tracker.md
 docs/agents/triage-labels.md

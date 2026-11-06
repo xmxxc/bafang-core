@@ -24,6 +24,10 @@ export const healthRoute = createRoute({
       description: '服务存活，数据库可达',
       content: { 'application/json': { schema: HealthResponseSchema } },
     },
+    500: {
+      description: '内部错误',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
     503: {
       description: '数据库不可达',
       content: { 'application/json': { schema: ErrorResponseSchema } },

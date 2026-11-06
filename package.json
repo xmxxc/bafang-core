@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "八方来财 · 后端：行情聚合、账号与同步、Agent、MCP",
+  "description": "八方来财 · 后端：行情聚合、用户与登录方式、Agent、MCP",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
@@ -15,8 +15,6 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "test": "vitest run",
-    "test:fast": "vitest run test/unit",
-    "test:focused": "vitest run test/integration",
     "test:watch": "vitest"
   },
   "dependencies": {

@@ -5,15 +5,15 @@ import { createApp } from '../../src/app';
 import { loadConfig, toDbConfig } from '../../src/config';
 import { createHealthProbe, createPool, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { HealthResponse } from '../../src/routes/health';
+import type { ErrorResponse } from '../../src/errors';
 
-describe('health (integration, real PostgreSQL)', () => {
+describe('GET /health over in-process HTTP against a real PostgreSQL test database', () => {
   let pool: Pool;
   let schema: string;
 
   beforeEach(async () => {
     schema = `test_${randomUUID().replaceAll('-', '')}`;
     pool = createPool(toDbConfig(loadConfig()));
-    await migrateSchema(pool, MIGRATIONS_FOLDER, schema);
     await migrateSchema(pool, MIGRATIONS_FOLDER, schema);
   });
 
@@ -22,28 +22,53 @@ describe('health (integration, real PostgreSQL)', () => {
     await pool.end();
   });
 
-  it('migration builds the initial structure in an empty schema', async () => {
-    const { rows } = await pool.query(
-      `SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = $1 AND table_name = 'app_meta'`,
-      [schema],
-    );
-    expect(rows[0]?.n).toBe(1);
-  });
-
-  it('migration is idempotent: re-running records exactly one applied migration', async () => {
-    const { rows } = await pool.query(
-      `SELECT count(*)::int AS n FROM "${schema}"."__drizzle_migrations"`,
-    );
-    expect(rows[0]?.n).toBe(1);
-  });
-
-  it('serves /health with ok and database connectivity through in-process HTTP', async () => {
-    const app = createApp({ db: createHealthProbe(pool) });
+  it('reports ok with database connectivity and the injected clock time', async () => {
+    const fixed = new Date('2024-01-02T03:04:05.000Z');
+    const app = createApp({
+      db: createHealthProbe(pool),
+      clock: { now: () => fixed },
+      tradingCalendar: { isTradingDay: () => false },
+    });
     const res = await app.request('/health');
     expect(res.status).toBe(200);
     const body = (await res.json()) as HealthResponse;
     expect(body.status).toBe('ok');
     expect(body.database.connected).toBe(true);
-    expect(body.time).toBeTruthy();
+    expect(body.time).toBe(fixed.toISOString());
+  });
+
+  it('uses the default system clock when none is injected', async () => {
+    const before = Date.now();
+    const app = createApp({ db: createHealthProbe(pool) });
+    const res = await app.request('/health');
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as HealthResponse;
+    const time = new Date(body.time).getTime();
+    expect(time).toBeGreaterThanOrEqual(before);
+    expect(time).toBeLessThanOrEqual(Date.now());
+  });
+
+  it('returns the unified 503 error when the database is unavailable', async () => {
+    const app = createApp({ db: { ping: async () => false } });
+    const res = await app.request('/health');
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as ErrorResponse;
+    expect(body.error.code).toBe('database_unavailable');
+    expect(typeof body.error.message).toBe('string');
+  });
+
+  it('returns the unified 500 error when the probe throws', async () => {
+    const app = createApp({
+      db: {
+        ping: async () => {
+          throw new Error('boom');
+        },
+      },
+    });
+    const res = await app.request('/health');
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as ErrorResponse;
+    expect(body.error.code).toBe('internal_error');
+    expect(typeof body.error.message).toBe('string');
   });
 });

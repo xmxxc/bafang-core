@@ -55,13 +55,18 @@ export function createApp(deps: AppDeps = {}): App {
 
   app.notFound((c) => c.json(errorBody('not_found', `未找到 ${c.req.path}`), 404));
 
+  app.onError((err, c) => {
+    console.error('[bafang-core] unhandled error', err);
+    return c.json(errorBody('internal_error', '内部错误'), 500);
+  });
+
   app.doc('/openapi', {
     openapi: '3.1.0',
     info: {
       title: 'bafang-core',
       version: '0.1.0',
       description:
-        '八方来财后端：行情聚合、账号与同步、Agent、MCP。本 OpenAPI 文档由请求/响应 schema 自动生成。',
+        '八方来财后端：行情聚合、用户与登录方式、Agent、MCP。本 OpenAPI 文档由请求/响应 schema 自动生成。',
     },
   });
 
