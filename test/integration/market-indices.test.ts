@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp, type AppDeps } from '../../src/app';
 import { createHealthProbe } from '../../src/db';
 import { UpstreamError } from '../../src/market/upstream';
 import type { MarketIndexResponse, MarketIndicesResponse } from '../../src/routes/market-indices';
-import { ChineseTradingCalendar } from '../../src/trading-calendar';
+import { ChineseTradingCalendar, HongKongTradingCalendar } from '../../src/trading-calendar';
 import {
   hostDown,
   quoteSamples,
@@ -68,6 +70,18 @@ const THS_QUOTE_TIME = {
 
 const CODES = ['000001.SH', '399001.SZ', '399006.SZ', 'HSI.HK'] as const;
 
+/** 构造一行上证指数的腾讯报价：最新价在第 3 个字段、昨收第 4 个、行情时间第 30 个。 */
+function tencentLine(price: string, prevClose: string, time: string): string {
+  const fields = Array.from({ length: 33 }, () => '');
+  fields[0] = '1';
+  fields[1] = '上证指数';
+  fields[2] = '000001';
+  fields[3] = price;
+  fields[4] = prevClose;
+  fields[30] = time;
+  return `v_sh000001="${fields.join('~')}";`;
+}
+
 /** 改写腾讯样本：去掉或替换某只证券的那一行。 */
 function tencentWith(symbol: string, line: string | null): Replay {
   return (url) => {
@@ -77,6 +91,70 @@ function tencentWith(symbol: string, line: string | null): Replay {
       .map((row) => (row.startsWith(`v_${symbol}=`) ? line : row))
       .filter((row): row is string => row !== null);
     return kept.join('\n');
+  };
+}
+
+interface Dates {
+  /** A 股报价的交易日（YYYYMMDD）。 */
+  cn?: string;
+  /** 港股报价的交易日（YYYYMMDD）。 */
+  hk?: string;
+}
+
+/**
+ * 把录制样本（交易日 2026-11-06）改写成其他交易日，按来源、按市场分别指定；省略的保持原样。
+ * `hkTime` 改写腾讯港股行情的时刻（HH:MM:SS），例如半日市的 12:10:00。
+ */
+function redated({
+  tencent = {},
+  ths = {},
+  hkTime,
+}: {
+  tencent?: Dates;
+  ths?: Dates;
+  hkTime?: string;
+}): Replay {
+  return (url) => {
+    if (url.hostname === TENCENT) {
+      return sample('tencent/indices.txt')
+        .split('\n')
+        .map((row) => {
+          if (row.startsWith('v_hkHSI=')) {
+            const day = tencent.hk ?? '20261106';
+            const formatted = `${day.slice(0, 4)}/${day.slice(4, 6)}/${day.slice(6, 8)}`;
+            return row.replace('2026/11/06 18:30:50', `${formatted} ${hkTime ?? '18:30:50'}`);
+          }
+          return tencent.cn ? row.replace('~20261106', `~${tencent.cn}`) : row;
+        })
+        .join('\n');
+    }
+    const body = quoteSamples(url);
+    if (typeof body === 'string' && url.pathname.startsWith('/v6/time/')) {
+      const day = url.pathname.includes('/hk_') ? ths.hk : ths.cn;
+      return day ? body.replace('"date":"20261106"', `"date":"${day}"`) : body;
+    }
+    return body;
+  };
+}
+
+/** 仓库附带的 2026 年交易日历（A 股与港股），与生产启动时导入的数据相同。 */
+function shippedCalendars(): Pick<AppDeps, 'tradingCalendar' | 'hkTradingCalendar'> {
+  const read = (name: string) =>
+    JSON.parse(
+      readFileSync(fileURLToPath(new URL(`../../data/holidays/${name}`, import.meta.url)), 'utf8'),
+    ) as {
+      holidays: { date: string; earlyClose?: string }[];
+    };
+  const cn = read('2026.json').holidays.map((entry) => entry.date);
+  const hk = read('hk-2026.json').holidays;
+  return {
+    tradingCalendar: new ChineseTradingCalendar(cn),
+    hkTradingCalendar: new HongKongTradingCalendar(
+      hk.filter((entry) => !entry.earlyClose).map((entry) => entry.date),
+      hk.flatMap((entry) =>
+        entry.earlyClose ? [[entry.date, entry.earlyClose] as [string, string]] : [],
+      ),
+    ),
   };
 }
 
@@ -208,14 +286,8 @@ describe('GET /v1/market/indices over in-process HTTP against a real PostgreSQL 
     });
 
     it.each([
-      [
-        'a placeholder price',
-        'v_sh000001="1~上证指数~000001~--~3689.91~~~~~~~~~~~~~~~~~~~~~~~~~~~~20261106161401~~~";',
-      ],
-      [
-        'a zero price',
-        'v_sh000001="1~上证指数~000001~0.00~3689.91~~~~~~~~~~~~~~~~~~~~~~~~~~~~20261106161401~~~";',
-      ],
+      ['a placeholder price', tencentLine('--', '3689.91', '20261106161401')],
+      ['a zero price', tencentLine('0.00', '3689.91', '20261106161401')],
       ['a missing quote time', 'v_sh000001="1~上证指数~000001~3649.18~3689.91";'],
     ])('falls back when Tencent gives %s instead of a usable quote', async (_name, line) => {
       upstream.use(tencentWith('sh000001', line));
@@ -348,22 +420,6 @@ describe('GET /v1/market/indices over in-process HTTP against a real PostgreSQL 
       }
     });
 
-    it('infers a Hong Kong holiday when no quote for today appears after the open', async () => {
-      clock.set('2026-11-09T01:32:00.000Z'); // Monday 09:32 — still within the grace minutes
-      expect(byCode(await indices(app()), 'HSI.HK')).toMatchObject({
-        marketStatus: 'pre_market',
-        available: true,
-      });
-
-      clock.set('2026-11-09T02:00:00.000Z'); // Monday 10:00 — quote still dated Friday
-      expect(byCode(await indices(app()), 'HSI.HK')).toMatchObject({
-        marketStatus: 'holiday',
-        available: true,
-        tradeDate: '2026-11-06',
-        point: '24481.86',
-      });
-    });
-
     it('marks A-share indices unavailable rather than showing a stale close during trading hours', async () => {
       clock.set('2026-11-09T02:00:00.000Z'); // Monday 10:00, a trading day; both sources dated Friday
       const body = await indices();
@@ -377,14 +433,108 @@ describe('GET /v1/market/indices over in-process HTTP against a real PostgreSQL 
         });
       }
     });
+  });
 
-    it('marks the Hang Seng index unavailable when its quote is more than a week old', async () => {
-      clock.set('2026-11-16T02:00:00.000Z'); // Monday ten days later
-      expect(byCode(await indices(), 'HSI.HK')).toMatchObject({
+  describe('Hong Kong trading calendar', () => {
+    it('falls back to 同花顺 when Tencent still serves the previous session on a Hong Kong trading day', async () => {
+      clock.set('2026-11-09T02:00:00.000Z'); // Monday 10:00, a trading day in both markets
+      upstream.use(redated({ ths: { cn: '20261109', hk: '20261109' } }));
+      const body = await indices();
+      for (const code of CODES) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'trading',
+          available: true,
+          tradeDate: '2026-11-09',
+          source: 'ths',
+          fallback: true,
+        });
+      }
+      expect(byCode(body, 'HSI.HK').point).toBe('24481.86');
+    });
+
+    it('marks the Hang Seng index unavailable, not holiday, when both sources are stale on a trading day', async () => {
+      clock.set('2026-11-09T02:00:00.000Z'); // Monday 10:00; both sources still dated Friday
+      const body = await indices();
+      expect(byCode(body, 'HSI.HK')).toEqual({
+        code: 'HSI.HK',
+        name: '恒生指数',
+        market: 'hk',
+        marketStatus: 'trading',
         available: false,
         point: null,
+        prevClose: null,
         change: null,
+        changePercent: null,
+        tradeDate: null,
+        quoteTime: null,
+        source: null,
+        fallback: true,
       });
+    });
+
+    it('shows the last close and holiday on a Hong Kong-only holiday while A-shares trade', async () => {
+      // 2026-10-19 (Mon) is 重阳节翌日 in the shipped Hong Kong calendar; A-shares trade that day.
+      clock.set('2026-10-19T02:00:00.000Z');
+      upstream.use(redated({ tencent: { cn: '20261019', hk: '20261016' } }));
+      const body = await indices(app(shippedCalendars()));
+      expect(byCode(body, 'HSI.HK')).toMatchObject({
+        marketStatus: 'holiday',
+        available: true,
+        tradeDate: '2026-10-16',
+        point: '24481.86',
+        source: 'tencent',
+        fallback: false,
+      });
+      for (const code of ['000001.SH', '399001.SZ', '399006.SZ']) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'trading',
+          available: true,
+          tradeDate: '2026-10-19',
+          source: 'tencent',
+        });
+      }
+    });
+
+    it('shows Hong Kong trading while A-shares are closed for an A-share-only holiday', async () => {
+      // 2026-10-05 (Mon) is 国庆节 for A-shares (last session 09-30) but a Hong Kong trading day.
+      clock.set('2026-10-05T02:00:00.000Z');
+      upstream.use(redated({ tencent: { cn: '20260930', hk: '20261005' } }));
+      const body = await indices(app(shippedCalendars()));
+      expect(byCode(body, 'HSI.HK')).toMatchObject({
+        marketStatus: 'trading',
+        available: true,
+        tradeDate: '2026-10-05',
+        source: 'tencent',
+      });
+      for (const code of ['000001.SH', '399001.SZ', '399006.SZ']) {
+        expect(byCode(body, code)).toMatchObject({
+          marketStatus: 'holiday',
+          available: true,
+          tradeDate: '2026-09-30',
+          source: 'tencent',
+        });
+      }
+    });
+
+    it('closes at the half-day close and returns the closing point in the afternoon', async () => {
+      // 2026-12-24 (Thu) is a half-day (圣诞节前夕) in the shipped Hong Kong calendar.
+      upstream.use(redated({ tencent: { cn: '20261224', hk: '20261224' }, hkTime: '12:10:00' }));
+      const calendars = shippedCalendars();
+
+      clock.set('2026-12-24T03:00:00.000Z'); // 11:00 — morning session
+      expect(byCode(await indices(app(calendars)), 'HSI.HK').marketStatus).toBe('trading');
+
+      clock.set('2026-12-24T06:00:00.000Z'); // 14:00 — the half-day has closed
+      const body = await indices(app(calendars));
+      expect(byCode(body, 'HSI.HK')).toMatchObject({
+        marketStatus: 'closed',
+        available: true,
+        point: '24481.86',
+        change: '-315.12',
+        tradeDate: '2026-12-24',
+        quoteTime: '2026-12-24T04:10:00.000Z',
+      });
+      expect(byCode(body, '000001.SH').marketStatus).toBe('trading');
     });
   });
 
@@ -438,6 +588,71 @@ describe('GET /v1/market/indices over in-process HTTP against a real PostgreSQL 
       expect(byCode(await indices(target), 'HSI.HK').source).toBe('ths');
       clock.set('2026-11-06T13:05:01.000Z');
       expect(byCode(await indices(target), 'HSI.HK').source).toBe('tencent');
+    });
+  });
+
+  describe('caching across session boundaries (same app instance)', () => {
+    it('re-evaluates status and refetches quotes when the market opens', async () => {
+      const target = app();
+      clock.set('2026-11-09T01:29:50.000Z'); // Monday 09:29:50 — pre-market, Friday's close
+      const before = await indices(target);
+      for (const code of CODES) {
+        expect(byCode(before, code)).toMatchObject({
+          marketStatus: 'pre_market',
+          tradeDate: '2026-11-06',
+        });
+      }
+
+      upstream.use(redated({ tencent: { cn: '20261109', hk: '20261109' } }));
+      clock.set('2026-11-09T01:30:05.000Z'); // 09:30:05 — within the pre-market TTL, but past the open
+      const after = await indices(target);
+      for (const code of CODES) {
+        expect(byCode(after, code)).toMatchObject({
+          marketStatus: 'trading',
+          available: true,
+          tradeDate: '2026-11-09',
+          source: 'tencent',
+        });
+      }
+    });
+
+    it('re-evaluates status and refetches quotes at the A-share close, keeping the Hong Kong cache', async () => {
+      const target = app();
+      clock.set('2026-11-06T06:59:55.000Z'); // Friday 14:59:55
+      const before = await indices(target);
+      expect(byCode(before, '000001.SH').marketStatus).toBe('trading');
+
+      upstream.use(tencentWith('sh000001', tencentLine('3650.00', '3689.91', '20261106150002')));
+      clock.set('2026-11-06T07:00:02.000Z'); // 15:00:02 — within the 10 s TTL, but past the close
+      const after = await indices(target);
+      expect(byCode(after, '000001.SH')).toMatchObject({
+        marketStatus: 'closed',
+        point: '3650.00',
+        change: '-39.91',
+      });
+      expect(byCode(after, 'HSI.HK')).toEqual(byCode(before, 'HSI.HK'));
+    });
+
+    it('re-evaluates status and refetches quotes when the trading day rolls over at midnight', async () => {
+      const target = app();
+      clock.set('2026-11-06T15:58:00.000Z'); // Friday 23:58 — closed
+      expect(byCode(await indices(target), '000001.SH').marketStatus).toBe('closed');
+
+      upstream.use(upstreamDown());
+      clock.set('2026-11-06T16:01:00.000Z'); // Saturday 00:01 — within the 5 min TTL, but a new day
+      const body = await indices(target);
+      for (const code of CODES) {
+        expect(byCode(body, code)).toMatchObject({ marketStatus: 'holiday', available: false });
+      }
+    });
+
+    it('re-evaluates the Hong Kong status at its 16:10 close', async () => {
+      const target = app();
+      clock.set('2026-11-06T08:05:00.000Z'); // Friday 16:05 — Hong Kong closing auction
+      expect(byCode(await indices(target), 'HSI.HK').marketStatus).toBe('trading');
+      upstream.use(upstreamDown());
+      clock.set('2026-11-06T08:10:01.000Z'); // 16:10:01
+      expect(byCode(await indices(target), 'HSI.HK').marketStatus).toBe('closed');
     });
   });
 

@@ -19,7 +19,7 @@ export const MarketIndexSchema = z
     }),
     marketStatus: MarketStatusSchema.shape.status.openapi({
       description:
-        '该指数所属市场的状态：trading 交易中、closed 已收盘、holiday 休市、pre_market 盘前。A 股按交易日历判定；港股按交易时段与报价的交易日推断（工作日开市后仍无当日行情即为休市）',
+        '该指数所属市场的状态：trading 交易中、closed 已收盘、holiday 休市、pre_market 盘前。每次请求按所属市场的交易日历重新判定：A 股日历；港股日历含休市日与半日市（半日市按日历给出的收市时刻收盘）',
     }),
     available: z.boolean().openapi({
       description: '是否取到了可信行情；为 false 时点位与涨跌均为 null（不以 0 表示）',
@@ -77,7 +77,7 @@ export const marketIndicesRoute = createRoute({
   tags: ['market'],
   summary: '大盘指数',
   description:
-    '返回上证指数、深证成指、创业板指、恒生指数的点位、涨跌额与涨跌幅，以及各自市场的状态。腾讯为主来源，单个指数取不到或不可信时回退到同花顺，都失败时该指数标为不可用（available=false，数值为 null），整体仍返回 200。非交易时段返回最近一个交易日的收盘数据。匿名可用并限流；交易时段缓存 10 秒，其余时段缓存数分钟。',
+    '返回上证指数、深证成指、创业板指、恒生指数的点位、涨跌额与涨跌幅，以及各自市场的状态。腾讯为主来源，单个指数取不到或不可信（按所属市场的交易日历，已开盘的交易日必须是当天的报价）时回退到同花顺，都失败时该指数标为不可用（available=false，数值为 null），整体仍返回 200。非交易时段返回最近一个交易日的收盘数据。匿名可用并限流；只缓存行情、不缓存状态：交易时段 10 秒，其余时段数分钟，且不跨过开盘、午休、收盘、半日市收市与零点等时段边界。',
   responses: {
     200: {
       description: '四个指数的行情',

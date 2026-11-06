@@ -1,5 +1,5 @@
 import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
-import type { TradingCalendar } from '../trading-calendar';
+import type { SessionCalendar, TradingCalendar } from '../trading-calendar';
 import type { Quote } from './quote';
 import { marketStatus, type MarketStatus } from './status';
 import { fetchTencentQuotes } from './tencent';
@@ -49,23 +49,47 @@ export interface IndexService {
 export interface IndexServiceDeps {
   upstream: UpstreamFetcher;
   clock: Clock;
+  /** A 股交易日历。 */
   calendar: TradingCalendar;
+  /** 港股交易日历（含半日市）。 */
+  hkCalendar: SessionCalendar;
 }
 
 const DAY_MS = 24 * 3600_000;
+const MINUTE_MS = 60_000;
 const MINUTES = (hour: number, minute: number) => hour * 60 + minute;
-const A_SHARE_OPEN = MINUTES(9, 30);
-/** 港股：09:30 开市，16:10 收市竞价结束（午间休市仍算交易时段，与 A 股的判定口径一致）。 */
-const HK_OPEN = MINUTES(9, 30);
-const HK_CLOSE = MINUTES(16, 10);
-/** 港股开市后多久仍拿不到当日行情，就判定当天休市。 */
-const HK_HOLIDAY_GRACE = 5;
-/** 港股行情最多允许落后的自然日数（覆盖农历新年、复活节等最长连续休市）。 */
-const HK_MAX_STALE_DAYS = 7;
-/** A 股往回找上一个交易日的上限。 */
+/** 往回找上一个交易日的上限。 */
 const MAX_LOOKBACK_DAYS = 31;
 
-/** 缓存时长：交易时段秒级，其余较长；不可用的结果只短暂缓存，避免上游故障时被反复打。 */
+/** 一个交易日内的时段边界（Asia/Shanghai 从午夜起算的分钟数）。午间休市仍算交易时段。 */
+interface Session {
+  open: number;
+  /** 时段边界：开盘、午休开始与结束、收盘，用来截断行情缓存。 */
+  boundaries: number[];
+  close: number;
+}
+
+/** A 股：09:30 开盘，11:30–13:00 午休，15:00 收盘。 */
+const A_SHARE_SESSION: Session = {
+  open: MINUTES(9, 30),
+  boundaries: [MINUTES(9, 30), MINUTES(11, 30), MINUTES(13, 0), MINUTES(15, 0)],
+  close: MINUTES(15, 0),
+};
+
+/** 港股：09:30 开市，12:00–13:00 午休，收市竞价至 16:10。半日市只有早市，收市时刻取自日历。 */
+function hkSession(date: Date, calendar: SessionCalendar): Session {
+  const earlyClose = calendar.earlyCloseMinutes(date);
+  if (earlyClose !== null) {
+    return { open: MINUTES(9, 30), boundaries: [MINUTES(9, 30), earlyClose], close: earlyClose };
+  }
+  return {
+    open: MINUTES(9, 30),
+    boundaries: [MINUTES(9, 30), MINUTES(12, 0), MINUTES(13, 0), MINUTES(16, 10)],
+    close: MINUTES(16, 10),
+  };
+}
+
+/** 行情缓存时长：交易时段秒级，其余较长；不可用的结果只短暂缓存。都截断到下一个时段边界。 */
 const TTL_MS: Record<MarketStatus | 'unavailable', number> = {
   trading: 10_000,
   pre_market: 30_000,
@@ -74,19 +98,25 @@ const TTL_MS: Record<MarketStatus | 'unavailable', number> = {
   unavailable: 10_000,
 };
 
+interface ResolvedQuote {
+  quote: Quote | null;
+  source: QuoteSource | null;
+  fallback: boolean;
+}
+
 /**
  * 大盘指数行情：腾讯为主来源（一次批量请求），某个指数在腾讯取不到或不可信时，
  * 单独回退到同花顺；都失败就标为不可用（数值为 null，不用 0）。
  *
- * 可信度：报价的交易日必须与当前应有的交易日对得上。
- * - A 股按交易日历：交易日开盘后必须是当天，其余时间（盘前、休市）不早于上一个交易日。
- * - 港股没有维护的交易日历，用报价自身的交易日推断：工作日开市后报价仍停在之前的交易日，
- *   就判定当天休市；报价落后超过 7 个自然日视为过期。
+ * 市场状态与「应有的交易日」都按各自市场的交易日历判定（A 股日历；港股日历含休市日与半日市），
+ * 不用报价日期去推断：今天是交易日且已开盘，就必须拿到今天的报价；否则（盘前、休市）报价不得早于
+ * 上一个交易日。对不上的报价视为不可信，回退或标为不可用，不会因此宣布休市。
  *
- * 缓存按指数分别存放在进程内，时长见 `TTL_MS`。
+ * 缓存只存行情（按指数，在进程内）；市场状态每次请求都重新计算。行情缓存时长见 `TTL_MS`，
+ * 并截断到所属市场的下一个时段边界（开盘、午休、收盘、半日市收市、零点），跨过边界一定重新取数。
  */
 export function createIndexService(deps: IndexServiceDeps): IndexService {
-  const cache = new Map<string, { item: MarketIndex; expiresAt: number }>();
+  const cache = new Map<string, { resolved: ResolvedQuote; expiresAt: number }>();
 
   return {
     async list() {
@@ -98,12 +128,15 @@ export function createIndexService(deps: IndexServiceDeps): IndexService {
       });
       if (stale.length > 0) {
         const fresh = await resolveQuotes(stale, now, deps);
-        for (const item of fresh) {
-          const ttl = TTL_MS[item.available ? item.marketStatus : 'unavailable'];
-          cache.set(item.code, { item, expiresAt: nowMs + ttl });
-        }
+        stale.forEach((index, i) => {
+          const resolved = fresh[i]!;
+          const status = statusOf(index.market, now, deps);
+          const ttl = TTL_MS[resolved.quote ? status : 'unavailable'];
+          const boundary = nextBoundary(index.market, now, deps);
+          cache.set(index.code, { resolved, expiresAt: Math.min(nowMs + ttl, boundary) });
+        });
       }
-      return INDICES.map((index) => cache.get(index.code)!.item);
+      return INDICES.map((index) => toItem(index, cache.get(index.code)!.resolved, now, deps));
     },
   };
 }
@@ -112,7 +145,7 @@ async function resolveQuotes(
   indices: readonly IndexDefinition[],
   now: Date,
   deps: IndexServiceDeps,
-): Promise<MarketIndex[]> {
+): Promise<ResolvedQuote[]> {
   let primary = new Map<string, Quote | null>();
   try {
     primary = await fetchTencentQuotes(
@@ -125,12 +158,12 @@ async function resolveQuotes(
   }
 
   return Promise.all(
-    indices.map(async (index) => {
-      const fromPrimary = trusted(index, primary.get(index.tencent) ?? null, now, deps.calendar);
-      if (fromPrimary) return toItem(index, fromPrimary, 'tencent', false, now, deps.calendar);
-      const fromBackup = trusted(index, await fetchBackup(index, deps), now, deps.calendar);
-      if (fromBackup) return toItem(index, fromBackup, 'ths', true, now, deps.calendar);
-      return toItem(index, null, null, true, now, deps.calendar);
+    indices.map(async (index): Promise<ResolvedQuote> => {
+      const fromPrimary = trusted(index, primary.get(index.tencent) ?? null, now, deps);
+      if (fromPrimary) return { quote: fromPrimary, source: 'tencent', fallback: false };
+      const fromBackup = trusted(index, await fetchBackup(index, deps), now, deps);
+      if (fromBackup) return { quote: fromBackup, source: 'ths', fallback: true };
+      return { quote: null, source: null, fallback: true };
     }),
   );
 }
@@ -145,26 +178,33 @@ async function fetchBackup(index: IndexDefinition, deps: IndexServiceDeps): Prom
   }
 }
 
+function calendarOf(market: IndexMarket, deps: IndexServiceDeps): TradingCalendar {
+  return market === 'cn' ? deps.calendar : deps.hkCalendar;
+}
+
+function sessionOf(market: IndexMarket, date: Date, deps: IndexServiceDeps): Session {
+  return market === 'cn' ? A_SHARE_SESSION : hkSession(date, deps.hkCalendar);
+}
+
 /** 报价的交易日与当前应有的交易日对得上才可信，否则返回 null。 */
 function trusted(
   index: IndexDefinition,
   quote: Quote | null,
   now: Date,
-  calendar: TradingCalendar,
+  deps: IndexServiceDeps,
 ): Quote | null {
   if (!quote) return null;
-  const today = shanghaiDate(now);
-  if (quote.tradeDate > today) return null;
-  const earliest =
-    index.market === 'cn'
-      ? aShareSessionDate(now, calendar)
-      : shanghaiDate(new Date(now.getTime() - HK_MAX_STALE_DAYS * DAY_MS));
-  return quote.tradeDate >= earliest ? quote : null;
+  if (quote.tradeDate > shanghaiDate(now)) return null;
+  return quote.tradeDate >= sessionDate(index.market, now, deps) ? quote : null;
 }
 
-/** A 股当前应展示的交易日：交易日开盘后是当天，否则是上一个交易日。 */
-function aShareSessionDate(now: Date, calendar: TradingCalendar): string {
-  if (calendar.isTradingDay(now) && shanghaiMinutesOfDay(now) >= A_SHARE_OPEN) {
+/** 当前应展示的交易日：今天是交易日且已开盘时是今天，否则是上一个交易日。 */
+function sessionDate(market: IndexMarket, now: Date, deps: IndexServiceDeps): string {
+  const calendar = calendarOf(market, deps);
+  if (
+    calendar.isTradingDay(now) &&
+    shanghaiMinutesOfDay(now) >= sessionOf(market, now, deps).open
+  ) {
     return shanghaiDate(now);
   }
   let day = new Date(now.getTime() - DAY_MS);
@@ -174,40 +214,39 @@ function aShareSessionDate(now: Date, calendar: TradingCalendar): string {
   return shanghaiDate(day);
 }
 
-const weekdayFormatter = new Intl.DateTimeFormat('en-US', {
-  timeZone: 'Asia/Shanghai',
-  weekday: 'short',
-});
-
-/**
- * 港股市场状态（香港与上海同在 UTC+8）：周末休市；工作日 09:30 前盘前；开市后如果报价的
- * 交易日仍早于今天（留 5 分钟余量），说明当天没有开市，判定为休市；否则 16:10 前交易中、之后已收盘。
- * 没有可用报价时只能按时段判断。
- */
-function hkMarketStatus(now: Date, quote: Quote | null): MarketStatus {
-  const weekday = weekdayFormatter.format(now);
-  if (weekday === 'Sat' || weekday === 'Sun') return 'holiday';
+function statusOf(market: IndexMarket, now: Date, deps: IndexServiceDeps): MarketStatus {
+  if (market === 'cn') return marketStatus(now, deps.calendar);
+  if (!deps.hkCalendar.isTradingDay(now)) return 'holiday';
   const minutes = shanghaiMinutesOfDay(now);
-  if (minutes < HK_OPEN) return 'pre_market';
-  if (quote && quote.tradeDate < shanghaiDate(now)) {
-    return minutes < HK_OPEN + HK_HOLIDAY_GRACE ? 'pre_market' : 'holiday';
+  const session = hkSession(now, deps.hkCalendar);
+  if (minutes < session.open) return 'pre_market';
+  if (minutes >= session.close) return 'closed';
+  return 'trading';
+}
+
+/** 所属市场在 now 之后的下一个时段边界（含次日零点）的时间戳。 */
+function nextBoundary(market: IndexMarket, now: Date, deps: IndexServiceDeps): number {
+  const dayStart = new Date(`${shanghaiDate(now)}T00:00:00+08:00`).getTime();
+  const candidates = [dayStart + DAY_MS];
+  if (calendarOf(market, deps).isTradingDay(now)) {
+    for (const minutes of sessionOf(market, now, deps).boundaries) {
+      candidates.push(dayStart + minutes * MINUTE_MS);
+    }
   }
-  return minutes < HK_CLOSE ? 'trading' : 'closed';
+  return Math.min(...candidates.filter((at) => at > now.getTime()));
 }
 
 function toItem(
   index: IndexDefinition,
-  quote: Quote | null,
-  source: QuoteSource | null,
-  fallback: boolean,
+  { quote, source, fallback }: ResolvedQuote,
   now: Date,
-  calendar: TradingCalendar,
+  deps: IndexServiceDeps,
 ): MarketIndex {
   return {
     code: index.code,
     name: index.name,
     market: index.market,
-    marketStatus: index.market === 'cn' ? marketStatus(now, calendar) : hkMarketStatus(now, quote),
+    marketStatus: statusOf(index.market, now, deps),
     available: quote !== null,
     point: quote?.price ?? null,
     prevClose: quote?.prevClose ?? null,
