@@ -6,7 +6,7 @@ import { createTestSchema, dropTestSchema, type TestSchema } from '../support/te
 
 interface OpenApiDoc {
   openapi: string;
-  paths: Record<string, { get?: { responses: Record<string, unknown> } }>;
+  paths: Record<string, { get?: { responses: Record<string, unknown> }; post?: unknown }>;
   components: {
     schemas: Record<
       string,
@@ -50,6 +50,13 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'fund_not_found',
       'upstream_unavailable',
       'rate_limited',
+      'unauthorized',
+      'verification_code_expired',
+      'verification_code_invalid',
+      'verification_code_used',
+      'verification_code_max_attempts',
+      'email_code_cooldown',
+      'email_code_daily_limit',
     ]);
   });
 
@@ -69,6 +76,28 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     }
   });
 
+  it('documents the batch estimate route with its explicit statuses', async () => {
+    const app = createApp({ db: createHealthProbe(db.pool) });
+    const res = await app.request('/v1/openapi');
+    const doc = (await res.json()) as OpenApiDoc;
+    const responses = doc.paths['/v1/funds/estimates']?.get?.responses;
+    for (const status of ['200', '400', '429', '500']) {
+      expect(responses?.[status]).toBeDefined();
+    }
+    for (const name of ['EstimateBatch', 'EstimateItem', 'Estimate']) {
+      expect(doc.components.schemas[name]).toBeDefined();
+    }
+    const item = doc.components.schemas.EstimateItem as {
+      properties: { status: { enum: string[] } };
+    };
+    expect(item.properties.status.enum).toEqual([
+      'estimated',
+      'unavailable',
+      'pre_market',
+      'holiday',
+    ]);
+  });
+
   it('declares error responses on the health route', async () => {
     const app = createApp({ db: createHealthProbe(db.pool) });
     const res = await app.request('/v1/openapi');
@@ -76,6 +105,19 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     const responses = doc.paths['/v1/health']?.get?.responses;
     expect(responses?.['500']).toBeDefined();
     expect(responses?.['503']).toBeDefined();
+  });
+
+  it('documents the auth routes with their error responses', async () => {
+    const app = createApp({ db: createHealthProbe(db.pool) });
+    const res = await app.request('/v1/openapi');
+    const doc = (await res.json()) as OpenApiDoc;
+    expect(doc.paths['/v1/auth/email/request']?.post).toBeDefined();
+    expect(doc.paths['/v1/auth/email/login']?.post).toBeDefined();
+    expect(doc.paths['/v1/auth/logout']?.post).toBeDefined();
+    expect(doc.paths['/v1/me']?.get).toBeDefined();
+    for (const name of ['EmailCodeRequestResult', 'EmailLoginResult', 'LoginMethod', 'Me']) {
+      expect(doc.components.schemas[name]).toBeDefined();
+    }
   });
 
   it('returns a unified 404 for unknown routes', async () => {

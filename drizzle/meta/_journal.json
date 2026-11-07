@@ -19,8 +19,22 @@
     {
       "idx": 2,
       "version": "7",
-      "when": 1793971799482,
-      "tag": "0002_trading_calendar_market",
+      "when": 1793974202393,
+      "tag": "0002_huge_doctor_spectrum",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793975953222,
+      "tag": "0003_light_bloodstorm",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794064725207,
+      "tag": "0004_trading_calendar_market",
       "breakpoints": true
     }
   ]

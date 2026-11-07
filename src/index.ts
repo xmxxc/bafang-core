@@ -1,13 +1,16 @@
 import { serve } from '@hono/node-server';
 import { createApp } from './app';
-import { createHealthProbe, createPool } from './db';
+import { createDb, createHealthProbe, createPool } from './db';
 import { loadConfig, toDbConfig } from './config';
 import { loadHongKongTradingCalendar, loadTradingCalendar } from './trading-calendar';
+import { createMailer } from './auth/mailer';
 
 const config = loadConfig();
 const pool = createPool(toDbConfig(config));
 const app = createApp({
   db: createHealthProbe(pool),
+  database: createDb(pool),
+  mailer: createMailer(config),
   tradingCalendar: await loadTradingCalendar(pool),
   hkTradingCalendar: await loadHongKongTradingCalendar(pool),
 });
