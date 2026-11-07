@@ -63,6 +63,22 @@ docker compose up -d
 
 公开接口按父 spec 的 API 约定使用版本前缀（`/v1/...`）。健康检查接口没有版本豁免，因此挂在 `/v1/health`；OpenAPI 文档也统一放在 `/v1/openapi`，让 studio / glance 与监控只面对 `/v1` 一个版本化入口，无需额外记忆未版本化的路径。旧路径 `/health` 与 `/openapi` 不再注册，会返回统一的 404。
 
+### 渠道接口
+
+均要求已登录的网页 Cookie 或小程序 `Authorization: Bearer <会话令牌>`，只能操作自己的渠道；访问别人的渠道与不存在的渠道一样返回 404 `not_found`。
+
+| 方法与路径                 | 请求                                                     | 成功响应                                      |
+| -------------------------- | -------------------------------------------------------- | --------------------------------------------- |
+| `GET /v1/channels`         | —                                                        | 200 `{ items: [{ id, name }] }`，按自定义顺序 |
+| `POST /v1/channels`        | `{ name }`                                               | 201 `{ id, name }`，追加到末尾                |
+| `PATCH /v1/channels/{id}`  | `{ name }`                                               | 200 `{ id, name }`                            |
+| `PUT /v1/channels/order`   | `{ channelIds: [...] }`，全部自己的渠道 id，每个恰好一次 | 200 `{ items: [{ id, name }] }`，按新顺序     |
+| `DELETE /v1/channels/{id}` | —                                                        | 204，无响应体                                 |
+
+渠道名去除首尾空白后为 1–100 字符，同一用户下精确匹配、不能重名（包括与预置渠道重名）；冲突返回 409 `channel_name_conflict`，数据库唯一约束保证并发请求下仍成立。新用户预置“支付宝”“天天基金”“未指定”，已有用户迁移后保留原顺序。每个用户恰好一个“未指定”，改名或删除返回 409 `channel_protected`，可以调整其顺序。排序列表缺漏或重复返回 400 `validation_error`，不改变原顺序。
+
+删除仅允许没有任何持仓的渠道。当前持仓模块尚未实现，`src/channels/service.ts` 的 `channelHasPositions` 暂返回无持仓；#16 在同一事务中接入真实查询后，有持仓时返回 409 `channel_has_positions`。只剩已清仓持仓时移到“未指定”的规则由 #19 补全。
+
 ## 测试
 
 ```bash

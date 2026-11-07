@@ -87,8 +87,8 @@ export const emailVerificationCodes = pgTable(
 );
 
 /**
- * 用户购买基金的平台（支付宝、天天基金、某家银行等）。#9 只在新用户首次登录时预置
- * "支付宝""天天基金""未指定"三个渠道；增删改排序等渠道管理接口属于 #15。
+ * 用户购买基金的平台（支付宝、天天基金、某家银行等）。同一用户下名称唯一，
+ * 新用户首次登录时预置"支付宝""天天基金""未指定"三个渠道。
  */
 export const channels = pgTable(
   'channels',
@@ -101,5 +101,8 @@ export const channels = pgTable(
     sortOrder: integer('sort_order').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
-  (t) => [index('channels_user_idx').on(t.userId)],
+  (t) => [
+    index('channels_user_idx').on(t.userId),
+    uniqueIndex('channels_user_name_uidx').on(t.userId, t.name),
+  ],
 );

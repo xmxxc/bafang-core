@@ -6,7 +6,18 @@ import { createTestSchema, dropTestSchema, type TestSchema } from '../support/te
 
 interface OpenApiDoc {
   openapi: string;
-  paths: Record<string, { get?: { responses: Record<string, unknown> }; post?: unknown }>;
+  paths: Record<
+    string,
+    Partial<
+      Record<
+        'get' | 'post' | 'patch' | 'put' | 'delete',
+        {
+          responses: Record<string, unknown>;
+          security?: Record<string, string[]>[];
+        }
+      >
+    >
+  >;
   components: {
     schemas: Record<
       string,
@@ -57,6 +68,9 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'verification_code_max_attempts',
       'email_code_cooldown',
       'email_code_daily_limit',
+      'channel_name_conflict',
+      'channel_protected',
+      'channel_has_positions',
     ]);
   });
 
@@ -118,6 +132,31 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     for (const name of ['EmailCodeRequestResult', 'EmailLoginResult', 'LoginMethod', 'Me']) {
       expect(doc.components.schemas[name]).toBeDefined();
     }
+  });
+
+  it('documents every channel operation, session requirement and business errors', async () => {
+    const app = createApp({ db: createHealthProbe(db.pool) });
+    const res = await app.request('/v1/openapi');
+    const doc = (await res.json()) as OpenApiDoc;
+    const operations = [
+      doc.paths['/v1/channels']?.get,
+      doc.paths['/v1/channels']?.post,
+      doc.paths['/v1/channels/{id}']?.patch,
+      doc.paths['/v1/channels/{id}']?.delete,
+      doc.paths['/v1/channels/order']?.put,
+    ];
+    for (const operation of operations) {
+      expect(operation).toBeDefined();
+      for (const status of ['401', '500', '503']) {
+        expect(operation?.responses[status]).toBeDefined();
+      }
+      expect(operation?.security).toEqual([{ SessionCookie: [] }, { SessionBearer: [] }]);
+    }
+    expect(doc.paths['/v1/channels']?.post?.responses['409']).toBeDefined();
+    expect(doc.paths['/v1/channels/{id}']?.patch?.responses['409']).toBeDefined();
+    expect(doc.paths['/v1/channels/{id}']?.delete?.responses['409']).toBeDefined();
+    expect(doc.components.schemas.Channel).toBeDefined();
+    expect(doc.components.schemas.ChannelList).toBeDefined();
   });
 
   it('returns a unified 404 for unknown routes', async () => {

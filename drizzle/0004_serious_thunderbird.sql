@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "channels_user_name_uidx" ON "channels" USING btree ("user_id","name");
