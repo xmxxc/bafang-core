@@ -1,5 +1,5 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
-import { setCookie, deleteCookie } from 'hono/cookie';
+import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 import { SystemClock, type Clock } from './clock';
 import { ChineseTradingCalendar, type TradingCalendar } from './trading-calendar';
 import { type Db, type HealthProbe } from './db';
@@ -9,7 +9,14 @@ import { fundDetailRoute, fundSearchRoute } from './routes/funds';
 import { estimateBatchRoute } from './routes/estimates';
 import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
-import { emailCodeRequestRoute, emailLoginRoute, logoutRoute, meRoute } from './routes/auth';
+import {
+  emailCodeRequestRoute,
+  emailLoginRoute,
+  logoutRoute,
+  meRoute,
+  githubStartRoute,
+  githubCallbackRoute,
+} from './routes/auth';
 import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
 import { createEstimateService } from './market/estimates';
@@ -19,17 +26,25 @@ import {
   ANONYMOUS_MARKET_RATE_LIMIT,
   EMAIL_CODE_REQUEST_RATE_LIMIT,
   EMAIL_LOGIN_RATE_LIMIT,
+  GITHUB_LOGIN_RATE_LIMIT,
   rateLimit,
 } from './rate-limit';
+import { setSessionCookie } from './auth/cookie';
+import type { GitHubLogin } from './auth/github';
+import {
+  createGitHubLoginService,
+  GITHUB_BROWSER_COOKIE,
+  GITHUB_STATE_TTL_MS,
+} from './auth/github-login';
+import { SESSION_COOKIE } from './auth/middleware';
 import { MissingMailer, type Mailer } from './auth/mailer';
 import {
   AuthError,
   createAuthService,
   EMAIL_CODE_COOLDOWN_MS,
-  SESSION_TTL_MS,
   type AuthService,
 } from './auth/service';
-import { getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
+import { getAuth, requireAuth } from './auth/middleware';
 
 export interface AppDeps {
   db?: HealthProbe;
@@ -37,6 +52,8 @@ export interface AppDeps {
   database?: Db;
   /** 发信适配器；测试时替换为假发信。 */
   mailer?: Mailer;
+  /** GitHub OAuth 适配器与固定的登录后跳转配置。 */
+  github?: GitHubLogin;
   clock?: Clock;
   tradingCalendar?: TradingCalendar;
   /** 统一上游抓取适配器；测试时整体替换为录制样本。 */
@@ -47,6 +64,7 @@ export interface ResolvedDeps {
   db: HealthProbe | undefined;
   database: Db | undefined;
   mailer: Mailer;
+  github: GitHubLogin | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
   upstream: UpstreamFetcher;
@@ -56,6 +74,7 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
   return {
     db: deps.db,
     database: deps.database,
+    github: deps.github,
     mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
@@ -178,14 +197,7 @@ export function createApp(deps: AppDeps = {}): App {
     const { email, code, device } = c.req.valid('json');
     const result = await auth.loginWithEmail(email, code, device);
     if (device === 'web') {
-      setCookie(c, SESSION_COOKIE, result.token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'Lax',
-        path: '/',
-        maxAge: Math.floor(SESSION_TTL_MS / 1000),
-        expires: result.expiresAt,
-      });
+      setSessionCookie(c, result.token, result.expiresAt);
     }
     return c.json(
       {
@@ -195,6 +207,48 @@ export function createApp(deps: AppDeps = {}): App {
       },
       200,
     );
+  });
+
+  const github =
+    resolved.github && resolved.database && auth
+      ? createGitHubLoginService({
+          db: resolved.database,
+          clock: resolved.clock,
+          oauth: resolved.github.oauth,
+          auth,
+        })
+      : null;
+  app.use('/v1/auth/github*', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    c.header('Referrer-Policy', 'no-referrer');
+    await next();
+  });
+  app.use('/v1/auth/github', rateLimit(GITHUB_LOGIN_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/github/callback', rateLimit(GITHUB_LOGIN_RATE_LIMIT, resolved.clock));
+  app.openapi(githubStartRoute, async (c) => {
+    if (!resolved.github)
+      return c.json(errorBody('github_not_configured', 'GitHub 登录未配置'), 503);
+    if (!github) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const result = await github.start();
+    setCookie(c, GITHUB_BROWSER_COOKIE, result.browser, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax',
+      path: '/',
+      maxAge: GITHUB_STATE_TTL_MS / 1000,
+    });
+    return c.redirect(result.url, 302);
+  });
+  app.openapi(githubCallbackRoute, async (c) => {
+    if (!resolved.github)
+      return c.json(errorBody('github_not_configured', 'GitHub 登录未配置'), 503);
+    if (!github) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { state, code, error } = c.req.valid('query');
+    const browser = getCookie(c, GITHUB_BROWSER_COOKIE);
+    deleteCookie(c, GITHUB_BROWSER_COOKIE, { path: '/', secure: true });
+    const result = await github.callback(state, browser, code, error);
+    setSessionCookie(c, result.token, result.expiresAt);
+    return c.redirect(resolved.github.redirectUrl, 302);
   });
 
   if (requireLogin) {

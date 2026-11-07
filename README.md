@@ -54,6 +54,15 @@ docker compose up -d
 - `GET /v1/funds/{code}/nav/history?range=1m|3m|1y` — 基金历史净值走势，按区间（近 1 月 / 3 月 / 1 年）返回净值序列（最新在前）。
 - `GET /v1/market/status` — 市场状态：`trading` 交易中、`closed` 已收盘、`holiday` 休市、`pre_market` 盘前。四种状态都是显式枚举，不以 0 表示。
 
+### GitHub 网页登录
+
+- 配置 `.env.example` 中的 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、`GITHUB_CALLBACK_URL`、`GITHUB_LOGIN_REDIRECT_URL`；四项都非空才启用，缺失时服务仍可启动，两个接口返回 503 `github_not_configured`。回调 URL 必须与 GitHub OAuth App 登记的地址一致；成功后的网页地址仅来自配置，请求参数不能覆盖。两个地址使用 HTTP(S) 绝对 URL，生产环境用 HTTPS。
+- 浏览器访问 `GET /v1/auth/github`，获取 302 到 GitHub 授权页；采用授权码流程、S256 PKCE 和随机 state。临时 `__Host-bafang_github` Cookie 为 httpOnly、Secure、SameSite=Lax，绑定发起浏览器。Cookie 始终为 Secure，本地联调需要 HTTPS 或受信 localhost。
+- GitHub 回调 `GET /v1/auth/github/callback?code=...&state=...`。state 和浏览器标识只存哈希，10 分钟后过期；PostgreSQL 原子删除消费，跨应用实例也只能用一次。过期请求在下次发起时清理。state 缺失、不匹配、过期、重放返回 400 `github_state_invalid`，拒绝授权/缺少 code 返回 400 `github_authorization_failed`；有效回调开始后即消费 state，失败需重新发起。
+- 每次登录都经 `GitHubOAuth` 适配器交换 code 并调用 GitHub `/user`，以数字 `id` 识别用户；不按 `login` 或邮箱识别。真实实现使用固定 HTTPS 端点、每次请求 5 秒超时、不自动重试。上游出错或格式无效返回 502 `github_unavailable`，不创建用户、登录方式或会话。GitHub token 不保存、不返回给网页。
+- 首次登录复用邮箱登录的建用户路径，预置支付宝、天天基金、未指定三个渠道。成功后设置同样的 `bafang_session` 会话 Cookie（httpOnly、Secure、SameSite=Lax，30 天），302 到固定网页地址，可使用 `/v1/me`、`/v1/auth/logout`。发起与回调分别按客户端 IP 每分钟限流 10 次（沿用进程内限流）。两个接口均带 `Cache-Control: no-store` 和 `Referrer-Policy: no-referrer`。
+- 测试通过 `createApp({ github: { oauth, redirectUrl } })` 注入假 GitHub 适配器；真实协议的响应验证也用假 HTTP 出口，不访问真实 GitHub。新表由 `0004` 迁移创建，部署需先执行 `pnpm db:migrate`。
+
 ### 行情接口
 
 - **匿名只读 + 限流：** `/v1/funds/*` 不需要登录，按客户端 IP 每分钟 60 次（固定窗口，进程内），超出返回 429 `rate_limited` 与 `Retry-After`。客户端 IP 取 `X-Forwarded-For` 的最右一项（部署时 core 位于 Caddy 之后，由 Caddy 追加），没有该请求头时取连接对端地址；因此 core 不应绕过 Caddy 直接暴露在公网上。
