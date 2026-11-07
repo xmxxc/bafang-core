@@ -16,6 +16,7 @@ import {
   meRoute,
   githubStartRoute,
   githubCallbackRoute,
+  wechatLoginRoute,
 } from './routes/auth';
 import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
@@ -27,10 +28,12 @@ import {
   EMAIL_CODE_REQUEST_RATE_LIMIT,
   EMAIL_LOGIN_RATE_LIMIT,
   GITHUB_LOGIN_RATE_LIMIT,
+  WECHAT_LOGIN_RATE_LIMIT,
   rateLimit,
 } from './rate-limit';
 import { setSessionCookie } from './auth/cookie';
 import type { GitHubLogin } from './auth/github';
+import { WeChatCodeInvalidError, type WeChatCode2Session } from './auth/wechat';
 import {
   createGitHubLoginService,
   GITHUB_BROWSER_COOKIE,
@@ -54,6 +57,8 @@ export interface AppDeps {
   mailer?: Mailer;
   /** GitHub OAuth 适配器与固定的登录后跳转配置。 */
   github?: GitHubLogin;
+  /** 微信 code2session 适配器；测试时替换为假实现。 */
+  wechat?: WeChatCode2Session;
   clock?: Clock;
   tradingCalendar?: TradingCalendar;
   /** 统一上游抓取适配器；测试时整体替换为录制样本。 */
@@ -65,6 +70,7 @@ export interface ResolvedDeps {
   database: Db | undefined;
   mailer: Mailer;
   github: GitHubLogin | undefined;
+  wechat: WeChatCode2Session | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
   upstream: UpstreamFetcher;
@@ -75,6 +81,7 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
     db: deps.db,
     database: deps.database,
     github: deps.github,
+    wechat: deps.wechat,
     mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
@@ -204,6 +211,35 @@ export function createApp(deps: AppDeps = {}): App {
         user: { id: result.userId },
         session: { device: result.device, expiresAt: result.expiresAt.toISOString() },
         token: device === 'miniprogram' ? result.token : null,
+      },
+      200,
+    );
+  });
+
+  app.use('/v1/auth/wechat/login', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    await next();
+  });
+  app.use('/v1/auth/wechat/login', rateLimit(WECHAT_LOGIN_RATE_LIMIT, resolved.clock));
+  app.openapi(wechatLoginRoute, async (c) => {
+    if (!resolved.wechat) return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { code } = c.req.valid('json');
+    let openid: string;
+    try {
+      openid = await resolved.wechat.openid(code);
+    } catch (error) {
+      // 不传播微信响应、请求 URL、code、AppSecret 或 session_key。
+      if (error instanceof WeChatCodeInvalidError)
+        throw new AuthError('wechat_code_invalid', '微信登录凭据无效，请重新登录', 400);
+      throw new AuthError('wechat_unavailable', '微信登录暂不可用，请稍后重试', 502);
+    }
+    const result = await auth.loginWithWeChatOpenId(openid);
+    return c.json(
+      {
+        user: { id: result.userId },
+        session: { device: 'miniprogram' as const, expiresAt: result.expiresAt.toISOString() },
+        token: result.token,
       },
       200,
     );

@@ -63,6 +63,15 @@ docker compose up -d
 - 首次登录复用邮箱登录的建用户路径，预置支付宝、天天基金、未指定三个渠道。成功后设置同样的 `bafang_session` 会话 Cookie（httpOnly、Secure、SameSite=Lax，30 天），302 到固定网页地址，可使用 `/v1/me`、`/v1/auth/logout`。发起与回调分别按客户端 IP 每分钟限流 10 次（沿用进程内限流）。两个接口均带 `Cache-Control: no-store` 和 `Referrer-Policy: no-referrer`。
 - 测试通过 `createApp({ github: { oauth, redirectUrl } })` 注入假 GitHub 适配器；真实协议的响应验证也用假 HTTP 出口，不访问真实 GitHub。新表由 `0004` 迁移创建，部署需先执行 `pnpm db:migrate`。
 
+### 微信小程序登录
+
+- 配置 `.env.example` 中的 `WECHAT_APP_ID` 与 `WECHAT_APP_SECRET`；两项都非空才启用，缺失或空白时服务照常启动，登录接口返回 503 `wechat_not_configured`。AppSecret 只留在服务端。
+- glance 调用 `wx.login`，将得到的 code 作为 JSON `{ "code": "..." }` 提交到 `POST /v1/auth/wechat/login`。成功返回 `{ user: { id }, session: { device: "miniprogram", expiresAt }, token }`，不设置 Cookie。后续请求（如 `/v1/me` 与 `/v1/auth/logout`）使用 `Authorization: Bearer <token>`。会话有效期 30 天，每次登录建立独立会话，退出只作废当前会话。
+- 通过可注入的 `WeChatCode2Session` 适配器调用固定 HTTPS `code2session` 端点，使用 openid 作为 `wechat` 登录方式的外部标识，不依赖或存储 unionid。首次登录复用共用事务路径创建用户、三个预置渠道（支付宝、天天基金、未指定）与会话；同一 openid 再次登录返回同一用户。
+- 真实适配器每次请求 5 秒超时、禁止重定向、不自动重试一次性 code。微信返回 40029（无效）或 40163（已使用）时返回 400 `wechat_code_invalid`；微信限频、系统繁忙、登录拦截、其他上游错误、网络失败、超时或响应格式异常返回 502 `wechat_unavailable`，失败不写用户、登录方式或会话。重试登录前应重新调用 `wx.login` 获取 code。
+- session_key 不返回、不持久化、不写日志。接口响应带 `Cache-Control: no-store`，复用进程内 IP 限流，每分钟 10 次，超出返回 429 `rate_limited` 与 `Retry-After`。
+- 测试通过 `createApp({ wechat })` 注入假适配器，真实协议使用假 HTTP 出口验证，不访问真实微信。复用已有表结构，无需新增迁移。
+
 ### 行情接口
 
 - **匿名只读 + 限流：** `/v1/funds/*` 不需要登录，按客户端 IP 每分钟 60 次（固定窗口，进程内），超出返回 429 `rate_limited` 与 `Retry-After`。客户端 IP 取 `X-Forwarded-For` 的最右一项（部署时 core 位于 Caddy 之后，由 Caddy 追加），没有该请求头时取连接对端地址；因此 core 不应绕过 Caddy 直接暴露在公网上。

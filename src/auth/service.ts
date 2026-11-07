@@ -53,6 +53,7 @@ export interface AuthService {
     device: Device,
   ): Promise<{ userId: string; token: string; device: Device; expiresAt: Date }>;
   loginWithGitHubId(externalId: string): ReturnType<AuthService['loginWithEmail']>;
+  loginWithWeChatOpenId(openid: string): ReturnType<AuthService['loginWithEmail']>;
   logout(sessionId: string): Promise<void>;
   authenticate(token: string): Promise<SessionInfo | null>;
   me(userId: string): Promise<{
@@ -80,7 +81,7 @@ function shanghaiDayStart(date: Date): Date {
 export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }): AuthService {
   const { db, mailer, clock } = deps;
 
-  // 邮箱与 GitHub 共用用户创建、预置渠道与会话写入路径；相同身份的并发首次登录串行化。
+  // 三种登录方式共用用户创建、预置渠道与会话写入路径；相同身份的并发首次登录串行化。
   async function loginWithIdentity(
     tx: Parameters<Parameters<Db['transaction']>[0]>[0],
     type: LoginMethodType,
@@ -283,6 +284,15 @@ export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }
         loginWithIdentity(tx, 'github', externalId, 'web', sha256Hex(token), expiresAt),
       );
       return { userId: result.userId, token, device: 'web', expiresAt };
+    },
+
+    async loginWithWeChatOpenId(openid) {
+      const token = generateSessionToken();
+      const expiresAt = new Date(clock.now().getTime() + SESSION_TTL_MS);
+      const result = await db.transaction((tx) =>
+        loginWithIdentity(tx, 'wechat', openid, 'miniprogram', sha256Hex(token), expiresAt),
+      );
+      return { userId: result.userId, token, device: 'miniprogram', expiresAt };
     },
 
     async logout(sessionId) {

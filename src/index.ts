@@ -5,6 +5,7 @@ import { loadConfig, toDbConfig } from './config';
 import { loadTradingCalendar } from './trading-calendar';
 import { createMailer } from './auth/mailer';
 import { createGitHubLogin } from './auth/github';
+import { createWeChatLogin } from './auth/wechat';
 
 const config = loadConfig();
 const pool = createPool(toDbConfig(config));
@@ -13,6 +14,7 @@ const app = createApp({
   database: createDb(pool),
   mailer: createMailer(config),
   github: createGitHubLogin(config),
+  wechat: createWeChatLogin(config),
   tradingCalendar: await loadTradingCalendar(pool),
 });
 

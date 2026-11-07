@@ -22,6 +22,8 @@ const EnvSchema = z.object({
   GITHUB_CLIENT_SECRET: z.string().optional(),
   GITHUB_CALLBACK_URL: z.string().optional(),
   GITHUB_LOGIN_REDIRECT_URL: z.string().optional(),
+  WECHAT_APP_ID: z.string().optional(),
+  WECHAT_APP_SECRET: z.string().optional(),
 });
 
 export type Config = z.infer<typeof EnvSchema>;
