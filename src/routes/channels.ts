@@ -22,7 +22,8 @@ const NameBody = z.object({
     .max(100)
     .openapi({ description: '渠道名，去除首尾空白，1–100 字符' }),
 });
-const ChannelParam = z.object({ id: z.uuid().openapi({ description: '渠道 id' }) });
+const ChannelIdSchema = z.uuid().toLowerCase();
+const ChannelParam = z.object({ id: ChannelIdSchema.openapi({ description: '渠道 id' }) });
 const ChannelListSchema = z.object({ items: z.array(ChannelSchema) }).openapi('ChannelList');
 const security: Record<string, string[]>[] = [{ SessionCookie: [] }, { SessionBearer: [] }];
 
@@ -94,7 +95,7 @@ export const channelOrderRoute = createRoute({
     body: {
       required: true,
       content: {
-        'application/json': { schema: z.object({ channelIds: z.array(z.uuid()).min(1) }) },
+        'application/json': { schema: z.object({ channelIds: z.array(ChannelIdSchema).min(1) }) },
       },
     },
   },

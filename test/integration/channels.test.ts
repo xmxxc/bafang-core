@@ -126,6 +126,51 @@ describe('channel management over in-process HTTP against real PostgreSQL', () =
     ]);
   });
 
+  it.each(['uppercase', 'mixed-case'] as const)(
+    'accepts %s channel UUIDs when ordering and persists the requested order',
+    async (casing) => {
+      const token = await login();
+      const initial = await list(token);
+      const expected = [...initial].reverse();
+      const channelIds = expected.map(({ id }) =>
+        casing === 'uppercase'
+          ? id.toUpperCase()
+          : id.replace(/[a-f]/g, (letter, offset: number) =>
+              offset % 2 === 0 ? letter.toUpperCase() : letter,
+            ),
+      );
+      const ordered = await request('/v1/channels/order', 'PUT', token, { channelIds });
+      expect(ordered.status).toBe(200);
+      expect(await ordered.json()).toEqual({ items: expected });
+      expect(await list(token)).toEqual(expected);
+    },
+  );
+
+  it('rejects the same channel UUID repeated with different casing without changing order', async () => {
+    const token = await login();
+    const initial = await list(token);
+    const res = await request('/v1/channels/order', 'PUT', token, {
+      channelIds: [initial[0]!.id, initial[0]!.id.toUpperCase(), initial[2]!.id],
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ error: { code: 'validation_error' } });
+    expect(await list(token)).toEqual(initial);
+  });
+
+  it('accepts uppercase channel UUID path parameters for renaming and deletion', async () => {
+    const token = await login();
+    const initial = await list(token);
+    const channel = initial[0]!;
+    const path = `/v1/channels/${channel.id.toUpperCase()}`;
+    const renamed = await request(path, 'PATCH', token, { name: '大写渠道' });
+    expect(renamed.status).toBe(200);
+    expect(await renamed.json()).toEqual({ id: channel.id, name: '大写渠道' });
+    expect(await list(token)).toEqual([{ id: channel.id, name: '大写渠道' }, ...initial.slice(1)]);
+    const removed = await request(path, 'DELETE', token);
+    expect(removed.status).toBe(204);
+    expect(await list(token)).toEqual(initial.slice(1));
+  });
+
   it('keeps exactly one unspecified channel and refuses its rename or deletion', async () => {
     const token = await login();
     const initial = await list(token);
