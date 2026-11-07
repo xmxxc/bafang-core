@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server';
 import { createApp } from './app';
 import { createDb, createHealthProbe, createPool } from './db';
 import { loadConfig, toDbConfig } from './config';
-import { loadTradingCalendar } from './trading-calendar';
+import { loadHongKongTradingCalendar, loadTradingCalendar } from './trading-calendar';
 import { createMailer } from './auth/mailer';
 
 const config = loadConfig();
@@ -12,6 +12,7 @@ const app = createApp({
   database: createDb(pool),
   mailer: createMailer(config),
   tradingCalendar: await loadTradingCalendar(pool),
+  hkTradingCalendar: await loadHongKongTradingCalendar(pool),
 });
 
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {
