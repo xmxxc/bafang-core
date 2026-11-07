@@ -5,10 +5,12 @@ import type { HealthProbe } from './db';
 import { errorBody } from './errors';
 import { healthRoute } from './routes/health';
 import { fundDetailRoute, fundSearchRoute } from './routes/funds';
+import { estimateBatchRoute } from './routes/estimates';
 import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
 import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
+import { createEstimateService } from './market/estimates';
 import { marketStatus } from './market/status';
 import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
 import { ANONYMOUS_MARKET_RATE_LIMIT, rateLimit } from './rate-limit';
@@ -71,6 +73,12 @@ export function createApp(deps: AppDeps = {}): App {
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
   });
+  const estimates = createEstimateService({
+    upstream: resolved.upstream,
+    clock: resolved.clock,
+    calendar: resolved.tradingCalendar,
+    nav,
+  });
   const marketRateLimit = rateLimit(ANONYMOUS_MARKET_RATE_LIMIT, resolved.clock);
   app.use('/v1/funds/*', marketRateLimit);
   app.use('/v1/market/*', marketRateLimit);
@@ -78,6 +86,12 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(fundSearchRoute, async (c) => {
     const { q } = c.req.valid('query');
     return c.json({ items: await funds.search(q) }, 200);
+  });
+
+  // 先于 /v1/funds/{code} 注册，避免 "estimates" 被当成基金代码。
+  app.openapi(estimateBatchRoute, async (c) => {
+    const { codes } = c.req.valid('query');
+    return c.json(await estimates.batch([...new Set(codes.split(','))]), 200);
   });
 
   app.openapi(fundDetailRoute, async (c) => {
