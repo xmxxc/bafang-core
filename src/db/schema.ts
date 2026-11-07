@@ -1,4 +1,13 @@
-import { date, pgTable, text, timestamp } from 'drizzle-orm/pg-core';
+import {
+  date,
+  index,
+  integer,
+  pgTable,
+  text,
+  timestamp,
+  uniqueIndex,
+  uuid,
+} from 'drizzle-orm/pg-core';
 
 export const appMeta = pgTable('app_meta', {
   key: text('key').primaryKey(),
@@ -14,3 +23,83 @@ export const tradingHolidays = pgTable('trading_holidays', {
   date: date('date', { mode: 'string' }).primaryKey(),
   name: text('name').notNull(),
 });
+
+/** 使用八方来财的一个人；持仓、自选和设置都归属于用户。 */
+export const users = pgTable('users', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+});
+
+/**
+ * 用户证明自己身份的一种途径（微信、邮箱、GitHub）。类型与外部标识的组合全局唯一，
+ * 每个用户每种类型最多一个。
+ */
+export const loginMethods = pgTable(
+  'login_methods',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    type: text('type').notNull(),
+    externalId: text('external_id').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('login_methods_type_external_uidx').on(t.type, t.externalId),
+    uniqueIndex('login_methods_user_type_uidx').on(t.userId, t.type),
+  ],
+);
+
+/**
+ * 服务端生成的不透明会话令牌，数据库只存哈希。按设备区分（网页 Cookie / 小程序请求头），
+ * 退出只作废当前会话。
+ */
+export const sessions = pgTable('sessions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id')
+    .notNull()
+    .references(() => users.id, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull().unique(),
+  device: text('device').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  revokedAt: timestamp('revoked_at', { withTimezone: true }),
+});
+
+/**
+ * 邮箱验证码：6 位，10 分钟过期，最多输错 5 次，使用一次后失效。
+ * `code_hash` 存的是无盐 sha256：对 6 位数字码来说，泄露库仍可枚举反查（10⁶ 种），
+ * 并不能像会话令牌那样提供真正的不可逆性；安全主要靠 10 分钟过期、一次性、新码作废旧码兜底。
+ */
+export const emailVerificationCodes = pgTable(
+  'email_verification_codes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    email: text('email').notNull(),
+    codeHash: text('code_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('email_verification_codes_email_created_idx').on(t.email, t.createdAt)],
+);
+
+/**
+ * 用户购买基金的平台（支付宝、天天基金、某家银行等）。#9 只在新用户首次登录时预置
+ * "支付宝""天天基金""未指定"三个渠道；增删改排序等渠道管理接口属于 #15。
+ */
+export const channels = pgTable(
+  'channels',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: text('name').notNull(),
+    sortOrder: integer('sort_order').notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [index('channels_user_idx').on(t.userId)],
+);

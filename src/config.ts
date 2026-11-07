@@ -10,6 +10,14 @@ const EnvSchema = z.object({
   PGDATABASE: z.string().default('test_bafang'),
   PGSCHEMA: z.string().optional(),
   PORT: z.coerce.number().int().default(3000),
+  /** 运行环境。不设默认值：只有明确等于 development/test 时才允许用开发发信。 */
+  NODE_ENV: z.string().optional(),
+  /** 发信方式：`dev-log` 表示开发模式假发信（显式开启，只打印到日志）。 */
+  MAIL_TRANSPORT: z.string().optional(),
+  /** Resend 发信的 API key；空字符串在 `createMailer` 里视为缺失。 */
+  RESEND_API_KEY: z.string().optional(),
+  /** Resend 发信人地址；配置 RESEND_API_KEY 时必须同时配置。 */
+  RESEND_FROM: z.string().optional(),
 });
 
 export type Config = z.infer<typeof EnvSchema>;
