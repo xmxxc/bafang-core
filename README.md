@@ -82,6 +82,22 @@ docker compose up -d
 
 公开接口按父 spec 的 API 约定使用版本前缀（`/v1/...`）。健康检查接口没有版本豁免，因此挂在 `/v1/health`；OpenAPI 文档也统一放在 `/v1/openapi`，让 studio / glance 与监控只面对 `/v1` 一个版本化入口，无需额外记忆未版本化的路径。旧路径 `/health` 与 `/openapi` 不再注册，会返回统一的 404。
 
+### 渠道接口
+
+均要求已登录的网页 Cookie 或小程序 `Authorization: Bearer <会话令牌>`，只能操作自己的渠道；访问别人的渠道与不存在的渠道一样返回 404 `not_found`。
+
+| 方法与路径                 | 请求                                                     | 成功响应                                      |
+| -------------------------- | -------------------------------------------------------- | --------------------------------------------- |
+| `GET /v1/channels`         | —                                                        | 200 `{ items: [{ id, name }] }`，按自定义顺序 |
+| `POST /v1/channels`        | `{ name }`                                               | 201 `{ id, name }`，追加到末尾                |
+| `PATCH /v1/channels/{id}`  | `{ name }`                                               | 200 `{ id, name }`                            |
+| `PUT /v1/channels/order`   | `{ channelIds: [...] }`，全部自己的渠道 id，每个恰好一次 | 200 `{ items: [{ id, name }] }`，按新顺序     |
+| `DELETE /v1/channels/{id}` | —                                                        | 204，无响应体                                 |
+
+渠道名去除首尾空白后为 1–100 字符，同一用户下精确匹配、不能重名（包括与预置渠道重名）；冲突返回 409 `channel_name_conflict`，数据库唯一约束保证并发请求下仍成立。新用户预置“支付宝”“天天基金”“未指定”，已有用户迁移后保留原顺序。每个用户恰好一个“未指定”，改名或删除返回 409 `channel_protected`，可以调整其顺序。排序列表缺漏或重复返回 400 `validation_error`，不改变原顺序。
+
+删除仅允许没有任何持仓的渠道。当前持仓模块尚未实现，`src/channels/service.ts` 的 `channelHasPositions` 暂返回无持仓；#16 在同一事务中接入真实查询后，有持仓时返回 409 `channel_has_positions`。只剩已清仓持仓时移到“未指定”的规则由 #19 补全。
+
 ## 测试
 
 ```bash
@@ -89,7 +105,7 @@ pnpm test        # 全部测试（连接真实 PostgreSQL）
 pnpm test:watch  # watch 模式
 ```
 
-测试唯一的入口是在进程内对 core 应用发 HTTP 请求（`app.request(...)`），并连接真实的 PostgreSQL 测试库。因为角色没有 `CREATEDB` 权限，测试隔离用「每个用例一个临时 schema」：建好后在 schema 内跑迁移，用完删除，互不干扰。迁移只作为准备测试环境的步骤，用例不直接断言表结构、迁移记录、内部函数或调用次数；时钟与交易日历替身通过应用的依赖注入在 HTTP 用例中生效。
+测试唯一的业务入口是在进程内对 core 应用发 HTTP 请求（`app.request(...)`），并连接真实的 PostgreSQL 测试库。因为角色没有 `CREATEDB` 权限，测试隔离用「每个用例一个临时 schema」：建好后在 schema 内跑迁移，用完删除，互不干扰。迁移升级路径的回归测试（`test/integration/*-migration.test.ts`）可以断言迁移命令本身成功或失败；仍不直接断言表结构、迁移记录、内部函数或调用次数，迁移后的行为通过 HTTP 观察。时钟与交易日历替身通过应用的依赖注入在 HTTP 用例中生效。
 
 ## 迁移与 schema
 

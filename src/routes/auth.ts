@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { ErrorResponseSchema } from '../errors';
+import { ChannelSchema } from './channels';
 
 const EmailSchema = z
   .string()
@@ -69,18 +70,11 @@ const WeChatLoginResponseSchema = z
 
 export type WeChatLoginResponse = z.infer<typeof WeChatLoginResponseSchema>;
 
-const ChannelSummarySchema = z
-  .object({
-    id: z.string().openapi({ description: '渠道 id' }),
-    name: z.string().openapi({ example: '支付宝', description: '渠道名' }),
-  })
-  .openapi('Channel');
-
 const MeResponseSchema = z
   .object({
     user: UserSummarySchema,
     loginMethods: z.array(LoginMethodSchema),
-    channels: z.array(ChannelSummarySchema),
+    channels: z.array(ChannelSchema),
   })
   .openapi('Me');
 

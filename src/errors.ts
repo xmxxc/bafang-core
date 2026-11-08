@@ -22,6 +22,9 @@ export const ErrorCodeSchema = z.enum([
   'verification_code_max_attempts',
   'email_code_cooldown',
   'email_code_daily_limit',
+  'channel_name_conflict',
+  'channel_protected',
+  'channel_has_positions',
 ]);
 
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;

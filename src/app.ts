@@ -1,5 +1,6 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
+import { HTTPException } from 'hono/http-exception';
 import { SystemClock, type Clock } from './clock';
 import {
   ChineseTradingCalendar,
@@ -46,7 +47,6 @@ import {
   GITHUB_BROWSER_COOKIE,
   GITHUB_STATE_TTL_MS,
 } from './auth/github-login';
-import { SESSION_COOKIE } from './auth/middleware';
 import { MissingMailer, type Mailer } from './auth/mailer';
 import {
   AuthError,
@@ -54,7 +54,15 @@ import {
   EMAIL_CODE_COOLDOWN_MS,
   type AuthService,
 } from './auth/service';
-import { getAuth, requireAuth } from './auth/middleware';
+import { getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
+import { ChannelError, createChannelService } from './channels/service';
+import {
+  channelCreateRoute,
+  channelDeleteRoute,
+  channelListRoute,
+  channelOrderRoute,
+  channelRenameRoute,
+} from './routes/channels';
 
 export interface AppDeps {
   db?: HealthProbe;
@@ -111,6 +119,16 @@ export function createApp(deps: AppDeps = {}): App {
       }
       return undefined;
     },
+  });
+  app.openAPIRegistry.registerComponent('securitySchemes', 'SessionCookie', {
+    type: 'apiKey',
+    in: 'cookie',
+    name: SESSION_COOKIE,
+  });
+  app.openAPIRegistry.registerComponent('securitySchemes', 'SessionBearer', {
+    type: 'http',
+    scheme: 'bearer',
+    description: '小程序会话令牌',
   });
 
   app.openapi(healthRoute, async (c) => {
@@ -210,6 +228,39 @@ export function createApp(deps: AppDeps = {}): App {
       })
     : null;
   const requireLogin = auth ? requireAuth(auth) : null;
+
+  const channels = resolved.database ? createChannelService(resolved.database) : null;
+  app.use('/v1/channels/*', async (c, next) => {
+    if (!requireLogin) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return requireLogin(c, next);
+  });
+  app.openapi(channelListRoute, async (c) => {
+    if (!channels) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json({ items: await channels.list(getAuth(c).userId) }, 200);
+  });
+  app.openapi(channelCreateRoute, async (c) => {
+    if (!channels) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(await channels.create(getAuth(c).userId, c.req.valid('json').name), 201);
+  });
+  app.openapi(channelOrderRoute, async (c) => {
+    if (!channels) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(
+      { items: await channels.reorder(getAuth(c).userId, c.req.valid('json').channelIds) },
+      200,
+    );
+  });
+  app.openapi(channelRenameRoute, async (c) => {
+    if (!channels) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(
+      await channels.rename(getAuth(c).userId, c.req.valid('param').id, c.req.valid('json').name),
+      200,
+    );
+  });
+  app.openapi(channelDeleteRoute, async (c) => {
+    if (!channels) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    await channels.delete(getAuth(c).userId, c.req.valid('param').id);
+    return c.body(null, 204);
+  });
 
   app.use('/v1/auth/email/request', rateLimit(EMAIL_CODE_REQUEST_RATE_LIMIT, resolved.clock));
   app.use('/v1/auth/email/login', rateLimit(EMAIL_LOGIN_RATE_LIMIT, resolved.clock));
@@ -339,11 +390,14 @@ export function createApp(deps: AppDeps = {}): App {
   app.notFound((c) => c.json(errorBody('not_found', `未找到 ${c.req.path}`), 404));
 
   app.onError((err, c) => {
+    if (err instanceof HTTPException && (err.status === 400 || err.status === 415)) {
+      return c.json(errorBody('validation_error', '请求格式不合法'), 400);
+    }
     if (err instanceof UpstreamError) {
       console.warn('[bafang-core] upstream failure', err.kind, err.status ?? '', err.message);
       return c.json(errorBody('upstream_unavailable', '行情上游暂不可用，请稍后再试'), 502);
     }
-    if (err instanceof AuthError) {
+    if (err instanceof AuthError || err instanceof ChannelError) {
       return c.json(errorBody(err.code, err.message), err.status);
     }
     console.error('[bafang-core] unhandled error', err);

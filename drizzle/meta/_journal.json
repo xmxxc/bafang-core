@@ -43,6 +43,13 @@
       "when": 1794110394698,
       "tag": "0005_trading_calendar_market",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794112080705,
+      "tag": "0006_serious_thunderbird",
+      "breakpoints": true
     }
   ]
 }

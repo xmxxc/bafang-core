@@ -6,6 +6,18 @@
     "description": "八方来财后端：行情聚合、用户与登录方式、Agent、MCP。本 OpenAPI 文档由请求/响应 schema 自动生成。"
   },
   "components": {
+    "securitySchemes": {
+      "SessionCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "bafang_session"
+      },
+      "SessionBearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "小程序会话令牌"
+      }
+    },
     "schemas": {
       "Health": {
         "type": "object",
@@ -67,7 +79,10 @@
                   "verification_code_used",
                   "verification_code_max_attempts",
                   "email_code_cooldown",
-                  "email_code_daily_limit"
+                  "email_code_daily_limit",
+                  "channel_name_conflict",
+                  "channel_protected",
+                  "channel_has_positions"
                 ],
                 "description": "机器可读的错误码"
               },
@@ -533,6 +548,39 @@
           "fallback"
         ]
       },
+      "ChannelList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "Channel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "渠道 id"
+          },
+          "name": {
+            "type": "string",
+            "example": "支付宝",
+            "description": "渠道名"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
       "EmailCodeRequestResult": {
         "type": "object",
         "properties": {
@@ -683,24 +731,6 @@
         "required": [
           "type",
           "externalId"
-        ]
-      },
-      "Channel": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "description": "渠道 id"
-          },
-          "name": {
-            "type": "string",
-            "example": "支付宝",
-            "description": "渠道名"
-          }
-        },
-        "required": [
-          "id",
-          "name"
         ]
       }
     },
@@ -1231,6 +1261,481 @@
           },
           "500": {
             "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/channels": {
+      "get": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "channels"
+        ],
+        "summary": "查看自己的渠道",
+        "description": "需要登录，按用户自定义顺序返回渠道列表。",
+        "responses": {
+          "200": {
+            "description": "渠道列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelList"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "channels"
+        ],
+        "summary": "新增自己的渠道",
+        "description": "需要登录，新增渠道排在末尾；同一用户下名称不能重复。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                    "description": "渠道名，去除首尾空白，1–100 字符"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "已新增",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "channel_name_conflict：已有同名渠道",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/channels/order": {
+      "put": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "channels"
+        ],
+        "summary": "调整自己的渠道顺序",
+        "description": "需要登录，以完整渠道 id 列表替换顺序，包含“未指定”；每个渠道必须恰好出现一次。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "channelIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "minItems": 1
+                  }
+                },
+                "required": [
+                  "channelIds"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已排序",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法，或渠道列表有重复、缺漏",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "渠道不存在（包含别人的渠道）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/channels/{id}": {
+      "patch": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "channels"
+        ],
+        "summary": "修改自己的渠道名",
+        "description": "需要登录，“未指定”不能改名；同一用户下渠道名不能重复。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "渠道 id"
+            },
+            "required": true,
+            "description": "渠道 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                    "description": "渠道名，去除首尾空白，1–100 字符"
+                  }
+                },
+                "required": [
+                  "name"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已改名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Channel"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "渠道不存在（包含别人的渠道）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "channel_name_conflict：已有同名渠道；channel_protected：“未指定”不能改名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "channels"
+        ],
+        "summary": "删除自己的无持仓渠道",
+        "description": "需要登录，“未指定”不能删除；仅允许删除没有任何持仓的渠道。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "渠道 id"
+            },
+            "required": true,
+            "description": "渠道 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除"
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "渠道不存在（包含别人的渠道）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "channel_protected：“未指定”不能删除；channel_has_positions：渠道下仍有持仓",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
             "content": {
               "application/json": {
                 "schema": {
