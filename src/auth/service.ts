@@ -298,12 +298,7 @@ export function createAuthService(deps: {
         const [latest] = await tx
           .select({ createdAt: emailVerificationCodes.createdAt })
           .from(emailVerificationCodes)
-          .where(
-            and(
-              eq(emailVerificationCodes.email, normalized),
-              eq(emailVerificationCodes.purpose, purpose),
-            ),
-          )
+          .where(eq(emailVerificationCodes.email, normalized))
           .orderBy(desc(emailVerificationCodes.createdAt))
           .limit(1);
         if (latest && latest.createdAt.getTime() + EMAIL_CODE_COOLDOWN_MS > now.getTime()) {
@@ -317,7 +312,6 @@ export function createAuthService(deps: {
           .where(
             and(
               eq(emailVerificationCodes.email, normalized),
-              eq(emailVerificationCodes.purpose, purpose),
               gte(emailVerificationCodes.createdAt, dayStart),
             ),
           );

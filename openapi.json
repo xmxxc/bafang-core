@@ -3111,7 +3111,7 @@
             }
           },
           "429": {
-            "description": "email_code_cooldown：同一邮箱关联验证码冷却中；email_code_daily_limit：今日关联验证码次数已达上限；rate_limited：同一 IP 请求过于频繁",
+            "description": "email_code_cooldown：同一邮箱 60 秒内已请求过验证码（与登录验证码共享冷却）；email_code_daily_limit：同一邮箱今日验证码次数已达上限（登录与关联合计）；rate_limited：同一 IP 请求过于频繁",
             "content": {
               "application/json": {
                 "schema": {
@@ -3514,7 +3514,7 @@
             }
           },
           "409": {
-            "description": "login_method_conflict：该 GitHub 账号已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他 GitHub 账号",
+            "description": "login_method_conflict：该 GitHub 登录方式已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他 GitHub 登录方式",
             "content": {
               "application/json": {
                 "schema": {
