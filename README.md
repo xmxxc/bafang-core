@@ -205,7 +205,7 @@ A 股与港股的交易日历都由 core 自己维护：特殊日期按市场、
   pnpm trading-calendar:import 2026 --file /path/to/holidays.json
   ```
 
-- 启动服务时 `src/index.ts` 会从 `trading_holidays` 表分别加载两个市场的数据，注入给 `ChineseTradingCalendar` 与 `HongKongTradingCalendar`，供市场状态、大盘指数等接口使用。没有导入港股某年的数据时，港股只按周末判断；遇到港股假日，指数会因为缺当日行情显示为不可用，而不会给出错误的状态。
+- 启动服务时 `src/index.ts` 会从 `trading_holidays` 表分别加载两个市场的数据，注入给 `ChineseTradingCalendar` 与 `HongKongTradingCalendar`，供市场状态、大盘指数等接口使用。市场状态依据已加载的交易日历和周末判断；缺少某年数据时，未知的工作日假日可能显示为 `trading`，此时若没有当日可信行情，指数会显示为不可用、数值为 `null`。
 
 ## 错误结构
 
