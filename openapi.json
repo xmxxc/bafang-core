@@ -1,0 +1,1293 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "bafang-core",
+    "version": "0.1.0",
+    "description": "八方来财后端：行情聚合、用户与登录方式、Agent、MCP。本 OpenAPI 文档由请求/响应 schema 自动生成。"
+  },
+  "components": {
+    "schemas": {
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          },
+          "database": {
+            "type": "object",
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "connected"
+            ]
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "status",
+          "database",
+          "time"
+        ]
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "database_unavailable",
+                  "not_found",
+                  "internal_error",
+                  "validation_error",
+                  "fund_not_found",
+                  "upstream_unavailable",
+                  "rate_limited",
+                  "unauthorized",
+                  "verification_code_expired",
+                  "verification_code_invalid",
+                  "verification_code_used",
+                  "verification_code_max_attempts",
+                  "email_code_cooldown",
+                  "email_code_daily_limit"
+                ],
+                "description": "机器可读的错误码"
+              },
+              "message": {
+                "type": "string",
+                "description": "人类可读的说明"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "FundSearchResult": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FundSummary"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "FundSummary": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^\\d{6}$",
+            "example": "000001",
+            "description": "6 位基金代码"
+          },
+          "name": {
+            "type": "string",
+            "example": "华夏成长混合"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "domestic",
+              "qdii",
+              "etf_feeder"
+            ],
+            "description": "基金类别：domestic 境内、qdii QDII、etf_feeder ETF 联接（QDII 的 ETF 联接归为 qdii）"
+          },
+          "type": {
+            "type": "string",
+            "nullable": true,
+            "description": "上游给出的基金类型，例如\"混合型-灵活\"",
+            "example": "混合型-灵活"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "category",
+          "type"
+        ]
+      },
+      "EstimateBatch": {
+        "type": "object",
+        "properties": {
+          "marketStatus": {
+            "type": "string",
+            "enum": [
+              "trading",
+              "closed",
+              "holiday",
+              "pre_market"
+            ],
+            "description": "市场状态：trading 交易中、closed 已收盘、holiday 休市、pre_market 盘前。均为显式枚举，不以 0 表示"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "判定所依据的时间"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EstimateItem"
+            },
+            "description": "按请求顺序（去重后）逐只给出"
+          }
+        },
+        "required": [
+          "marketStatus",
+          "time",
+          "items"
+        ]
+      },
+      "EstimateItem": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^\\d{6}$",
+            "example": "000001",
+            "description": "6 位基金代码"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "estimated",
+              "unavailable",
+              "pre_market",
+              "holiday"
+            ],
+            "description": "estimated 有估值；unavailable 所有来源都失败或没有当天估值（估值暂不可用）；pre_market 盘前；holiday 休市。均为显式枚举，不以 0 表示"
+          },
+          "estimate": {
+            "$ref": "#/components/schemas/Estimate"
+          }
+        },
+        "required": [
+          "code",
+          "status",
+          "estimate"
+        ]
+      },
+      "Estimate": {
+        "type": "object",
+        "nullable": true,
+        "properties": {
+          "changePercent": {
+            "type": "number",
+            "example": -1.44,
+            "description": "估值涨跌幅（百分比）。只有确实取到估值时才出现；取不到时整条估值为 null，不以 0 表示"
+          },
+          "value": {
+            "type": "string",
+            "pattern": "^\\d+(\\.\\d{1,4})?$",
+            "example": "1.6785",
+            "description": "按估值推算的单位水平，保留 4 位小数；非官方净值，用字符串表示以规避二进制浮点误差"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "来源给出的估值时间"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "tiantian",
+              "sina"
+            ],
+            "description": "估值来源：tiantian 天天基金（一级）、sina 新浪财经（二级）"
+          },
+          "sourceName": {
+            "type": "string",
+            "example": "天天基金",
+            "description": "来源的展示名"
+          },
+          "fallback": {
+            "type": "boolean",
+            "description": "是否发生了回退：一级来源（天天基金）失败或没有估值，改用了后面的来源"
+          },
+          "referenceOnly": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "估值非官方数据，仅供参考；前端应据此展示提示"
+          }
+        },
+        "required": [
+          "changePercent",
+          "value",
+          "time",
+          "source",
+          "sourceName",
+          "fallback",
+          "referenceOnly"
+        ],
+        "description": "状态为 estimated 时给出；unavailable、pre_market、holiday 时为 null"
+      },
+      "FundDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/FundSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "settlement": {
+                "type": "object",
+                "properties": {
+                  "tPlusN": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "买入确认 T+N 的 N",
+                    "example": 1
+                  },
+                  "source": {
+                    "type": "string",
+                    "enum": [
+                      "upstream",
+                      "category_default"
+                    ],
+                    "description": "upstream：取自上游；category_default：上游缺失，按类别默认（境内与 ETF 联接 T+1，QDII T+2）"
+                  }
+                },
+                "required": [
+                  "tPlusN",
+                  "source"
+                ],
+                "description": "T+N 确认规则"
+              }
+            },
+            "required": [
+              "settlement"
+            ]
+          }
+        ]
+      },
+      "LatestNav": {
+        "type": "object",
+        "properties": {
+          "navDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-05",
+            "description": "净值日期（YYYY-MM-DD）"
+          },
+          "unitNav": {
+            "type": "string",
+            "pattern": "^\\d+(\\.\\d{1,4})?$",
+            "example": "1.0000",
+            "description": "净值，保留最多 4 位小数；用字符串表示以规避二进制浮点误差"
+          },
+          "cumulativeNav": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^\\d+(\\.\\d{1,4})?$",
+            "example": "1.0000",
+            "description": "累计净值，缺失时为 null"
+          },
+          "dailyChange": {
+            "type": "number",
+            "nullable": true,
+            "example": 1.83,
+            "description": "当日涨跌幅（百分比）；上游缺失或不可解析时为 null，表示无涨跌幅"
+          }
+        },
+        "required": [
+          "navDate",
+          "unitNav",
+          "cumulativeNav",
+          "dailyChange"
+        ]
+      },
+      "NavHistory": {
+        "type": "object",
+        "properties": {
+          "points": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NavPoint"
+            }
+          }
+        },
+        "required": [
+          "points"
+        ]
+      },
+      "NavPoint": {
+        "type": "object",
+        "properties": {
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "example": "2026-11-05",
+            "description": "净值日期（YYYY-MM-DD）"
+          },
+          "unitNav": {
+            "type": "string",
+            "pattern": "^\\d+(\\.\\d{1,4})?$",
+            "example": "1.0000",
+            "description": "净值，保留最多 4 位小数；用字符串表示以规避二进制浮点误差"
+          },
+          "cumulativeNav": {
+            "type": "string",
+            "nullable": true,
+            "pattern": "^\\d+(\\.\\d{1,4})?$",
+            "example": "1.0000",
+            "description": "净值，保留最多 4 位小数；用字符串表示以规避二进制浮点误差"
+          },
+          "dailyChange": {
+            "type": "number",
+            "nullable": true,
+            "example": 1.83,
+            "description": "当日涨跌幅（百分比）；上游缺失或不可解析时为 null，表示无涨跌幅"
+          }
+        },
+        "required": [
+          "date",
+          "unitNav",
+          "cumulativeNav",
+          "dailyChange"
+        ]
+      },
+      "MarketStatus": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "trading",
+              "closed",
+              "holiday",
+              "pre_market"
+            ],
+            "description": "市场状态：trading 交易中、closed 已收盘、holiday 休市、pre_market 盘前。均为显式枚举，不以 0 表示"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "判定所依据的时间"
+          }
+        },
+        "required": [
+          "status",
+          "time"
+        ]
+      },
+      "EmailCodeRequestResult": {
+        "type": "object",
+        "properties": {
+          "retryAfterSeconds": {
+            "type": "integer",
+            "example": 60,
+            "description": "同一邮箱再次请求验证码前需等待的秒数"
+          }
+        },
+        "required": [
+          "retryAfterSeconds"
+        ]
+      },
+      "EmailLoginResult": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/UserSummary"
+          },
+          "session": {
+            "$ref": "#/components/schemas/Session"
+          },
+          "token": {
+            "type": "string",
+            "nullable": true,
+            "description": "会话令牌：小程序端通过请求头携带；网页端为 null（令牌只在 httpOnly + Secure Cookie 里）"
+          }
+        },
+        "required": [
+          "user",
+          "session",
+          "token"
+        ]
+      },
+      "UserSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "0199c4d0-...",
+            "description": "用户 id"
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "device": {
+            "type": "string",
+            "enum": [
+              "web",
+              "miniprogram"
+            ],
+            "description": "会话设备：web 网页（httpOnly Cookie）、miniprogram 小程序（请求头携带令牌）"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "会话过期时间"
+          }
+        },
+        "required": [
+          "device",
+          "expiresAt"
+        ]
+      },
+      "Me": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/UserSummary"
+          },
+          "loginMethods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LoginMethod"
+            }
+          },
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            }
+          }
+        },
+        "required": [
+          "user",
+          "loginMethods",
+          "channels"
+        ]
+      },
+      "LoginMethod": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "email",
+              "github",
+              "wechat"
+            ],
+            "description": "登录方式类型"
+          },
+          "externalId": {
+            "type": "string",
+            "example": "user@example.com",
+            "description": "外部标识"
+          }
+        },
+        "required": [
+          "type",
+          "externalId"
+        ]
+      },
+      "Channel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "渠道 id"
+          },
+          "name": {
+            "type": "string",
+            "example": "支付宝",
+            "description": "渠道名"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/v1/health": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "健康检查",
+        "description": "返回服务存活状态与数据库连通性。",
+        "responses": {
+          "200": {
+            "description": "服务存活，数据库可达",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可达",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/search": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "基金搜索",
+        "description": "按基金代码、名称或拼音首字母搜索基金。匿名可用并限流；结果按 Asia/Shanghai 日期缓存一天。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 50,
+              "description": "基金代码、名称或拼音首字母",
+              "example": "hxcz"
+            },
+            "required": true,
+            "description": "基金代码、名称或拼音首字母",
+            "name": "q",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "匹配的基金列表，可能为空",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundSearchResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "匿名请求超过限流（每个客户端 IP 每分钟 60 次），响应头 Retry-After 给出等待秒数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "行情上游暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/estimates": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "批量估值",
+        "description": "一次返回多只基金的估值涨跌、估值时间、来源与是否回退。来源按天天基金 → 新浪财经的顺序回退；全部失败时该基金为 unavailable，不返回 0%。估值的基准净值必须是最近一期已公布净值，否则视为过期估值、按无估值处理（例如 QDII 净值晚到时）；基准无法核对（来源没给出可核对的基准、净值暂时取不到）时同样按无估值处理，不返回无法确认的估值。盘前与休市不提供估值，逐只返回 pre_market / holiday；交易日收盘后返回当天的收盘估值。交易时段结果缓存 30 秒；收盘估值缓存到下一个交易日开盘。匿名可用并限流。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}(,\\d{6}){0,49}$",
+              "example": "000001,110020",
+              "description": "逗号分隔的 6 位基金代码，1–50 个；重复的代码只返回一次"
+            },
+            "required": true,
+            "description": "逗号分隔的 6 位基金代码，1–50 个；重复的代码只返回一次",
+            "name": "codes",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "逐只基金的估值或显式状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EstimateBatch"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "匿名请求超过限流（每个客户端 IP 每分钟 60 次），响应头 Retry-After 给出等待秒数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/{code}": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "基金基础信息",
+        "description": "返回名称、代码、类别与 T+N 确认规则。匿名可用并限流。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}$",
+              "example": "000001",
+              "description": "6 位基金代码"
+            },
+            "required": true,
+            "description": "6 位基金代码",
+            "name": "code",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "基金基础信息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这只基金",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "匿名请求超过限流（每个客户端 IP 每分钟 60 次），响应头 Retry-After 给出等待秒数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "行情上游暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/{code}/nav": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "基金最新净值",
+        "description": "返回最新已公布的单位净值、净值日期与当日涨跌幅（含累计净值）。匿名可用并限流；结果缓存到当天净值公布窗口，窗口内当天净值尚未公布时按短间隔重新抓取。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}$",
+              "example": "000001",
+              "description": "6 位基金代码"
+            },
+            "required": true,
+            "description": "6 位基金代码",
+            "name": "code",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "最新一期净值",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LatestNav"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这只基金的净值数据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "匿名请求超过限流（每个客户端 IP 每分钟 60 次），响应头 Retry-After 给出等待秒数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "行情上游暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/{code}/nav/history": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "基金历史净值走势",
+        "description": "按区间返回历史净值序列（最新在前）。匿名可用并限流；结果缓存到当天净值公布窗口。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}$",
+              "example": "000001",
+              "description": "6 位基金代码"
+            },
+            "required": true,
+            "description": "6 位基金代码",
+            "name": "code",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "3m",
+                "1y"
+              ],
+              "example": "1m",
+              "description": "回看区间：1m 近 1 月、3m 近 3 月、1y 近 1 年"
+            },
+            "required": true,
+            "description": "回看区间：1m 近 1 月、3m 近 3 月、1y 近 1 年",
+            "name": "range",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "历史净值序列，可能为空",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NavHistory"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这只基金的净值数据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "匿名请求超过限流（每个客户端 IP 每分钟 60 次），响应头 Retry-After 给出等待秒数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "行情上游暂不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/market/status": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "市场状态",
+        "description": "返回当前市场处于交易中、已收盘、休市或盘前。按注入的时钟与交易日历判定；匿名可用并限流。",
+        "responses": {
+          "200": {
+            "description": "市场状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MarketStatus"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "匿名请求超过限流（每个客户端 IP 每分钟 60 次），响应头 Retry-After 给出等待秒数",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/email/request": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "请求邮箱验证码",
+        "description": "生成 6 位验证码并通过 Resend 适配器发信（开发模式用假发信）。同一邮箱 60 秒内只能请求一次，每天有上限，同一 IP 有限流。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "example": "user@example.com",
+                    "description": "邮箱地址"
+                  }
+                },
+                "required": [
+                  "email"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "验证码已发出",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailCodeRequestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "请求过于频繁（同一邮箱冷却、每日上限或同一 IP 限流）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/email/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "邮箱验证码登录",
+        "description": "用邮箱和 6 位验证码登录；首次登录自动创建用户、邮箱登录方式，并预置三个渠道。网页端返回 httpOnly + Secure Cookie，小程序端返回令牌由请求头携带。",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "example": "user@example.com",
+                    "description": "邮箱地址"
+                  },
+                  "code": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "example": "123456",
+                    "description": "6 位数字验证码"
+                  },
+                  "device": {
+                    "type": "string",
+                    "enum": [
+                      "web",
+                      "miniprogram"
+                    ],
+                    "description": "会话设备：web 网页（httpOnly Cookie）、miniprogram 小程序（请求头携带令牌）"
+                  }
+                },
+                "required": [
+                  "email",
+                  "code",
+                  "device"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "登录成功，建立会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailLoginResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法，或验证码过期/错误/已使用/作废",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "退出登录",
+        "description": "作废当前会话；其他设备上的会话不受影响。",
+        "responses": {
+          "204": {
+            "description": "已退出当前会话"
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "当前用户",
+        "description": "返回当前登录用户、已关联的登录方式与渠道列表。",
+        "responses": {
+          "200": {
+            "description": "当前用户信息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Me"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -47,7 +47,7 @@ docker compose up -d
 ## 接口
 
 - `GET /v1/health` — 健康检查，返回存活状态与数据库连通性。
-- `GET /v1/openapi` — 由请求/响应 schema 自动生成的 OpenAPI 文档（JSON）。
+- `GET /v1/openapi` — 由请求/响应 schema 自动生成的 OpenAPI 文档（JSON）。同一份文档提交在根目录 `openapi.json`，作为 studio 与 glance 的接口契约；改动接口后运行 `pnpm openapi:generate` 并一起提交，CI 会用 `pnpm openapi:check` 检查两者一致。
 - `GET /v1/funds/search?q=` — 基金搜索，按基金代码、名称或拼音首字母匹配，只返回基金（过滤上游混入的股票、指数）。
 - `GET /v1/funds/{code}` — 基金基础信息：名称、代码、类别（`domestic` 境内 / `qdii` / `etf_feeder` ETF 联接，QDII 的 ETF 联接归为 `qdii`）与 T+N 确认规则；上游取不到 T+N 时按类别默认（境内与 ETF 联接 T+1，QDII T+2），并以 `settlement.source` 标明来源。
 - `GET /v1/funds/{code}/nav` — 基金最新净值：单位净值、累计净值、净值日期与当日涨跌幅（净值保留 4 位小数，用字符串表示以规避二进制浮点误差）。
@@ -104,6 +104,10 @@ A 股交易日历由 core 自己维护：休市日按年导入到 `trading_holid
 
 所有错误统一返回 `{ error: { code, message } }`，其中 `code` 是机器可读的错误码、`message` 是人类可读的说明；该结构出现在 OpenAPI 文档的 `Error` schema 中，`code` 的取值（`database_unavailable`、`not_found`、`internal_error`、`validation_error`、`fund_not_found`、`upstream_unavailable`、`rate_limited`）以枚举形式列出。未捕获的异常由全局处理返回统一的 `internal_error`，诊断详情只留在服务端日志。
 
+## CI
+
+`.github/workflows/ci.yml` 在每个 PR 和每次推送到 main 时运行检查项 `ci`：用 service container 起 PostgreSQL 16，并用 `docker/initdb` 的脚本建出与本机一致的 `test_bafang` 角色（无 `CREATEDB`）；然后依次执行 `pnpm install --frozen-lockfile` → lint → 格式检查 → 类型检查 → 测试 → OpenAPI 契约检查，任一步失败则检查失败。pnpm 版本取自 `package.json` 的 `packageManager` 字段。
+
 ## 常用脚本
 
 | 命令                                | 说明                       |
@@ -116,4 +120,6 @@ A 股交易日历由 core 自己维护：休市日按年导入到 `trading_holid
 | `pnpm db:migrate`                   | 应用迁移                   |
 | `pnpm trading-calendar:import 2026` | 按年导入休市日             |
 | `pnpm test`                         | 全部测试                   |
+| `pnpm openapi:generate`             | 重新生成 `openapi.json`    |
+| `pnpm openapi:check`                | 检查 `openapi.json` 未漂移 |
 | `docker compose up -d`              | 起本地开发数据库           |
