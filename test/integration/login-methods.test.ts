@@ -336,11 +336,13 @@ describe('login method management over HTTP', () => {
       expect((await linkGithub(target, emptyOwner, sibling)).status).toBe(302);
       const current = await githubLogin(target, `github-current-${round}`);
       const currentUserId = await me(target, current);
-      await target.request('/v1/auth/email/link/request', {
+      offsetMs += 61_000;
+      const linkRequest = await target.request('/v1/auth/email/link/request', {
         method: 'POST',
         headers: { ...json, Cookie: current },
         body: JSON.stringify({ email }),
       });
+      expect(linkRequest.status).toBe(200);
       const linkCode = code;
       githubId = sibling;
       const loginStart = await target.request('/v1/auth/github');
@@ -390,6 +392,8 @@ describe('login method management over HTTP', () => {
     expect(loginForLink.status).toBe(400);
     expect(await errorCode(loginForLink)).toBe('verification_code_invalid');
 
+    // 冷却按邮箱共享：推进时钟后再请求关联码。
+    offsetMs += 61_000;
     const linkRequest = await target.request('/v1/auth/email/link/request', {
       method: 'POST',
       headers: { ...json, Cookie: current },
@@ -447,6 +451,50 @@ describe('login method management over HTTP', () => {
       ...Array(6).fill('400:verification_code_max_attempts'),
       '429:rate_limited',
     ]);
+  });
+
+  it('shares the per-email cooldown and daily limit between login and link codes', async () => {
+    const target = app();
+    const current = await githubLogin(target, 'github-cooldown');
+    const requestLogin = (email: string) =>
+      target.request('/v1/auth/email/request', {
+        method: 'POST',
+        headers: json,
+        body: JSON.stringify({ email }),
+      });
+    const requestLink = (email: string) =>
+      target.request('/v1/auth/email/link/request', {
+        method: 'POST',
+        headers: { ...json, Cookie: current },
+        body: JSON.stringify({ email }),
+      });
+
+    // login → link 与 link → login：60 秒内第二次都被冷却拒绝。
+    for (const [first, second, email] of [
+      [requestLogin, requestLink, 'cooldown-a@example.com'],
+      [requestLink, requestLogin, 'cooldown-b@example.com'],
+    ] as const) {
+      expect((await first(email)).status).toBe(200);
+      offsetMs += 59_000;
+      const blocked = await second(email);
+      expect(blocked.status).toBe(429);
+      expect(await errorCode(blocked)).toBe('email_code_cooldown');
+      offsetMs += 2_000;
+      expect((await second(email)).status).toBe(200);
+    }
+
+    // 每日上限按邮箱合计两种用途。
+    const email = 'daily-shared@example.com';
+    for (let i = 0; i < 10; i += 1) {
+      offsetMs += 61_000;
+      expect((await (i % 2 === 0 ? requestLogin : requestLink)(email)).status).toBe(200);
+    }
+    for (const request of [requestLogin, requestLink]) {
+      offsetMs += 61_000;
+      const over = await request(email);
+      expect(over.status).toBe(429);
+      expect(await errorCode(over)).toBe('email_code_daily_limit');
+    }
   });
 
   it('creates a new user when an unlinked identity logs in again', async () => {
