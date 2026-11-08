@@ -86,6 +86,7 @@ export const emailVerificationCodes = pgTable(
   {
     id: uuid('id').primaryKey().defaultRandom(),
     email: text('email').notNull(),
+    purpose: text('purpose').notNull().default('login'),
     codeHash: text('code_hash').notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     attempts: integer('attempts').notNull().default(0),
@@ -125,6 +126,7 @@ export const githubOAuthStates = pgTable(
     verifier: text('verifier').notNull(),
     purpose: text('purpose').notNull().default('login'),
     userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    sessionId: uuid('session_id').references(() => sessions.id, { onDelete: 'cascade' }),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   },
   (t) => [index('github_oauth_states_expires_idx').on(t.expiresAt)],

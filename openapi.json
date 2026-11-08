@@ -82,7 +82,11 @@
                   "email_code_daily_limit",
                   "channel_name_conflict",
                   "channel_protected",
-                  "channel_has_positions"
+                  "channel_has_positions",
+                  "login_method_conflict",
+                  "login_method_type_conflict",
+                  "login_method_last",
+                  "login_method_not_found"
                 ],
                 "description": "机器可读的错误码"
               },
@@ -1902,7 +1906,17 @@
             }
           },
           "400": {
-            "description": "参数不合法，或验证码过期/错误/已使用/作废",
+            "description": "validation_error：参数不合法；verification_code_invalid / verification_code_expired / verification_code_used / verification_code_max_attempts：登录验证码错误、过期、已使用或作废（关联邮箱的验证码不能用于登录）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：同一 IP 请求过于频繁",
             "content": {
               "application/json": {
                 "schema": {
@@ -1980,7 +1994,7 @@
             }
           },
           "400": {
-            "description": "参数不合法",
+            "description": "validation_error：参数不合法",
             "content": {
               "application/json": {
                 "schema": {
@@ -1990,7 +2004,7 @@
             }
           },
           "401": {
-            "description": "未登录或会话已失效",
+            "description": "unauthorized：未登录或会话已失效",
             "content": {
               "application/json": {
                 "schema": {
@@ -2000,7 +2014,17 @@
             }
           },
           "429": {
-            "description": "验证码请求过于频繁",
+            "description": "email_code_cooldown：同一邮箱关联验证码冷却中；email_code_daily_limit：今日关联验证码次数已达上限；rate_limited：同一 IP 请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
             "content": {
               "application/json": {
                 "schema": {
@@ -2075,7 +2099,7 @@
             }
           },
           "400": {
-            "description": "验证码不正确、过期、已使用或作废",
+            "description": "validation_error：参数不合法；verification_code_invalid / verification_code_expired / verification_code_used / verification_code_max_attempts：关联验证码错误、过期、已使用或作废（登录验证码不能用于关联）",
             "content": {
               "application/json": {
                 "schema": {
@@ -2085,7 +2109,7 @@
             }
           },
           "401": {
-            "description": "未登录或会话已失效",
+            "description": "unauthorized：未登录或会话已失效",
             "content": {
               "application/json": {
                 "schema": {
@@ -2095,7 +2119,27 @@
             }
           },
           "409": {
-            "description": "邮箱冲突或当前用户已有邮箱",
+            "description": "login_method_conflict：该邮箱已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他邮箱",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：同一 IP 请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
             "content": {
               "application/json": {
                 "schema": {
@@ -2252,6 +2296,16 @@
               }
             }
           },
+          "401": {
+            "description": "unauthorized：intent=link 时未登录或会话已失效（关联 state 绑定发起会话）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "429": {
             "description": "rate_limited：请求过于频繁",
             "content": {
@@ -2301,7 +2355,7 @@
           "auth"
         ],
         "summary": "GitHub 授权回调",
-        "description": "登录意图建立网页会话；关联意图要求原网页会话仍有效，并将 GitHub 登录方式关联到该用户。",
+        "description": "登录意图建立网页会话；关联意图要求回调携带发起关联的同一网页会话且该会话仍有效（未退出、未过期），并将 GitHub 登录方式关联到该用户。",
         "parameters": [
           {
             "schema": {
@@ -2353,7 +2407,7 @@
             }
           },
           "401": {
-            "description": "关联回调时会话已失效",
+            "description": "unauthorized：关联回调未携带发起关联的会话，或该会话已退出/过期，或换成了同一用户的其他会话",
             "content": {
               "application/json": {
                 "schema": {
@@ -2363,7 +2417,7 @@
             }
           },
           "409": {
-            "description": "登录方式冲突",
+            "description": "login_method_conflict：该 GitHub 账号已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他 GitHub 账号",
             "content": {
               "application/json": {
                 "schema": {
@@ -2614,8 +2668,18 @@
           "204": {
             "description": "已解绑"
           },
+          "400": {
+            "description": "validation_error：登录方式类型不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "401": {
-            "description": "未登录或会话已失效",
+            "description": "unauthorized：未登录或会话已失效",
             "content": {
               "application/json": {
                 "schema": {
@@ -2625,7 +2689,7 @@
             }
           },
           "404": {
-            "description": "未关联该登录方式",
+            "description": "login_method_not_found：当前用户未关联该类型的登录方式",
             "content": {
               "application/json": {
                 "schema": {
@@ -2635,7 +2699,17 @@
             }
           },
           "409": {
-            "description": "仅剩一种登录方式时不能解绑",
+            "description": "login_method_last：仅剩一种登录方式时不能解绑",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
             "content": {
               "application/json": {
                 "schema": {

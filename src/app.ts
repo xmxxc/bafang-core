@@ -57,6 +57,7 @@ import {
   createAuthService,
   EMAIL_CODE_COOLDOWN_MS,
   type AuthService,
+  type SessionInfo,
   type UserPositionsChecker,
 } from './auth/service';
 import { extractSessionToken, getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
@@ -273,6 +274,7 @@ export function createApp(deps: AppDeps = {}): App {
   app.use('/v1/auth/email/request', rateLimit(EMAIL_CODE_REQUEST_RATE_LIMIT, resolved.clock));
   app.use('/v1/auth/email/login', rateLimit(EMAIL_LOGIN_RATE_LIMIT, resolved.clock));
   app.use('/v1/auth/email/link/request', rateLimit(EMAIL_CODE_REQUEST_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/email/link', rateLimit(EMAIL_LOGIN_RATE_LIMIT, resolved.clock));
 
   app.openapi(emailCodeRequestRoute, async (c) => {
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
@@ -305,7 +307,7 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(emailLinkRequestRoute, async (c) => {
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     const { email } = (await c.req.json()) as { email: string };
-    await auth.requestCode(email);
+    await auth.requestCode(email, 'link');
     return c.json({ retryAfterSeconds: EMAIL_CODE_COOLDOWN_MS / 1000 }, 200);
   });
   app.openapi(emailLinkRoute, async (c) => {
@@ -365,14 +367,13 @@ export function createApp(deps: AppDeps = {}): App {
       return c.json(errorBody('github_not_configured', 'GitHub 登录未配置'), 503);
     if (!github || !auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     const { intent } = c.req.valid('query');
-    let currentUserId: string | undefined;
+    let session: SessionInfo | null = null;
     if (intent === 'link') {
       const token = extractSessionToken(c);
-      const session = token ? await auth.authenticate(token) : null;
+      session = token ? await auth.authenticate(token) : null;
       if (!session) return c.json(errorBody('unauthorized', '关联登录方式需要先登录'), 401);
-      currentUserId = session.userId;
     }
-    const result = await github.start(intent, currentUserId);
+    const result = await github.start(intent, session ?? undefined);
     setCookie(c, GITHUB_BROWSER_COOKIE, result.browser, {
       httpOnly: true,
       secure: true,
@@ -389,11 +390,9 @@ export function createApp(deps: AppDeps = {}): App {
     const { state, code, error } = c.req.valid('query');
     const browser = getCookie(c, GITHUB_BROWSER_COOKIE);
     deleteCookie(c, GITHUB_BROWSER_COOKIE, { path: '/', secure: true });
-    let currentUserId: string | undefined;
     const token = extractSessionToken(c);
     const session = token ? await auth.authenticate(token) : null;
-    if (session) currentUserId = session.userId;
-    const result = await github.callback(state, browser, code, error, currentUserId);
+    const result = await github.callback(state, browser, code, error, session);
     if (result.kind === 'login') setSessionCookie(c, result.token, result.expiresAt);
     return c.redirect(resolved.github.redirectUrl, 302);
   });

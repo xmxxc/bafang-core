@@ -73,6 +73,17 @@ docker compose up -d
 - session_key 不返回、不持久化、不写日志。接口响应带 `Cache-Control: no-store`，复用进程内 IP 限流，每分钟 10 次，超出返回 429 `rate_limited` 与 `Retry-After`。
 - 测试通过 `createApp({ wechat })` 注入假适配器，真实协议使用假 HTTP 出口验证，不访问真实微信。复用已有表结构，无需新增迁移。
 
+### 登录方式管理
+
+均要求已登录（网页 Cookie 或小程序 `Authorization: Bearer`）。
+
+- `GET /v1/me/login-methods` 列出已关联的登录方式类型与展示信息（不含密钥或令牌）。
+- 关联 GitHub：`GET /v1/auth/github?intent=link`，未登录返回 401 `unauthorized`。state 绑定发起关联的会话 id（不存令牌）；回调必须携带同一会话且该会话未退出、未过期，否则返回 401 `unauthorized`（换成同一用户的另一会话也拒绝），需重新发起。
+- 关联邮箱：`POST /v1/auth/email/link/request` 请求**关联用途**的验证码，`POST /v1/auth/email/link` 提交。验证码按用途（登录 / 关联）分开签发、冷却、计每日次数和校验：登录码不能用于关联，关联码不能用于登录，两者互不作废。关联入口沿用登录接口的 IP 限流（每分钟 10 次）与防猜码规则（错 5 次作废）。
+- 关联目标已属于其他空用户（没有持仓）时，登录方式转移到当前用户，空用户连同其会话、渠道和其余登录方式一起删除；对方有持仓返回 409 `login_method_conflict`，双方数据不变。每个用户每种类型最多一个登录方式，已关联其他标识时返回 409 `login_method_type_conflict`。
+- `DELETE /v1/me/login-methods/{type}` 解绑；仅剩一种时返回 409 `login_method_last`，未关联该类型返回 404 `login_method_not_found`。**解绑后再用该标识登录会新建一个用户**（与首次登录相同），不会回到原用户。
+- 并发：登录、关联（含转移空用户）、解绑使用同一把按身份（类型 + 外部标识）计算的事务级 advisory lock，统一顺序为先身份锁、再按 id 升序锁用户行。同一身份的登录与关联串行执行：关联在前则登录落在接收用户上；登录在前则其会话属于随后被转移删除的空用户（与先登录再关联的顺序执行结果一致）。
+
 ### 行情接口
 
 - **匿名只读 + 限流：** `/v1/funds/*` 与 `/v1/market/*` 不需要登录，按客户端 IP 每分钟 60 次（固定窗口，进程内），超出返回 429 `rate_limited` 与 `Retry-After`。客户端 IP 取 `X-Forwarded-For` 的最右一项（部署时 core 位于 Caddy 之后，由 Caddy 追加），没有该请求头时取连接对端地址；因此 core 不应绕过 Caddy 直接暴露在公网上。
