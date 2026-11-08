@@ -1,6 +1,9 @@
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp, type AppDeps } from '../../src/app';
-import { createDb } from '../../src/db';
+import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { GitHubOAuth } from '../../src/auth/github';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
 
@@ -87,6 +90,30 @@ describe('login method management over HTTP', () => {
     });
   }
 
+  async function migrationFolderThrough(maxIdx: number) {
+    const folder = await mkdtemp(join(tmpdir(), `login-methods-migrations-${maxIdx}-`));
+    const sourceMeta = join(MIGRATIONS_FOLDER, 'meta');
+    await mkdir(join(folder, 'meta'));
+    const journal = JSON.parse(await readFile(join(sourceMeta, '_journal.json'), 'utf8')) as {
+      entries: { idx: number; tag: string }[];
+    };
+    journal.entries = journal.entries.filter((entry) => entry.idx <= maxIdx);
+    await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
+    for (const entry of journal.entries) {
+      await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(folder, `${entry.tag}.sql`));
+    }
+    for (const name of await readdir(sourceMeta)) {
+      if (
+        name.endsWith('.json') &&
+        name !== '_journal.json' &&
+        Number(name.slice(0, 4)) <= maxIdx
+      ) {
+        await copyFile(join(sourceMeta, name), join(folder, 'meta', name));
+      }
+    }
+    return folder;
+  }
+
   it('lists safe display information and associates GitHub and email', async () => {
     const target = app();
     const cookie = await githubLogin(target, 'github-list');
@@ -129,5 +156,56 @@ describe('login method management over HTTP', () => {
       ),
     );
     expect(statuses.sort()).toEqual([204, 409]);
+  });
+
+  it('upgrades 0000-0006 before using the 0007 GitHub association columns over HTTP', async () => {
+    const prior = await migrationFolderThrough(6);
+    const oldDb = await createTestSchema(prior);
+    try {
+      const target = createApp({
+        database: createDb(oldDb.pool),
+        mailer,
+        clock,
+        github: { oauth, redirectUrl: 'https://studio.test/' },
+      });
+      const email = 'incremental-upgrade@example.com';
+      await target.request('/v1/auth/email/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const login = await target.request('/v1/auth/email/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, code, device: 'web' }),
+      });
+      const cookie = login.headers
+        .getSetCookie()
+        .find((item) => item.startsWith('bafang_session='))!
+        .split(';')[0]!;
+
+      await migrateSchema(oldDb.pool, MIGRATIONS_FOLDER, oldDb.schema);
+      githubId = 'github-incremental';
+      const start = await target.request('/v1/auth/github?intent=link', {
+        headers: { Cookie: cookie },
+      });
+      expect(start.status).toBe(302);
+      const state = new URL(start.headers.get('location')!).searchParams.get('state')!;
+      const browser = start.headers.get('set-cookie')!.split(';')[0]!;
+      const callback = await target.request(`/v1/auth/github/callback?state=${state}&code=ok`, {
+        headers: { Cookie: `${cookie}; ${browser}` },
+      });
+      expect(callback.status).toBe(302);
+      const listed = await target.request('/v1/me/login-methods', { headers: { Cookie: cookie } });
+      expect(await listed.json()).toEqual({
+        items: [
+          { type: 'email', display: email },
+          { type: 'github', display: 'GitHub 用户 github-incremental' },
+        ],
+      });
+    } finally {
+      await dropTestSchema(oldDb);
+      await rm(prior, { recursive: true, force: true });
+    }
   });
 });
