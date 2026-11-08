@@ -1,6 +1,9 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+// 双份全量测试并发时，CLI 用例实测最慢约 6.5 秒；取 2 倍余量并向上取整。
+vi.setConfig({ testTimeout: 15_000 });
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
