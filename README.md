@@ -105,7 +105,7 @@ pnpm test        # 全部测试（连接真实 PostgreSQL）
 pnpm test:watch  # watch 模式
 ```
 
-测试唯一的入口是在进程内对 core 应用发 HTTP 请求（`app.request(...)`），并连接真实的 PostgreSQL 测试库。因为角色没有 `CREATEDB` 权限，测试隔离用「每个用例一个临时 schema」：建好后在 schema 内跑迁移，用完删除，互不干扰。迁移只作为准备测试环境的步骤，用例不直接断言表结构、迁移记录、内部函数或调用次数；时钟与交易日历替身通过应用的依赖注入在 HTTP 用例中生效。
+测试唯一的业务入口是在进程内对 core 应用发 HTTP 请求（`app.request(...)`），并连接真实的 PostgreSQL 测试库。因为角色没有 `CREATEDB` 权限，测试隔离用「每个用例一个临时 schema」：建好后在 schema 内跑迁移，用完删除，互不干扰。迁移升级路径的回归测试（`test/integration/*-migration.test.ts`）可以断言迁移命令本身成功或失败；仍不直接断言表结构、迁移记录、内部函数或调用次数，迁移后的行为通过 HTTP 观察。时钟与交易日历替身通过应用的依赖注入在 HTTP 用例中生效。
 
 ## 迁移与 schema
 
