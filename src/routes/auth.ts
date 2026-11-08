@@ -57,6 +57,18 @@ const LoginMethodSchema = z
   })
   .openapi('LoginMethod');
 
+const WeChatLoginResponseSchema = z
+  .object({
+    user: UserSummarySchema,
+    session: SessionSchema.extend({ device: z.literal('miniprogram') }),
+    token: z
+      .string()
+      .openapi({ description: '会话令牌；后续请求使用 Authorization: Bearer <token>' }),
+  })
+  .openapi('WeChatLoginResult');
+
+export type WeChatLoginResponse = z.infer<typeof WeChatLoginResponseSchema>;
+
 const ChannelSummarySchema = z
   .object({
     id: z.string().openapi({ description: '渠道 id' }),
@@ -76,6 +88,42 @@ export type EmailLoginResponse = z.infer<typeof EmailLoginResponseSchema>;
 export type MeResponse = z.infer<typeof MeResponseSchema>;
 
 const errorContent = { 'application/json': { schema: ErrorResponseSchema } };
+
+export const wechatLoginRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/wechat/login',
+  tags: ['auth'],
+  summary: '微信小程序登录',
+  description:
+    '提交 wx.login 的一次性 code，使用 openid 识别用户。首次登录自动创建用户并预置三个渠道。返回小程序会话令牌，通过 Authorization: Bearer 请求头携带，不设置 Cookie。失败后应重新调用 wx.login 获取 code。',
+  request: {
+    body: {
+      required: true,
+      content: {
+        'application/json': {
+          schema: z.object({ code: z.string().min(1).max(512).regex(/^\S+$/) }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: '登录成功，建立独立的小程序会话',
+      content: { 'application/json': { schema: WeChatLoginResponseSchema } },
+    },
+    400: {
+      description: 'validation_error：参数不合法；wechat_code_invalid：code 无效或已使用',
+      content: errorContent,
+    },
+    429: { description: 'rate_limited：请求过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    502: { description: 'wechat_unavailable：微信暂不可用或返回格式异常', content: errorContent },
+    503: {
+      description: 'wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用',
+      content: errorContent,
+    },
+  },
+});
 
 export const emailCodeRequestRoute = createRoute({
   method: 'post',
