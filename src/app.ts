@@ -28,6 +28,8 @@ import {
   emailLinkRequestRoute,
   emailLinkRoute,
   loginMethodDeleteRoute,
+  bindCodeGenerateRoute,
+  wechatBindCodeRoute,
 } from './routes/auth';
 import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
@@ -41,6 +43,8 @@ import {
   EMAIL_LOGIN_RATE_LIMIT,
   GITHUB_LOGIN_RATE_LIMIT,
   WECHAT_LOGIN_RATE_LIMIT,
+  BIND_CODE_GENERATE_RATE_LIMIT,
+  BIND_CODE_SUBMIT_RATE_LIMIT,
   rateLimit,
 } from './rate-limit';
 import { setSessionCookie } from './auth/cookie';
@@ -101,6 +105,10 @@ export interface AppDeps {
   github?: GitHubLogin;
   /** 微信 code2session 适配器；测试时替换为假实现。 */
   wechat?: WeChatCode2Session;
+  /** 绑定码 HMAC 密钥；生产环境应显式配置。 */
+  bindCodeSecret?: string;
+  /** 测试替换绑定码随机出口。 */
+  bindCodeGenerator?: () => string;
   clock?: Clock;
   tradingCalendar?: TradingCalendar;
   /** 港股交易日历（含半日市）；省略时只按周末判定。 */
@@ -115,18 +123,35 @@ export interface ResolvedDeps {
   mailer: Mailer;
   github: GitHubLogin | undefined;
   wechat: WeChatCode2Session | undefined;
+  bindCodeSecret: string | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
   hkTradingCalendar: SessionCalendar;
   upstream: UpstreamFetcher;
 }
 
+let bindCodeWarningLogged = false;
+
 export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
+  const configuredBindCodeSecret =
+    deps.bindCodeSecret?.trim() || process.env.BIND_CODE_SECRET?.trim();
+  const bindCodeSecret =
+    configuredBindCodeSecret ||
+    (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test'
+      ? 'bafang-core-development-bind-code-key'
+      : undefined);
+  if (!bindCodeSecret && !bindCodeWarningLogged) {
+    console.warn(
+      '[bafang-core] BIND_CODE_SECRET 未配置，绑定码能力已禁用（仅 development/test 使用开发默认值）',
+    );
+    bindCodeWarningLogged = true;
+  }
   return {
     db: deps.db,
     database: deps.database,
     github: deps.github,
     wechat: deps.wechat,
+    bindCodeSecret,
     mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
@@ -278,6 +303,8 @@ export function createApp(deps: AppDeps = {}): App {
         mailer: resolved.mailer,
         clock: resolved.clock,
         hasPositions: deps.hasUserPositions,
+        bindCodeSecret: resolved.bindCodeSecret,
+        bindCodeGenerator: deps.bindCodeGenerator,
       })
     : null;
   const requireLogin = auth ? requireAuth(auth) : null;
@@ -424,7 +451,17 @@ export function createApp(deps: AppDeps = {}): App {
     c.header('Cache-Control', 'no-store');
     await next();
   });
+  app.use('/v1/auth/wechat/bind', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    await next();
+  });
+  app.use('/v1/auth/bind-code', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    await next();
+  });
   app.use('/v1/auth/wechat/login', rateLimit(WECHAT_LOGIN_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/bind-code', rateLimit(BIND_CODE_GENERATE_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/wechat/bind', rateLimit(BIND_CODE_SUBMIT_RATE_LIMIT, resolved.clock));
   app.openapi(wechatLoginRoute, async (c) => {
     if (!resolved.wechat) return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
@@ -439,6 +476,43 @@ export function createApp(deps: AppDeps = {}): App {
       throw new AuthError('wechat_unavailable', '微信登录暂不可用，请稍后重试', 502);
     }
     const result = await auth.loginWithWeChatOpenId(openid);
+    return c.json(
+      {
+        user: { id: result.userId },
+        session: { device: 'miniprogram' as const, expiresAt: result.expiresAt.toISOString() },
+        token: result.token,
+      },
+      200,
+    );
+  });
+
+  if (requireLogin) app.use('/v1/auth/bind-code', requireLogin);
+  app.openapi(bindCodeGenerateRoute, async (c) => {
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    if (!resolved.bindCodeSecret)
+      return c.json(errorBody('bind_code_not_configured', '绑定码功能未配置'), 503);
+    if (getAuth(c).device !== 'web') {
+      return c.json(errorBody('bind_code_web_required', '生成绑定码需要网页会话'), 403);
+    }
+    const result = await auth.generateBindCode(getAuth(c).userId);
+    return c.json({ code: result.code, expiresAt: result.expiresAt.toISOString() }, 201);
+  });
+
+  app.openapi(wechatBindCodeRoute, async (c) => {
+    if (!resolved.wechat) return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    if (!resolved.bindCodeSecret)
+      return c.json(errorBody('bind_code_not_configured', '绑定码功能未配置'), 503);
+    const body = c.req.valid('json');
+    let openid: string;
+    try {
+      openid = await resolved.wechat.openid(body.code ?? body.wechatCode!);
+    } catch (error) {
+      if (error instanceof WeChatCodeInvalidError)
+        throw new AuthError('wechat_code_invalid', '微信登录凭据无效，请重新登录', 400);
+      throw new AuthError('wechat_unavailable', '微信登录暂不可用，请稍后重试', 502);
+    }
+    const result = await auth.bindWeChatCode(body.bindCode, openid);
     return c.json(
       {
         user: { id: result.userId },

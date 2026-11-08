@@ -84,6 +84,12 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'login_method_not_found',
       'position_exists',
       'trade_not_cancellable',
+      'bind_code_web_required',
+      'bind_code_expired',
+      'bind_code_used',
+      'bind_code_invalid',
+      'bind_code_not_configured',
+      'bind_code_unavailable',
     ]);
   });
 

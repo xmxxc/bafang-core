@@ -71,6 +71,13 @@
       "when": 1794123117197,
       "tag": "0009_solid_shatterstar",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1794126246555,
+      "tag": "0010_harsh_lady_vermin",
+      "breakpoints": true
     }
   ]
 }
