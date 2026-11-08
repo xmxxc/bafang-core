@@ -1,23 +1,24 @@
-import { and, asc, eq } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../db';
 import { positions, trades, users } from '../db/schema';
 import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { FundService } from '../market/funds';
 import type { TradingCalendar } from '../trading-calendar';
-import { formatFixed, parseFixed } from './decimal';
+import { fixedFromDb, formatFixed, parseFixed, subtract } from './decimal';
 import { PositionError } from './service';
 
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
 type TradeRow = typeof trades.$inferSelect;
 export type TradeView = Omit<TradeRow, 'createdAt'>;
 
-export interface BuyInput {
-  type: 'buy';
-  amount: string;
+interface TradeTiming {
   feeRate: string;
   submittedDate?: string;
   beforeCutoff?: boolean;
 }
+
+export type TradeInput = TradeTiming &
+  ({ type: 'buy'; amount: string } | { type: 'sell'; shares: string });
 
 function tradeView(row: TradeRow): TradeView {
   return {
@@ -92,17 +93,43 @@ export function createTradeService(deps: {
   }
 
   return {
-    async create(userId: string, positionId: string, input: BuyInput): Promise<TradeView> {
-      const amount = parseFixed(input.amount, 2)!;
-      if (amount.value <= 0n)
-        throw new PositionError('validation_error', '加仓金额必须大于 0', 400);
+    async create(userId: string, positionId: string, input: TradeInput): Promise<TradeView> {
+      const quantity = parseFixed(
+        input.type === 'buy' ? input.amount : input.shares,
+        input.type === 'buy' ? 2 : 4,
+      );
+      if (!quantity || quantity.value <= 0n)
+        throw new PositionError('validation_error', '交易金额或份额必须大于 0', 400);
       const now = deps.clock.now();
       const position = await ownedPosition(deps.db, userId, positionId);
       // 网络请求在事务外；获取基金详情中已存在的 T+N 规则（普通基金缺省 T+1）。
       const fund = await deps.funds.get(position.fundCode);
       if (!fund) throw new PositionError('fund_not_found', '基金不存在', 404);
       return mutate(userId, async (tx) => {
-        await ownedPosition(tx, userId, positionId);
+        const current = await ownedPosition(tx, userId, positionId);
+        if (input.type === 'sell') {
+          const [reserved] = await tx
+            .select({ shares: sql<string>`coalesce(sum(${trades.shares}), 0)::text` })
+            .from(trades)
+            .where(
+              and(
+                eq(trades.positionId, positionId),
+                eq(trades.status, 'pending'),
+                inArray(trades.type, ['sell', 'switch_out']),
+              ),
+            );
+          const available = subtract(
+            fixedFromDb(current.shares, 4),
+            fixedFromDb(reserved!.shares, 4),
+          );
+          if (quantity.value > available.value) {
+            throw new PositionError(
+              'insufficient_shares',
+              '减仓份额超过可用份额（已扣除在途减仓与调仓转出）',
+              409,
+            );
+          }
+        }
         const submittedDate = input.submittedDate ?? shanghaiDate(now);
         const beforeCutoff = input.beforeCutoff ?? shanghaiMinutesOfDay(now) < 15 * 60;
         const dates = tradeDates(
@@ -115,9 +142,10 @@ export function createTradeService(deps: {
           .insert(trades)
           .values({
             positionId,
-            type: 'buy',
+            type: input.type,
             status: 'pending',
-            amount: formatFixed(amount),
+            amount: input.type === 'buy' ? formatFixed(quantity) : null,
+            shares: input.type === 'sell' ? formatFixed(quantity) : null,
             feeRate: formatFixed(parseFixed(input.feeRate, 6)!),
             submittedDate,
             beforeCutoff,

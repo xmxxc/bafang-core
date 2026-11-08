@@ -154,6 +154,10 @@ export const positions = pgTable(
     fundCode: text('fund_code').notNull(),
     shares: numeric('shares', { precision: 24, scale: 4 }).notNull(),
     totalCost: numeric('total_cost', { precision: 24, scale: 2 }).notNull(),
+    realizedGain: numeric('realized_gain', { precision: 24, scale: 2 }).notNull().default('0'),
+    realizedGainCost: numeric('realized_gain_cost', { precision: 24, scale: 2 })
+      .notNull()
+      .default('0'),
     snapshotDate: date('snapshot_date', { mode: 'string' }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -164,7 +168,7 @@ export const positions = pgTable(
   ],
 );
 
-/** 交易类型预留减仓及成对调仓；本票仅创建加仓。 */
+/** 交易类型；成对调仓由后续服务创建。 */
 export const tradeType = pgEnum('trade_type', ['buy', 'sell', 'switch_out', 'switch_in']);
 export const tradeStatus = pgEnum('trade_status', ['pending', 'confirmed']);
 

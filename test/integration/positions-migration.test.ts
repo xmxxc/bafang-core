@@ -134,3 +134,77 @@ it('upgrades 0000–0008 with 0009 and submits a buy trade over HTTP', async () 
     await rm(prior, { recursive: true, force: true });
   }
 });
+
+it('upgrades 0000–0010 with 0011 and confirms a sell through HTTP-visible state', async () => {
+  const prior = await migrationFolderThrough(10);
+  const db = await createTestSchema(prior);
+  let now = new Date('2026-11-06T02:00:00Z');
+  try {
+    const app = createApp({
+      database: createDb(db.pool),
+      upstream: new RecordedUpstream(eastmoneySamples),
+      clock: { now: () => now },
+      wechat: { openid: async (code: string) => code },
+    });
+    const login = await app.request('/v1/auth/wechat/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: 'before-sells' }),
+    });
+    expect(login.status).toBe(200);
+    const headers = {
+      Authorization: `Bearer ${((await login.json()) as WeChatLoginResponse).token}`,
+      'Content-Type': 'application/json',
+    };
+    const channels = (await (await app.request('/v1/channels', { headers })).json()) as {
+      items: { id: string }[];
+    };
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    const created = await app.request('/v1/positions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        fundCode: '110020',
+        channelId: channels.items[0]!.id,
+        shares: '100',
+        totalCost: '150',
+      }),
+    });
+    expect(created.status).toBe(201);
+    const position = (await created.json()) as { id: string };
+    expect(position).toMatchObject({
+      realizedGain: '0.00',
+      realizedGainCost: '0.00',
+      isCleared: false,
+    });
+    const sold = await app.request(`/v1/positions/${position.id}/trades`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ type: 'sell', shares: '100', feeRate: '0.005' }),
+    });
+    expect(sold.status).toBe(201);
+    now = new Date('2026-11-09T13:30:00Z');
+    expect(await app.runSettlement()).toMatchObject({ confirmed: 1, failed: 0 });
+    // A weekend avoids requesting an estimate unrelated to this migration check.
+    now = new Date('2026-11-14T02:00:00Z');
+    expect(
+      await (await app.request(`/v1/positions/${position.id}`, { headers })).json(),
+    ).toMatchObject({
+      shares: '0.0000',
+      totalCost: '0.00',
+      realizedGain: '17.20',
+      realizedGainCost: '150.00',
+      isCleared: true,
+    });
+    expect(await (await app.request('/v1/positions', { headers })).json()).toMatchObject({
+      items: [],
+    });
+    expect(
+      await (await app.request('/v1/positions?includeCleared=true', { headers })).json(),
+    ).toMatchObject({ items: [{ id: position.id }] });
+  } finally {
+    await dropTestSchema(db);
+    await rm(prior, { recursive: true, force: true });
+  }
+});

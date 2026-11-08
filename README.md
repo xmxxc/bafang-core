@@ -114,7 +114,7 @@ docker compose up -d
 
 渠道名去除首尾空白后为 1–100 字符，同一用户下精确匹配、不能重名（包括与预置渠道重名）；冲突返回 409 `channel_name_conflict`，数据库唯一约束保证并发请求下仍成立。新用户预置“支付宝”“天天基金”“未指定”，已有用户迁移后保留原顺序。每个用户恰好一个“未指定”，改名或删除返回 409 `channel_protected`，可以调整其顺序。排序列表缺漏或重复返回 400 `validation_error`，不改变原顺序。
 
-删除时在同一事务中查询持仓：有未清仓持仓时返回 409 `channel_has_positions`。只剩已清仓持仓时应移到“未指定”后再删除，这条规则由 #19 补全；在那之前同样返回 409 `channel_has_positions`，持仓不会随渠道被删除（外键不级联）。
+删除时在同一事务中查询持仓：有份额或任意在途交易时返回 409 `channel_has_positions`。只剩已清仓持仓时，先移到该用户的“未指定”，保留持仓 ID、已实现收益和交易历史，再删除渠道。若“未指定”已有同基金持仓，则返回 409 `channel_position_conflict`，所有数据保持原样，避免唯一键冲突及合并历史时改变持仓身份。持仓外键不级联删除。
 
 ### 持仓接口
 
@@ -129,7 +129,7 @@ docker compose up -d
 | `DELETE /v1/positions/{id}`    | —                                                                        | 204，连同交易一起删除                                                                             |
 
 - 数值一律是十进制字符串（JSON 数字返回 400），计算用 bigint 定点、不经过浮点：份额、单价、净值 4 位，金额 2 位，收益率是比值、4 位。总成本与单价必须且只能填一个；用单价时总成本 = 份额 × 单价，返回的 `unitPrice` 总是总成本 ÷ 份额。降精度一律四舍五入（远离零），与 `src/market/quote.ts` 一致。输入的小数位超过精度时返回 400，不替用户舍入。
-- 新建要求份额大于 0、基金存在（按基金详情校验，不存在返回 404 `fund_not_found`，上游不可用返回 502 `upstream_unavailable`）、渠道是自己的（否则 404 `not_found`）；`snapshotDate` 缺省为当天（上海时间）。同一组合已有持仓返回 409 `position_exists`，由数据库唯一约束保证并发下只成功一个。校准可以把份额改为 0（已清仓）。
+- 新建要求份额大于 0、基金存在（按基金详情校验，不存在返回 404 `fund_not_found`，上游不可用返回 502 `upstream_unavailable`）、渠道是自己的（否则 404 `not_found`）；`snapshotDate` 缺省为当天（上海时间）。同一组合已有持仓返回 409 `position_exists`，由数据库唯一约束保证并发下只成功一个。校准可以把份额改为 0；仅当没有任何在途交易时才是已清仓，校准保留已实现收益、其成本基数与在途交易。
 - 市值 = 份额 × 最新净值（与 `GET /v1/funds/{code}/nav` 同一来源）；持有收益 = 市值 − 总成本；收益率 = 持有收益 ÷ 总成本。暂无净值或行情不可用时 `nav`、`navDate`、`marketValue`、`holdingGain`、`holdingGainRate` 为 `null`（不是 0）；总成本为 0 时收益率为 `null`。
 
 ### 今日收益与汇总
@@ -140,17 +140,17 @@ docker compose up -d
 - 当天净值未公布时，`todayGain = 份额 × 上一净值 × 估值涨跌幅`，状态为 `estimated`。复用估值模块的日期、基准核对与回退规则；所有来源不可用、缺上一净值时，收益与收益率为 `null`、状态为 `unavailable`。
 - 周末与日历休市日的今日收益为 `unavailable`，不沿用上一交易日的确认收益。交易日盘前没有当日净值时同样为 `unavailable`，与估值接口的 `holiday` / `pre_market` 约定一致；最新净值仍用于市值与持有收益。
 - 估值模块提供的百分数先转十进制文本（含指数形式），用 bigint 定点四舍五入到 **6 位百分数小数**，再以调整 scale 的方式除以 100。`份额 × 上一净值` 保留完整 **8 位小数**，最终收益只舍入一次到 2 位。`todayGainRate = 已舍入的今日收益 ÷ previousMarketValue`，舍入到 4 位比值；分母为 0 或缺失时为 `null`。
-- 已实现收益由 #20 接入卖出结算；本票 `realizedGain` 为确定值 `0.00`，累计收益 `totalGain = holdingGain + realizedGain`，持有收益缺失则累计收益也为 `null`。不新增迁移。
+- `realizedGain` 是历次减仓确认累加的已实现收益；`realizedGainCost` 是对应的累计结转成本，均为 2 位小数，从 0 开始，校准、清仓与再次加仓均保留。累计收益 `totalGain = holdingGain + realizedGain`，持有收益缺失则累计收益也为 `null`。迁移 `0011` 为旧持仓补 0。
 
 | 接口                                   | 响应                                                                                                        |
 | -------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
 | `GET /v1/positions/summary?channelId=` | `PositionSummary`，总资产、总成本、今日收益及收益率、持有收益及收益率、已实现收益、累计收益与完整性         |
 | `GET /v1/positions/by-fund?channelId=` | `{ items: [FundPositionSummary] }`，同基金跨渠道合并，并增加 `fundCode`、合计 `shares` 与重算的 `unitPrice` |
 
-两个接口均要求登录，只统计当前用户；可选 `channelId` 筛选，渠道不存在或属于别人时返回 404 `not_found`，格式不合法返回 400 `validation_error`。固定路径先于持仓详情路由注册。新接口复用 `ErrorCodeSchema` 中的 `unauthorized`、`validation_error`、`not_found`、`database_unavailable`、`internal_error`，无新增错误码。
+两个接口均要求登录，只统计当前用户，始终包含已清仓持仓的历史已实现收益；可选 `channelId` 筛选，渠道不存在或属于别人时返回 404 `not_found`，格式不合法返回 400 `validation_error`。固定路径先于持仓详情路由注册。新接口复用 `ErrorCodeSchema` 中的 `unauthorized`、`validation_error`、`not_found`、`database_unavailable`、`internal_error`，无新增错误码。
 
 - 金额合计按每笔持仓已舍入的金额相加；份额与成本也相加。收益率按合计后的分子、分母重算，不平均各持仓收益率。按基金汇总沿用基金首次建仓顺序。
-- `totalAssets` 是可取得净值的市值合计；缺净值的持仓不计入总资产、持有收益和累计收益，`valuationComplete: false`。`totalCost` 仍包含全部持仓；汇总持有收益率仅使用净值可用持仓的成本作分母。
+- `totalAssets` 是可取得净值的市值合计；缺净值的持仓不计入总资产和持有收益，已实现收益仍全部相加；累计收益为可用持有收益合计加全部已实现收益，全部净值缺失时为 `null`，`valuationComplete: false`。`totalCost` 仍包含全部持仓；汇总持有收益率仅使用净值可用持仓的成本作分母。
 - 不可用的今日收益及其上一市值均不计入今日收益与收益率汇总，`todayGainComplete: false`。`isComplete` 仅在两个完整性字段都为 true 时为 true。汇总状态仅看可计入部分：全为估算是 `estimated`，全为确认是 `confirmed`，两者并存是 `mixed`，无可用收益是 `unavailable`。
 - 有持仓但对应数据全部缺失时，该项合计为 `null`；空持仓的金额合计为 `0.00`（上一市值 `0.00000000`）、收益率为 `null`、状态为 `unavailable`，完整性为 true。
 
@@ -167,14 +167,23 @@ docker compose up -d
 - `amount` 必须大于 0，是最多 16 位整数、2 位小数的十进制字符串；`feeRate` 是 0–1 的比值字符串，最多 6 位小数（`"0.0015"` 表示 0.15%），返回固定 6 位。不接受 JSON 数字、科学计数法或超精度输入，返回 400 `validation_error`。每次 POST 都新建一笔，网络失败后重试可能重复记录。
 - `submittedDate` 缺省为注入时钟的上海日期；`beforeCutoff` 缺省按注入时钟是否早于上海 15:00 判断，15:00 整属于截止后。手动填写提交日时必须同时给出 `beforeCutoff`（支持补录）。非交易日或截止后提交，申请交易日顺延到下一个交易日；之后再按 T+N 推算确认日，全部复用注入的 A 股交易日历。
 - N 直接读取现有基金详情的 `settlement.tPlusN`：上游有值则采用；缺失时沿用基金信息的类别默认值，普通/ETF 联接 T+1、QDII T+2。理由：父 spec 明确要求基金规则及类别回退，现有基金信息接口已经提供这一入口。本票不另设一套固定规则。基金不存在返回 404 `fund_not_found`，获取规则失败返回 502 `upstream_unavailable`；日期推算结果随交易保存。
-- `Trade` 包含 `type`（`buy/sell/switch_out/switch_in`）、`status`（`pending/confirmed`）、`submittedDate`、`beforeCutoff`、`applicationDate`、`settlementDate`、`amount`（2 位）/`shares`（4 位）、`feeRate`、`confirmedNav`、`confirmedShares`、`switchId`、`source`。本票只创建 `buy`；在途时确认净值与确认份额为 `null`，来源强制为 `web`。来源使用 text，为后续访问令牌名保留空间。
-- 持仓详情、列表、新建和校准响应增加 `pendingAmount`（加仓在途金额合计，2 位，缺省 `"0.00"`）；在途不影响份额、成本或持有收益。校准不改变在途交易；删除持仓通过外键级联删除所有交易。
-- 仅在上海日期早于确认日、且状态仍为 `pending` 时可撤销，否则返回 409 `trade_not_cancellable`。确认日已到而净值未出时仍为在途，但也不可撤销。确认任务由 #19 实现；减仓、调仓由 #20/#21 实现，交易表已预留对应类型、份额与调仓关联字段。
+- `Trade` 包含 `type`（`buy/sell/switch_out/switch_in`）、`status`（`pending/confirmed`）、`submittedDate`、`beforeCutoff`、`applicationDate`、`settlementDate`、`amount`（2 位）/`shares`（4 位）、`feeRate`、`confirmedNav`、`confirmedShares`、`switchId`、`source`。支持提交 `buy` 与 `sell`；减仓在途 `amount` 为 `null`，确认后写入到账金额；在途时确认净值与确认份额为 `null`，来源强制为 `web`。来源使用 text，为后续访问令牌名保留空间。
+- 持仓详情、列表、新建和校准响应提供 `pendingAmount`（加仓在途金额合计，2 位，缺省 `"0.00"`）；在途不影响份额、成本或持有收益。校准不改变在途交易；删除持仓通过外键级联删除所有交易。
+- 仅在上海日期早于确认日、且状态仍为 `pending` 时可撤销，否则返回 409 `trade_not_cancellable`。确认日已到而净值未出时仍为在途，但也不可撤销。减仓沿用同样撤销规则。调仓由 #21 实现，交易表已预留对应类型与调仓关联字段。
+
+### 减仓与已清仓
+
+- `POST /v1/positions/{id}/trades` 支持 `{ type: "sell", shares, feeRate, submittedDate?, beforeCutoff? }`；份额最多 4 位且大于 0，卖出费率为 0–1 的比值、最多 6 位。日期、15:00 截止点、T+N 与加仓共用推算规则。
+- 可用份额 = 已确认份额 − 在途减仓/调仓转出预留份额；响应 `pendingShares`、`availableShares` 均为 4 位，后者最低为 0。加仓在途不增加可用份额。超额减仓返回 409 `insufficient_shares`；用户行锁使并发提交与确认、校准、撤销串行化。
+- `isCleared` 派生为份额为 0 且没有任何在途交易，不单独存储。`GET /v1/positions` 默认隐藏已清仓，传 `includeCleared=true` 可查看，`false` 与缺省相同；详情始终可访问。汇总与按基金汇总始终包含历史已实现收益，列表开关不影响它们。
+- 已清仓持仓提交加仓后因有在途交易而暂不算已清仓；确认后份额增加，恢复持有中，并保留此前已实现收益及其成本基数。任何持仓（含已清仓）都算有数据，不可作为空用户自动合并。
 
 ### 交易确认任务
 
 - `app.runSettlement()` 是进程内确认入口，返回 `{ confirmed, pending, failed, failures }` 摘要；任务只用申请交易日的已公布净值，净值缺失时保持在途，单笔行情或数据错误会记录在 `failures` 中并继续处理其他交易。
 - 服务入口在每个交易日上海时间 21:30 注册定时补跑；进程重启后的补跑由状态条件更新和下一次任务运行保证幂等。需要手动补跑时执行 `pnpm trades:settle`。
+- 所有到期交易按申请交易日、创建时间、交易 ID 顺序确认；同日加仓与减仓按创建顺序逐笔使用当前平均成本。某笔缺净值或失败时，同持仓后续交易留在途，其他持仓继续处理。校准保留在途交易；若校准后份额不足以确认减仓，该交易记录失败并保持在途，待修正份额后重跑。
+- 减仓到账金额 = 份额 × 申请交易日净值 ×（1 − 费率）；结转成本 = 当前总成本 × 卖出份额 ÷ 卖出前份额。乘积保留全部定点小数，仅在最终到账金额、结转成本分别舍入到 2 位；已实现收益增加到账金额减结转成本，其成本基数增加结转成本，份额与总成本相应减少。卖光时结转全部剩余成本，总成本严格归零。交易写入到账金额、确认净值及确认份额，与持仓在同一事务中更新，重复运行不重复入账。
 - 加仓份额使用 `(amount - amount × feeRate / (1 + feeRate)) ÷ applicationDateNav`，中间计算保留 18 位定点小数，最后一次舍入到 4 位份额；成本按原始金额舍入到 2 位累加。
 
 ## 测试

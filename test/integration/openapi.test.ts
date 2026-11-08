@@ -84,6 +84,8 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'login_method_not_found',
       'position_exists',
       'trade_not_cancellable',
+      'insufficient_shares',
+      'channel_position_conflict',
       'bind_code_web_required',
       'bind_code_expired',
       'bind_code_used',
@@ -141,6 +143,10 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'todayGainStatus',
       'todayGainDate',
       'previousMarketValue',
+      'realizedGainCost',
+      'pendingShares',
+      'availableShares',
+      'isCleared',
       'realizedGain',
       'totalGain',
     ]) {
@@ -168,7 +174,7 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     const item = doc.paths['/v1/positions/{id}/trades/{tradeId}'];
     const expected = [
       [list?.get, ['200', '400', '401', '404', '500', '503']],
-      [list?.post, ['201', '400', '401', '404', '500', '502', '503']],
+      [list?.post, ['201', '400', '401', '404', '409', '500', '502', '503']],
       [item?.delete, ['204', '400', '401', '404', '409', '500', '503']],
     ] as const;
     for (const [operation, statuses] of expected) {
@@ -176,7 +182,12 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       expect(operation?.security).toEqual([{ SessionCookie: [] }, { SessionBearer: [] }]);
     }
     expect(JSON.stringify(item?.delete?.responses['409'])).toContain('trade_not_cancellable');
-    for (const name of ['BuyTradeCreate', 'Trade', 'TradeList']) {
+    expect(JSON.stringify(list?.post?.responses['409'])).toContain('insufficient_shares');
+    expect(JSON.stringify(doc.paths['/v1/positions']?.get)).toContain('includeCleared');
+    expect(JSON.stringify(doc.paths['/v1/channels/{id}']?.delete?.responses['409'])).toContain(
+      'channel_position_conflict',
+    );
+    for (const name of ['BuyTradeCreate', 'SellTradeCreate', 'TradeCreate', 'Trade', 'TradeList']) {
       expect(doc.components.schemas[name]).toBeDefined();
     }
   });

@@ -58,6 +58,10 @@ export function summarizePositions(items: PositionView[], date: string): Positio
   const statuses = new Set(gains.map((item) => item.todayGainStatus));
   const valuationComplete = valued.length === items.length;
   const todayGainComplete = gains.length === items.length;
+  const realized = sum(
+    items.map((item) => item.realizedGain),
+    2,
+  );
   // 有持仓但一笔可用数据也没有时返回 null；没有持仓的金额合计是确定的 0。
   const hasValuation = valued.length > 0 || items.length === 0;
   const hasGain = gains.length > 0 || items.length === 0;
@@ -71,9 +75,10 @@ export function summarizePositions(items: PositionView[], date: string): Positio
     ),
     holdingGain: hasValuation ? formatFixed(holding) : null,
     holdingGainRate: valuedCost.value === 0n ? null : formatFixed(divide(holding, valuedCost, 4)),
-    // #20 接入卖出结算前，已实现收益为确定值 0，不是缺失。
-    realizedGain: '0.00',
-    totalGain: hasValuation ? formatFixed(holding) : null,
+    realizedGain: formatFixed(realized),
+    totalGain: hasValuation
+      ? formatFixed({ value: holding.value + realized.value, scale: 2 })
+      : null,
     todayGain: hasGain ? formatFixed(todayGain) : null,
     todayGainRate:
       previousValue.value === 0n ? null : formatFixed(divide(todayGain, previousValue, 4)),
