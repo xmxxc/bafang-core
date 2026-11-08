@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
-import type { EmailLoginResponse } from '../../src/routes/auth';
+import type { WeChatLoginResponse } from '../../src/routes/auth';
 import { eastmoneySamples, RecordedUpstream } from '../support/recorded-upstream';
 import { createTestSchema, dropTestSchema } from '../support/test-db';
 
@@ -32,32 +32,21 @@ it('upgrades a schema migrated through 0007 and then creates positions over HTTP
   const prior = await migrationFolderThrough(7);
   const db = await createTestSchema(prior);
   try {
-    let code = '';
     const app = createApp({
       database: createDb(db.pool),
       upstream: new RecordedUpstream(eastmoneySamples),
       clock: { now: () => new Date('2026-11-06T02:00:00Z') },
-      mailer: {
-        async sendVerificationCode(_email, sentCode) {
-          code = sentCode;
-        },
-      },
+      wechat: { openid: async (code: string) => `openid-${code}` },
     });
-    // 升级前已存在的用户与渠道。
-    const email = 'before-positions@example.com';
-    await app.request('/v1/auth/email/request', {
+    // 升级前已存在的用户与渠道；与 channels-migration 一致，旧 schema 上用假微信登录建立会话。
+    const login = await app.request('/v1/auth/wechat/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email }),
-    });
-    const login = await app.request('/v1/auth/email/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, code, device: 'miniprogram' }),
+      body: JSON.stringify({ code: 'before-positions' }),
     });
     expect(login.status).toBe(200);
     const headers = {
-      Authorization: `Bearer ${((await login.json()) as EmailLoginResponse).token}`,
+      Authorization: `Bearer ${((await login.json()) as WeChatLoginResponse).token}`,
       'Content-Type': 'application/json',
     };
     const channels = (await (await app.request('/v1/channels', { headers })).json()) as {

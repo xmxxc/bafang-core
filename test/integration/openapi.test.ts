@@ -78,7 +78,34 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'channel_name_conflict',
       'channel_protected',
       'channel_has_positions',
+      'login_method_conflict',
+      'login_method_type_conflict',
+      'login_method_last',
+      'login_method_not_found',
+      'position_exists',
     ]);
+  });
+
+  it('documents the position routes with their status codes', async () => {
+    const app = createApp({ db: createHealthProbe(db.pool) });
+    const doc = (await (await app.request('/v1/openapi')).json()) as OpenApiDoc;
+    const list = doc.paths['/v1/positions'];
+    const item = doc.paths['/v1/positions/{id}'];
+    const expected: [Record<string, unknown> | undefined, string[]][] = [
+      [list?.get?.responses, ['200', '400', '401', '500', '503']],
+      [list?.post?.responses, ['201', '400', '401', '404', '409', '500', '502', '503']],
+      [item?.get?.responses, ['200', '400', '401', '404', '500', '503']],
+      [item?.patch?.responses, ['200', '400', '401', '404', '500', '503']],
+      [item?.delete?.responses, ['204', '400', '401', '404', '500', '503']],
+    ];
+    for (const [responses, statuses] of expected) {
+      expect(Object.keys(responses ?? {}).sort()).toEqual([...statuses].sort());
+    }
+    expect(JSON.stringify(list?.post?.responses?.['409'])).toContain('position_exists');
+    expect(JSON.stringify(list?.post?.responses?.['404'])).toContain('fund_not_found');
+    for (const name of ['Position', 'PositionList', 'PositionCreate', 'PositionCalibrate']) {
+      expect(doc.components.schemas[name]).toBeDefined();
+    }
   });
 
   it('documents the fund search and basic info routes with their error responses', async () => {

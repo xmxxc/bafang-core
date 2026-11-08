@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
-import type { EmailLoginResponse } from '../../src/routes/auth';
+import type { WeChatLoginResponse } from '../../src/routes/auth';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
 
 async function migrationFolderThrough(maxIdx: number): Promise<string> {
@@ -29,32 +29,24 @@ async function migrationFolderThrough(maxIdx: number): Promise<string> {
   return folder;
 }
 
-async function loggedInApp(db: TestSchema) {
-  let code = '';
-  const app = createApp({
-    database: createDb(db.pool),
-    mailer: {
-      async sendVerificationCode(_email, sentCode) {
-        code = sentCode;
-      },
-    },
-  });
-  const email = `migration-${randomUUID()}@example.com`;
-  const request = await app.request('/v1/auth/email/request', {
+// 旧版 schema 上用微信登录建立会话：它只用 0003 起已有的表，不依赖后续迁移新增的验证码列。
+const fakeWeChat = { openid: async (code: string) => `openid-${code}` };
+
+async function wechatLogin(app: ReturnType<typeof createApp>) {
+  const login = await app.request('/v1/auth/wechat/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email }),
-  });
-  expect(request.status).toBe(200);
-  const login = await app.request('/v1/auth/email/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, code, device: 'miniprogram' }),
+    body: JSON.stringify({ code: randomUUID() }),
   });
   expect(login.status).toBe(200);
-  const token = ((await login.json()) as EmailLoginResponse).token;
+  const token = ((await login.json()) as WeChatLoginResponse).token;
   expect(token).toBeTruthy();
-  return { app, headers: { Authorization: `Bearer ${token}` } };
+  return { Authorization: `Bearer ${token}` };
+}
+
+async function loggedInApp(db: TestSchema) {
+  const app = createApp({ database: createDb(db.pool), wechat: fakeWeChat });
+  return { app, headers: await wechatLogin(app) };
 }
 
 it('preserves existing users preset order when upgrading from migration 0003, observed over HTTP', async () => {
@@ -74,34 +66,8 @@ it('preserves existing users preset order when upgrading from migration 0003, ob
       await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(folder, `${entry.tag}.sql`));
     }
     db = await createTestSchema(folder);
-    let code = '';
-    const app = createApp({
-      database: createDb(db.pool),
-      mailer: {
-        async sendVerificationCode(_email, sentCode) {
-          code = sentCode;
-        },
-      },
-    });
-    const email = 'existing@example.com';
-    expect(
-      (
-        await app.request('/v1/auth/email/request', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email }),
-        })
-      ).status,
-    ).toBe(200);
-    const login = await app.request('/v1/auth/email/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, code, device: 'miniprogram' }),
-    });
-    expect(login.status).toBe(200);
-    const headers = {
-      Authorization: `Bearer ${((await login.json()) as EmailLoginResponse).token}`,
-    };
+    const app = createApp({ database: createDb(db.pool), wechat: fakeWeChat });
+    const headers = await wechatLogin(app);
     const before = await (await app.request('/v1/channels', { headers })).json();
     await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
     // 重复迁移也是幂等的，不会重置渠道或顺序。

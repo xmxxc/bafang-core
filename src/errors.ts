@@ -25,17 +25,14 @@ export const ErrorCodeSchema = z.enum([
   'channel_name_conflict',
   'channel_protected',
   'channel_has_positions',
+  'login_method_conflict',
+  'login_method_type_conflict',
+  'login_method_last',
+  'login_method_not_found',
+  'position_exists',
 ]);
 
-/** 登录方式管理新增的业务码保持向后兼容；错误响应仍使用同一结构。 */
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
-export type ExtendedErrorCode =
-  | ErrorCode
-  | 'position_exists'
-  | 'login_method_conflict'
-  | 'login_method_type_conflict'
-  | 'login_method_last'
-  | 'login_method_not_found';
 
 export const ErrorResponseSchema = z
   .object({
@@ -48,6 +45,6 @@ export const ErrorResponseSchema = z
 
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
 
-export function errorBody(code: ExtendedErrorCode, message: string): ErrorResponse {
-  return { error: { code: code as ErrorCode, message } };
+export function errorBody(code: ErrorCode, message: string): ErrorResponse {
+  return { error: { code, message } };
 }

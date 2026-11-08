@@ -150,6 +150,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'login'"
+        },
         "code_hash": {
           "name": "code_hash",
           "type": "text",
@@ -248,6 +255,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "session_id": {
+          "name": "session_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp with time zone",
@@ -279,6 +292,19 @@
           "tableTo": "users",
           "columnsFrom": [
             "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "github_oauth_states_session_id_sessions_id_fk": {
+          "name": "github_oauth_states_session_id_sessions_id_fk",
+          "tableFrom": "github_oauth_states",
+          "tableTo": "sessions",
+          "columnsFrom": [
+            "session_id"
           ],
           "columnsTo": [
             "id"

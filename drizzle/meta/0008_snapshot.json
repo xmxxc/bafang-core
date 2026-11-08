@@ -1,5 +1,5 @@
 {
-  "id": "1f5cd67e-7ceb-47ce-8e22-0d002829e1bd",
+  "id": "4f93059c-5679-41da-b803-f908848d954e",
   "prevId": "ec2f04ff-bbb7-444e-815e-9b88d31541eb",
   "version": "7",
   "dialect": "postgresql",
@@ -150,6 +150,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "purpose": {
+          "name": "purpose",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'login'"
+        },
         "code_hash": {
           "name": "code_hash",
           "type": "text",
@@ -248,6 +255,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "session_id": {
+          "name": "session_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp with time zone",
@@ -279,6 +292,19 @@
           "tableTo": "users",
           "columnsFrom": [
             "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "github_oauth_states_session_id_sessions_id_fk": {
+          "name": "github_oauth_states_session_id_sessions_id_fk",
+          "tableFrom": "github_oauth_states",
+          "tableTo": "sessions",
+          "columnsFrom": [
+            "session_id"
           ],
           "columnsTo": [
             "id"

@@ -1,7 +1,7 @@
 import { and, eq, gt } from 'drizzle-orm';
 import type { Db } from '../db';
 import { channels, positions, users } from '../db/schema';
-import type { ExtendedErrorCode } from '../errors';
+import type { ErrorCode } from '../errors';
 import type { FundService } from '../market/funds';
 import type { LatestNav, NavService } from '../market/nav';
 import { shanghaiDate, type Clock } from '../clock';
@@ -27,7 +27,7 @@ const MAX_TOTAL_COST_CENTS = 10n ** 20n;
 
 export class PositionError extends Error {
   constructor(
-    readonly code: ExtendedErrorCode,
+    readonly code: ErrorCode,
     message: string,
     readonly status: 400 | 404 | 409,
   ) {

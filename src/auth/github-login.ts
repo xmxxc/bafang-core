@@ -4,7 +4,7 @@ import type { Clock } from '../clock';
 import type { Db } from '../db';
 import { githubOAuthStates } from '../db/schema';
 import type { GitHubOAuth } from './github';
-import { AuthError, type AuthService } from './service';
+import { AuthError, type AuthService, type SessionInfo } from './service';
 import { generateSessionToken, sha256Hex } from './token';
 
 export const GITHUB_STATE_TTL_MS = 10 * 60 * 1000;
@@ -18,7 +18,8 @@ export function createGitHubLoginService(deps: {
 }) {
   const { db, clock, oauth, auth } = deps;
   return {
-    async start(purpose: 'login' | 'link' = 'login', userId?: string) {
+    /** 关联意图须传入发起会话：state 绑定该会话的 id（不存令牌）。 */
+    async start(purpose: 'login' | 'link' = 'login', session?: SessionInfo) {
       const state = generateSessionToken();
       const browser = generateSessionToken();
       const verifier = generateSessionToken();
@@ -30,7 +31,8 @@ export function createGitHubLoginService(deps: {
         browserHash: sha256Hex(browser),
         verifier,
         purpose,
-        userId,
+        userId: session?.userId,
+        sessionId: session?.sessionId,
         expiresAt: new Date(now.getTime() + GITHUB_STATE_TTL_MS),
       });
       return { browser, url: oauth.authorizationUrl(state, challenge) };
@@ -41,7 +43,7 @@ export function createGitHubLoginService(deps: {
       browser: string | undefined,
       code: string | undefined,
       error: string | undefined,
-      currentUserId?: string,
+      current?: SessionInfo | null,
     ) {
       if (!state || !browser)
         throw new AuthError('github_state_invalid', 'GitHub 登录请求无效或已过期，请重新登录', 400);
@@ -59,6 +61,7 @@ export function createGitHubLoginService(deps: {
           verifier: githubOAuthStates.verifier,
           purpose: githubOAuthStates.purpose,
           userId: githubOAuthStates.userId,
+          sessionId: githubOAuthStates.sessionId,
         });
       if (!request)
         throw new AuthError('github_state_invalid', 'GitHub 登录请求无效或已过期，请重新登录', 400);
@@ -72,11 +75,17 @@ export function createGitHubLoginService(deps: {
         throw new AuthError('github_unavailable', 'GitHub 登录暂不可用，请稍后重试', 502);
       }
       if (request.purpose === 'link') {
-        if (!currentUserId || request.userId !== currentUserId) {
-          throw new AuthError('unauthorized', '关联登录方式需要当前会话仍然有效', 401);
+        // 回调必须来自发起关联的同一会话且该会话仍有效（current 已过有效性校验）。
+        if (
+          !current ||
+          !request.sessionId ||
+          request.sessionId !== current.sessionId ||
+          request.userId !== current.userId
+        ) {
+          throw new AuthError('unauthorized', '关联登录方式需要发起关联的会话仍然有效', 401);
         }
-        await auth.associateLoginMethod(currentUserId, 'github', externalId);
-        return { kind: 'link' as const, userId: currentUserId };
+        await auth.associateLoginMethod(current.userId, 'github', externalId);
+        return { kind: 'link' as const, userId: current.userId };
       }
       const result = await auth.loginWithGitHubId(externalId);
       return { kind: 'login' as const, ...result };
