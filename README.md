@@ -125,6 +125,23 @@ docker compose up -d
 - 新建要求份额大于 0、基金存在（按基金详情校验，不存在返回 404 `fund_not_found`，上游不可用返回 502 `upstream_unavailable`）、渠道是自己的（否则 404 `not_found`）；`snapshotDate` 缺省为当天（上海时间）。同一组合已有持仓返回 409 `position_exists`，由数据库唯一约束保证并发下只成功一个。校准可以把份额改为 0（已清仓）。
 - 市值 = 份额 × 最新净值（与 `GET /v1/funds/{code}/nav` 同一来源）；持有收益 = 市值 − 总成本；收益率 = 持有收益 ÷ 总成本。暂无净值或行情不可用时 `nav`、`navDate`、`marketValue`、`holdingGain`、`holdingGainRate` 为 `null`（不是 0）；总成本为 0 时收益率为 `null`。
 
+### 加仓与交易记录
+
+需要登录，持仓与交易均只能操作自己的，别人的返回 404 `not_found`。
+
+| 接口                                         | 请求体                                                            | 成功响应                                            |
+| -------------------------------------------- | ----------------------------------------------------------------- | --------------------------------------------------- |
+| `POST /v1/positions/{id}/trades`             | `{ type: "buy", amount, feeRate, submittedDate?, beforeCutoff? }` | 201 `Trade`，含申请交易日与预计确认日               |
+| `GET /v1/positions/{id}/trades`              | —                                                                 | 200 `{ items: [Trade] }`，按创建先后（同时刻按 id） |
+| `DELETE /v1/positions/{id}/trades/{tradeId}` | —                                                                 | 204，撤销即删除                                     |
+
+- `amount` 必须大于 0，是最多 16 位整数、2 位小数的十进制字符串；`feeRate` 是 0–1 的比值字符串，最多 6 位小数（`"0.0015"` 表示 0.15%），返回固定 6 位。不接受 JSON 数字、科学计数法或超精度输入，返回 400 `validation_error`。每次 POST 都新建一笔，网络失败后重试可能重复记录。
+- `submittedDate` 缺省为注入时钟的上海日期；`beforeCutoff` 缺省按注入时钟是否早于上海 15:00 判断，15:00 整属于截止后。手动填写提交日时必须同时给出 `beforeCutoff`（支持补录）。非交易日或截止后提交，申请交易日顺延到下一个交易日；之后再按 T+N 推算确认日，全部复用注入的 A 股交易日历。
+- N 直接读取现有基金详情的 `settlement.tPlusN`：上游有值则采用；缺失时沿用基金信息的类别默认值，普通/ETF 联接 T+1、QDII T+2。理由：父 spec 明确要求基金规则及类别回退，现有基金信息接口已经提供这一入口。本票不另设一套固定规则。基金不存在返回 404 `fund_not_found`，获取规则失败返回 502 `upstream_unavailable`；日期推算结果随交易保存。
+- `Trade` 包含 `type`（`buy/sell/switch_out/switch_in`）、`status`（`pending/confirmed`）、`submittedDate`、`beforeCutoff`、`applicationDate`、`settlementDate`、`amount`（2 位）/`shares`（4 位）、`feeRate`、`confirmedNav`、`confirmedShares`、`switchId`、`source`。本票只创建 `buy`；在途时确认净值与确认份额为 `null`，来源强制为 `web`。来源使用 text，为后续访问令牌名保留空间。
+- 持仓详情、列表、新建和校准响应增加 `pendingAmount`（加仓在途金额合计，2 位，缺省 `"0.00"`）；在途不影响份额、成本或持有收益。校准不改变在途交易；删除持仓通过外键级联删除所有交易。
+- 仅在上海日期早于确认日、且状态仍为 `pending` 时可撤销，否则返回 409 `trade_not_cancellable`。确认日已到而净值未出时仍为在途，但也不可撤销。确认任务由 #19 实现；减仓、调仓由 #20/#21 实现，交易表已预留对应类型、份额与调仓关联字段。
+
 ## 测试
 
 ```bash
