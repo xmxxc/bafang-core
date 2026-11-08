@@ -81,6 +81,9 @@ import {
 import { PositionError, createPositionService } from './positions/service';
 import { summarizePositions, summarizeByFund } from './positions/summary';
 
+import { createTradeService } from './positions/trades';
+import { tradeCreateRoute, tradeListRoute, tradeCancelRoute } from './routes/trades';
+
 export interface AppDeps {
   db?: HealthProbe;
   /** 身份与登录模块使用的数据库；测试连接真实 PostgreSQL 测试库时传入。 */
@@ -183,6 +186,14 @@ export function createApp(deps: AppDeps = {}): App {
         funds,
         nav,
         estimates,
+        clock: resolved.clock,
+        calendar: resolved.tradingCalendar,
+      })
+    : null;
+  const trades = resolved.database
+    ? createTradeService({
+        db: resolved.database,
+        funds,
         clock: resolved.clock,
         calendar: resolved.tradingCalendar,
       })
@@ -330,6 +341,24 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(positionDeleteRoute, async (c) => {
     if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     await positions.delete(getAuth(c).userId, c.req.valid('param').id);
+    return c.body(null, 204);
+  });
+
+  app.openapi(tradeCreateRoute, async (c) => {
+    if (!trades) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(
+      await trades.create(getAuth(c).userId, c.req.valid('param').id, c.req.valid('json')),
+      201,
+    );
+  });
+  app.openapi(tradeListRoute, async (c) => {
+    if (!trades) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json({ items: await trades.list(getAuth(c).userId, c.req.valid('param').id) }, 200);
+  });
+  app.openapi(tradeCancelRoute, async (c) => {
+    if (!trades) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { id, tradeId } = c.req.valid('param');
+    await trades.cancel(getAuth(c).userId, id, tradeId);
     return c.body(null, 204);
   });
 

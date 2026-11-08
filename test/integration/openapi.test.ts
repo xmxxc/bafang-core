@@ -83,6 +83,7 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'login_method_last',
       'login_method_not_found',
       'position_exists',
+      'trade_not_cancellable',
     ]);
   });
 
@@ -92,7 +93,7 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     const list = doc.paths['/v1/positions'];
     const item = doc.paths['/v1/positions/{id}'];
     const expected: [Record<string, unknown> | undefined, string[]][] = [
-      [list?.get?.responses, ['200', '400', '401', '500', '503']],
+      [list?.get?.responses, ['200', '400', '401', '404', '500', '503']],
       [list?.post?.responses, ['201', '400', '401', '404', '409', '500', '502', '503']],
       [item?.get?.responses, ['200', '400', '401', '404', '500', '503']],
       [item?.patch?.responses, ['200', '400', '401', '404', '500', '503']],
@@ -117,6 +118,7 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
         '200',
         '400',
         '401',
+        '404',
         '500',
         '503',
       ]);
@@ -152,6 +154,26 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'todayGainComplete',
     ]) {
       expect(summary.properties[field]).toBeDefined();
+    }
+  });
+
+  it('documents trade operations, status codes, session requirements and schemas', async () => {
+    const app = createApp({ db: createHealthProbe(db.pool) });
+    const doc = (await (await app.request('/v1/openapi')).json()) as OpenApiDoc;
+    const list = doc.paths['/v1/positions/{id}/trades'];
+    const item = doc.paths['/v1/positions/{id}/trades/{tradeId}'];
+    const expected = [
+      [list?.get, ['200', '400', '401', '404', '500', '503']],
+      [list?.post, ['201', '400', '401', '404', '500', '502', '503']],
+      [item?.delete, ['204', '400', '401', '404', '409', '500', '503']],
+    ] as const;
+    for (const [operation, statuses] of expected) {
+      expect(Object.keys(operation?.responses ?? {}).sort()).toEqual([...statuses].sort());
+      expect(operation?.security).toEqual([{ SessionCookie: [] }, { SessionBearer: [] }]);
+    }
+    expect(JSON.stringify(item?.delete?.responses['409'])).toContain('trade_not_cancellable');
+    for (const name of ['BuyTradeCreate', 'Trade', 'TradeList']) {
+      expect(doc.components.schemas[name]).toBeDefined();
     }
   });
 

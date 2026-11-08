@@ -1,6 +1,6 @@
-import { and, eq, gt } from 'drizzle-orm';
+import { and, eq, gt, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../db';
-import { channels, positions, users } from '../db/schema';
+import { channels, positions, trades, users } from '../db/schema';
 import type { ErrorCode } from '../errors';
 import type { FundService } from '../market/funds';
 import type { LatestNav, NavService } from '../market/nav';
@@ -58,6 +58,7 @@ export interface PositionValuation {
   channelId: string;
   shares: string;
   totalCost: string;
+  pendingAmount: string;
   unitPrice: string | null;
   snapshotDate: string;
   nav: string | null;
@@ -150,7 +151,11 @@ export function readCost(input: CostInput): { shares: Fixed; totalCost: Fixed } 
 }
 
 /** 由持仓行和最新净值算出对外视图；没有净值时市值与收益为 null。 */
-export function positionView(row: PositionRow, latest: LatestNav | null): PositionValuation {
+export function positionView(
+  row: PositionRow,
+  latest: LatestNav | null,
+  pendingAmount = '0.00',
+): PositionValuation {
   const shares = fixedFromDb(row.shares, SHARES_SCALE);
   const totalCost = fixedFromDb(row.totalCost, AMOUNT_SCALE);
   const base = {
@@ -158,6 +163,7 @@ export function positionView(row: PositionRow, latest: LatestNav | null): Positi
     fundCode: row.fundCode,
     channelId: row.channelId,
     shares: formatFixed(shares),
+    pendingAmount,
     totalCost: formatFixed(totalCost),
     unitPrice: shares.value === 0n ? null : formatFixed(divide(totalCost, shares, PRICE_SCALE)),
     snapshotDate: row.snapshotDate,
@@ -220,8 +226,48 @@ export function createPositionService(deps: {
     }
   }
 
+  // 一次聚合所有待展示持仓，避免列表为每个持仓单独查询在途交易。
+  async function views(rows: PositionRow[]): Promise<PositionView[]> {
+    if (rows.length === 0) return [];
+    const totals = await deps.db
+      .select({
+        positionId: trades.positionId,
+        amount: sql<string>`sum(${trades.amount})::text`,
+      })
+      .from(trades)
+      .where(
+        and(
+          inArray(
+            trades.positionId,
+            rows.map((row) => row.id),
+          ),
+          eq(trades.status, 'pending'),
+          eq(trades.type, 'buy'),
+        ),
+      )
+      .groupBy(trades.positionId);
+    const amounts = new Map(
+      totals.map((total) => [
+        total.positionId,
+        formatFixed(fixedFromDb(total.amount, AMOUNT_SCALE)),
+      ]),
+    );
+    const navs = new Map(
+      await Promise.all(
+        [...new Set(rows.map((row) => row.fundCode))].map(
+          async (code) => [code, await latestNav(code)] as const,
+        ),
+      ),
+    );
+    return withGains(
+      rows.map((row) =>
+        positionView(row, navs.get(row.fundCode) ?? null, amounts.get(row.id) ?? '0.00'),
+      ),
+    );
+  }
+
   async function view(row: PositionRow): Promise<PositionView> {
-    return (await withGains([positionView(row, await latestNav(row.fundCode))]))[0]!;
+    return (await views([row]))[0]!;
   }
 
   /** 与渠道、登录方式一致：写操作先锁住用户行，串行化同一用户的并发修改。 */
@@ -234,6 +280,15 @@ export function createPositionService(deps: {
 
   return {
     async list(userId, channelId) {
+      if (channelId) {
+        // 与渠道接口一致：不存在或别人的渠道都返回 404，而不是空列表。
+        const [channel] = await deps.db
+          .select({ id: channels.id })
+          .from(channels)
+          .where(and(eq(channels.id, channelId), eq(channels.userId, userId)))
+          .limit(1);
+        if (!channel) throw new PositionError('not_found', '渠道不存在', 404);
+      }
       const rows = await deps.db
         .select()
         .from(positions)
@@ -243,14 +298,7 @@ export function createPositionService(deps: {
             : eq(positions.userId, userId),
         )
         .orderBy(positions.createdAt, positions.id);
-      const navs = new Map(
-        await Promise.all(
-          [...new Set(rows.map((row) => row.fundCode))].map(
-            async (code) => [code, await latestNav(code)] as const,
-          ),
-        ),
-      );
-      return withGains(rows.map((row) => positionView(row, navs.get(row.fundCode) ?? null)));
+      return views(rows);
     },
 
     async get(userId, id) {

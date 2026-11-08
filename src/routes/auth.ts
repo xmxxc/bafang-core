@@ -283,7 +283,7 @@ export const githubCallbackRoute = createRoute({
     },
     409: {
       description:
-        'login_method_conflict：该 GitHub 账号已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他 GitHub 账号',
+        'login_method_conflict：该 GitHub 登录方式已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他 GitHub 登录方式',
       content: errorContent,
     },
   },
@@ -329,7 +329,7 @@ export const emailLinkRequestRoute = createRoute({
     401: { description: 'unauthorized：未登录或会话已失效', content: errorContent },
     429: {
       description:
-        'email_code_cooldown：同一邮箱关联验证码冷却中；email_code_daily_limit：今日关联验证码次数已达上限；rate_limited：同一 IP 请求过于频繁',
+        'email_code_cooldown：同一邮箱 60 秒内已请求过验证码（与登录验证码共享冷却）；email_code_daily_limit：同一邮箱今日验证码次数已达上限（登录与关联合计）；rate_limited：同一 IP 请求过于频繁',
       content: errorContent,
     },
     500: { description: '内部错误', content: errorContent },

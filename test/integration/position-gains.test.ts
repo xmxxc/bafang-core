@@ -264,9 +264,20 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       expect((await createApp().request(path)).status).toBe(503);
     }
     const headers = await login();
-    const [first, second] = await channels(headers);
+    const [first, second, emptyChannel] = await channels(headers);
     await create(headers, first!.id);
     await create(headers, second!.id, '110020', '500', '1000');
+    expect(await summary(headers, `?channelId=${emptyChannel!.id}`)).toMatchObject({
+      totalAssets: '0.00',
+      todayGain: '0.00',
+      todayGainRate: null,
+      isComplete: true,
+    });
+    const emptyFunds = await app.request(`/v1/positions/by-fund?channelId=${emptyChannel!.id}`, {
+      headers,
+    });
+    expect(emptyFunds.status).toBe(200);
+    expect(await emptyFunds.json()).toEqual({ items: [] });
     const other = await login();
     const [otherChannel] = await channels(other);
     await create(other, otherChannel!.id, '110020', '9000', '1');
@@ -274,21 +285,15 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       totalAssets: '1703.00',
       todayGain: '-24.52',
     });
-    expect(await summary(headers, `?channelId=${otherChannel!.id}`)).toMatchObject({
-      totalAssets: '0.00',
-      todayGain: '0.00',
-      todayGainRate: null,
-      isComplete: true,
-    });
     expect(
       await (await app.request(`/v1/positions/by-fund?channelId=${first!.id}`, { headers })).json(),
     ).toMatchObject({ items: [{ shares: '1000.0000', totalCost: '1500.00' }] });
-    expect(
-      await (
-        await app.request(`/v1/positions/by-fund?channelId=${otherChannel!.id}`, { headers })
-      ).json(),
-    ).toEqual({ items: [] });
     for (const path of ['/v1/positions/summary', '/v1/positions/by-fund']) {
+      for (const channelId of [otherChannel!.id, randomUUID()]) {
+        const missing = await app.request(`${path}?channelId=${channelId}`, { headers });
+        expect(missing.status).toBe(404);
+        expect(await missing.json()).toMatchObject({ error: { code: 'not_found' } });
+      }
       const response = await app.request(`${path}?channelId=invalid`, { headers });
       expect(response.status).toBe(400);
       expect(await response.json()).toMatchObject({ error: { code: 'validation_error' } });
@@ -505,4 +510,78 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       todayGainStatus: 'estimated',
     });
   });
+
+  it.each([false, true])(
+    'keeps pending buys separate from shares and gains with published NAV=%s',
+    async (isPublished) => {
+      published = isPublished;
+      if (published) now = new Date('2026-11-06T11:05:00Z');
+      const headers = await login();
+      const [first, second] = await channels(headers);
+      const position = await create(headers, first!.id);
+      await create(headers, second!.id, '110020', '500', '1000');
+      const gain = published ? '-22.60' : '-24.52';
+      const aggregateGain = published ? '-33.90' : '-36.78';
+      const gainStatus = published ? 'confirmed' : 'estimated';
+      const before = await summary(headers);
+      expect(position).toMatchObject({
+        pendingAmount: '0.00',
+        todayGain: gain,
+        todayGainStatus: gainStatus,
+      });
+      let firstTradeId = '';
+      for (const amount of ['100.01', '0.02']) {
+        const response = await send(headers, 'POST', `/v1/positions/${position.id}/trades`, {
+          type: 'buy',
+          amount,
+          feeRate: '0.0015',
+        });
+        expect(response.status).toBe(201);
+        const trade = (await response.json()) as { id: string; status: string };
+        expect(trade.status).toBe('pending');
+        if (amount === '100.01') firstTradeId = trade.id;
+      }
+      const detail = await app.request(`/v1/positions/${position.id}`, { headers });
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toMatchObject({
+        shares: '1000.0000',
+        totalCost: '1500.00',
+        pendingAmount: '100.03',
+        todayGain: gain,
+        todayGainStatus: gainStatus,
+      });
+      const list = await app.request('/v1/positions', { headers });
+      expect(await list.json()).toMatchObject({
+        items: [
+          { id: position.id, shares: '1000.0000', pendingAmount: '100.03', todayGain: gain },
+          { shares: '500.0000', pendingAmount: '0.00' },
+        ],
+      });
+      expect(await summary(headers)).toEqual(before);
+      const funds = await app.request('/v1/positions/by-fund', { headers });
+      expect(funds.status).toBe(200);
+      expect(await funds.json()).toMatchObject({
+        items: [
+          {
+            fundCode: '110020',
+            shares: '1500.0000',
+            totalCost: '2500.00',
+            todayGain: aggregateGain,
+            todayGainStatus: gainStatus,
+          },
+        ],
+      });
+      const history = await app.request(`/v1/positions/${position.id}/trades`, { headers });
+      expect(history.status).toBe(200);
+      expect(((await history.json()) as { items: unknown[] }).items).toHaveLength(2);
+      expect(
+        (await send(headers, 'DELETE', `/v1/positions/${position.id}/trades/${firstTradeId}`))
+          .status,
+      ).toBe(204);
+      expect(
+        await (await app.request(`/v1/positions/${position.id}`, { headers })).json(),
+      ).toMatchObject({ shares: '1000.0000', pendingAmount: '0.02', todayGain: gain });
+      expect(await summary(headers)).toEqual(before);
+    },
+  );
 });

@@ -84,6 +84,9 @@ export const PositionSchema = z
     fundCode: z.string(),
     channelId: z.uuid(),
     shares: z.string().openapi({ example: '1000.0000', description: '份额，4 位小数' }),
+    pendingAmount: z
+      .string()
+      .openapi({ example: '100.01', description: '加仓在途金额合计，2 位小数；不计入份额或成本' }),
     totalCost: z.string().openapi({ example: '1234.56', description: '总成本，2 位小数' }),
     unitPrice: z.string().nullable().openapi({
       description: '成本单价 = 总成本 ÷ 份额，四舍五入到 4 位；份额为 0 时为 null',
@@ -123,7 +126,7 @@ export const positionListRoute = createRoute({
   tags: ['positions'],
   summary: '查看自己的持仓',
   description:
-    '需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓（别人的渠道返回空列表）。',
+    '需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓；渠道不存在或属于别人时返回 404 `not_found`。',
   request: {
     query: z.object({
       channelId: z.uuid().toLowerCase().optional().openapi({ description: '按渠道筛选' }),
@@ -135,6 +138,7 @@ export const positionListRoute = createRoute({
       content: { 'application/json': { schema: PositionListSchema } },
     },
     400: { description: '参数不合法', content: errorContent },
+    404: { description: 'not_found：渠道不存在（包含别人的渠道）', content: errorContent },
     ...commonErrors,
   },
 });
@@ -203,7 +207,7 @@ export const positionDeleteRoute = createRoute({
   path: '/v1/positions/{id}',
   tags: ['positions'],
   summary: '彻底删除一笔持仓',
-  description: '需要登录，删除持仓连同它的交易（交易由 #17 起以外键级联删除）。',
+  description: '需要登录，删除持仓连同它的交易（交易以外键级联删除）。',
   request: { params: PositionParam },
   responses: {
     204: { description: '已删除' },
@@ -254,7 +258,7 @@ const summaryQuery = z.object({
     .uuid()
     .toLowerCase()
     .optional()
-    .openapi({ description: '仅统计自己的此渠道；别人的渠道返回空结果' }),
+    .openapi({ description: '仅统计自己的此渠道；渠道不存在或属于别人时返回 404 not_found' }),
 });
 
 export const positionSummaryRoute = createRoute({
@@ -269,6 +273,7 @@ export const positionSummaryRoute = createRoute({
   responses: {
     200: { description: '持仓汇总', content: { 'application/json': { schema: SummarySchema } } },
     400: { description: '参数不合法', content: errorContent },
+    404: { description: 'not_found：渠道不存在（包含别人的渠道）', content: errorContent },
     ...commonErrors,
   },
 });
@@ -293,6 +298,7 @@ export const positionByFundRoute = createRoute({
       },
     },
     400: { description: '参数不合法', content: errorContent },
+    404: { description: 'not_found：渠道不存在（包含别人的渠道）', content: errorContent },
     ...commonErrors,
   },
 });
