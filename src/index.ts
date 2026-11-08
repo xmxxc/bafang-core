@@ -15,6 +15,7 @@ const app = createApp({
   mailer: createMailer(config),
   github: createGitHubLogin(config),
   wechat: createWeChatLogin(config),
+  bindCodeSecret: config.BIND_CODE_SECRET,
   tradingCalendar: await loadTradingCalendar(pool),
   hkTradingCalendar: await loadHongKongTradingCalendar(pool),
 });

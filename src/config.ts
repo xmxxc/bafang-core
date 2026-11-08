@@ -24,6 +24,8 @@ const EnvSchema = z.object({
   GITHUB_LOGIN_REDIRECT_URL: z.string().optional(),
   WECHAT_APP_ID: z.string().optional(),
   WECHAT_APP_SECRET: z.string().optional(),
+  /** 用于绑定码 HMAC；未配置时由应用提供开发环境默认值。 */
+  BIND_CODE_SECRET: z.string().optional(),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

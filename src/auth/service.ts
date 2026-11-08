@@ -2,11 +2,18 @@ import { timingSafeEqual } from 'node:crypto';
 import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
 import { shanghaiDate, type Clock } from '../clock';
 import type { Db } from '../db';
-import { channels, emailVerificationCodes, loginMethods, sessions, users } from '../db/schema';
+import {
+  bindCodes,
+  channels,
+  emailVerificationCodes,
+  loginMethods,
+  sessions,
+  users,
+} from '../db/schema';
 import { userHasPositions as queryUserHasPositions } from '../positions/service';
 import type { ErrorCode } from '../errors';
 import type { Mailer } from './mailer';
-import { generateSessionToken, generateVerificationCode, sha256Hex } from './token';
+import { generateSessionToken, generateVerificationCode, hmacSha256Hex, sha256Hex } from './token';
 
 /** 会话所属的设备类型：网页（httpOnly Cookie）或小程序（请求头）。 */
 export type Device = 'web' | 'miniprogram';
@@ -20,7 +27,7 @@ export class AuthError extends Error {
   constructor(
     readonly code: ErrorCode,
     message: string,
-    readonly status: 400 | 401 | 404 | 409 | 429 | 502,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 429 | 502,
   ) {
     super(message);
     this.name = 'AuthError';
@@ -37,6 +44,8 @@ export const EMAIL_CODE_DAILY_LIMIT = 10;
 export const EMAIL_CODE_MAX_ATTEMPTS = 5;
 /** 会话有效期。 */
 export const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** 绑定码有效期。 */
+export const BIND_CODE_TTL_MS = 10 * 60 * 1000;
 
 /** 新用户首次登录时预置的渠道。 */
 export const PRESET_CHANNELS = ['支付宝', '天天基金', '未指定'] as const;
@@ -69,6 +78,11 @@ export interface AuthService {
   unlinkLoginMethod(userId: string, type: LoginMethodType): Promise<void>;
   listLoginMethods(userId: string): Promise<{ type: LoginMethodType; display: string }[]>;
   logout(sessionId: string): Promise<void>;
+  generateBindCode(userId: string): Promise<{ code: string; expiresAt: Date }>;
+  bindWeChatCode(
+    code: string,
+    openid: string,
+  ): Promise<{ userId: string; token: string; device: 'miniprogram'; expiresAt: Date }>;
   authenticate(token: string): Promise<SessionInfo | null>;
   me(userId: string): Promise<{
     id: string;
@@ -103,11 +117,13 @@ export function createAuthService(deps: {
   mailer: Mailer;
   clock: Clock;
   hasPositions?: UserPositionsChecker;
+  bindCodeSecret?: string;
 }): AuthService {
   const { db, mailer, clock } = deps;
   const hasPositions = deps.hasPositions ?? userHasPositions;
+  const bindCodeSecret = deps.bindCodeSecret ?? 'bafang-core-development-bind-code-key';
 
-  async function lockIdentity(tx: Transaction, type: LoginMethodType, externalId: string) {
+  async function lockIdentity(tx: Transaction, type: string, externalId: string) {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${type + ':' + externalId}))`);
   }
 
@@ -398,6 +414,67 @@ export function createAuthService(deps: {
       });
       if ('error' in result) throw result.error;
       return result.value;
+    },
+
+    async generateBindCode(userId) {
+      const code = generateVerificationCode();
+      const now = clock.now();
+      const expiresAt = new Date(now.getTime() + BIND_CODE_TTL_MS);
+      const codeHash = hmacSha256Hex(code, bindCodeSecret);
+      await db.transaction(async (tx) => {
+        // 同一用户并发生成时只保留最后一个绑定码。
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${'bind-code-user:' + userId}))`,
+        );
+        await tx
+          .update(bindCodes)
+          .set({ usedAt: now })
+          .where(and(eq(bindCodes.userId, userId), isNull(bindCodes.usedAt)));
+        await tx.insert(bindCodes).values({ userId, codeHash, expiresAt, createdAt: now });
+      });
+      return { code, expiresAt };
+    },
+
+    async bindWeChatCode(code, openid) {
+      const token = generateSessionToken();
+      const now = clock.now();
+      const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
+      const codeHash = hmacSha256Hex(code, bindCodeSecret);
+      const result = await db.transaction(async (tx) => {
+        // 码锁保证同一个绑定码在并发提交下只会有一个消费者。
+        await lockIdentity(tx, 'bind_code', codeHash);
+        const [bindCode] = await tx
+          .select({
+            id: bindCodes.id,
+            userId: bindCodes.userId,
+            expiresAt: bindCodes.expiresAt,
+            usedAt: bindCodes.usedAt,
+          })
+          .from(bindCodes)
+          .where(eq(bindCodes.codeHash, codeHash))
+          .limit(1);
+        if (!bindCode) throw new AuthError('bind_code_invalid', '绑定码不存在', 400);
+        if (bindCode.usedAt) throw new AuthError('bind_code_used', '绑定码已使用', 400);
+        if (bindCode.expiresAt <= now)
+          throw new AuthError('bind_code_expired', '绑定码已过期', 400);
+
+        // 复用登录方式关联的身份锁、用户锁、空用户转移与冲突规则。
+        const linked = await associateInTransaction(tx, bindCode.userId, 'wechat', openid);
+        const [consumed] = await tx
+          .update(bindCodes)
+          .set({ usedAt: now })
+          .where(and(eq(bindCodes.id, bindCode.id), isNull(bindCodes.usedAt)))
+          .returning({ id: bindCodes.id });
+        if (!consumed) throw new AuthError('bind_code_used', '绑定码已使用', 400);
+        await tx.insert(sessions).values({
+          userId: linked.userId,
+          tokenHash: sha256Hex(token),
+          device: 'miniprogram',
+          expiresAt,
+        });
+        return { userId: linked.userId };
+      });
+      return { userId: result.userId, token, device: 'miniprogram' as const, expiresAt };
     },
 
     async unlinkLoginMethod(userId, type) {

@@ -79,6 +79,25 @@ export const sessions = pgTable('sessions', {
   revokedAt: timestamp('revoked_at', { withTimezone: true }),
 });
 
+/** 网页端生成、在小程序端消费的一次性绑定码；数据库只存带服务端密钥的哈希。 */
+export const bindCodes = pgTable(
+  'bind_codes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    codeHash: text('code_hash').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('bind_codes_code_hash_uidx').on(t.codeHash),
+    index('bind_codes_user_created_idx').on(t.userId, t.createdAt),
+  ],
+);
+
 /**
  * 邮箱验证码：6 位，10 分钟过期，最多输错 5 次，使用一次后失效。
  * `code_hash` 存的是无盐 sha256：对 6 位数字码来说，泄露库仍可枚举反查（10⁶ 种），

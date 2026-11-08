@@ -24,6 +24,12 @@ export const GITHUB_LOGIN_RATE_LIMIT: RateLimitPolicy = { limit: 10, windowMs: 6
 /** 微信小程序登录按客户端 IP 每分钟最多 10 次。 */
 export const WECHAT_LOGIN_RATE_LIMIT: RateLimitPolicy = { limit: 10, windowMs: 60_000 };
 
+/** 绑定码生成按 IP 限制，避免反复作废当前绑定码。 */
+export const BIND_CODE_GENERATE_RATE_LIMIT: RateLimitPolicy = { limit: 5, windowMs: 60_000 };
+
+/** 绑定码提交按 IP 限制；成功与失败都计数，连续失败最多每分钟 5 次。 */
+export const BIND_CODE_SUBMIT_RATE_LIMIT: RateLimitPolicy = { limit: 5, windowMs: 60_000 };
+
 interface Bucket {
   windowStart: number;
   count: number;

@@ -18,6 +18,11 @@ const VerificationCodeSchema = z
   .regex(/^\d{6}$/, '验证码为 6 位数字')
   .openapi({ example: '123456', description: '6 位数字验证码' });
 
+const BindCodeSchema = z
+  .string()
+  .regex(/^\d{6}$/, '绑定码为 6 位数字')
+  .openapi({ example: '123456', description: '6 位数字绑定码' });
+
 const UserSummarySchema = z
   .object({
     id: z.string().openapi({ example: '0199c4d0-...', description: '用户 id' }),
@@ -89,6 +94,83 @@ export type EmailLoginResponse = z.infer<typeof EmailLoginResponseSchema>;
 export type MeResponse = z.infer<typeof MeResponseSchema>;
 
 const errorContent = { 'application/json': { schema: ErrorResponseSchema } };
+
+const BindCodeResultSchema = z
+  .object({
+    code: BindCodeSchema,
+    expiresAt: z.string().openapi({ format: 'date-time', description: '绑定码过期时间' }),
+  })
+  .openapi('BindCodeResult');
+
+export const bindCodeGenerateRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/bind-code',
+  tags: ['auth'],
+  summary: '生成绑定码',
+  description:
+    '仅已登录的网页会话可生成 6 位数字绑定码。绑定码有效 10 分钟，同一用户再次生成时作废旧码；服务端只存带密钥 HMAC，不保存可直接使用的明文。',
+  security: [{ SessionCookie: [] }, { SessionBearer: [] }],
+  responses: {
+    201: {
+      description: '绑定码已生成',
+      content: { 'application/json': { schema: BindCodeResultSchema } },
+    },
+    400: { description: '参数不合法', content: errorContent },
+    401: { description: 'unauthorized：未登录或会话已失效', content: errorContent },
+    403: { description: 'bind_code_web_required：需要网页会话', content: errorContent },
+    429: { description: 'rate_limited：请求过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    503: { description: 'database_unavailable：数据库不可用', content: errorContent },
+  },
+});
+
+const WeChatBindBodySchema = z
+  .object({
+    code: z.string().min(1).max(512).regex(/^\S+$/).optional(),
+    wechatCode: z.string().min(1).max(512).regex(/^\S+$/).optional(),
+    bindCode: BindCodeSchema,
+  })
+  .refine((value) => Boolean(value.code) !== Boolean(value.wechatCode), {
+    message: '微信登录凭据必须填写 code 或 wechatCode 其中一个',
+  });
+
+export const wechatBindCodeRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/wechat/bind',
+  tags: ['auth'],
+  summary: '用微信登录凭据消费绑定码',
+  description:
+    '提交 wx.login 凭据与绑定码。微信 code2session、绑定码消费、登录方式关联和小程序会话创建在同一数据库事务边界内完成；成功返回与微信登录一致的小程序会话。IP 每分钟最多 5 次，成功与失败均计数。',
+  request: {
+    body: {
+      required: true,
+      content: { 'application/json': { schema: WeChatBindBodySchema } },
+    },
+  },
+  responses: {
+    200: {
+      description: '绑定成功，返回小程序会话',
+      content: { 'application/json': { schema: WeChatLoginResponseSchema } },
+    },
+    400: {
+      description:
+        'validation_error：参数不合法；wechat_code_invalid：微信凭据无效；bind_code_invalid：绑定码不存在；bind_code_expired：绑定码过期；bind_code_used：绑定码已使用',
+      content: errorContent,
+    },
+    409: {
+      description:
+        'login_method_conflict：微信已属于有持仓用户；login_method_type_conflict：绑定码所属用户已有其他微信登录方式',
+      content: errorContent,
+    },
+    429: { description: 'rate_limited：提交过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    502: { description: 'wechat_unavailable：微信暂不可用', content: errorContent },
+    503: {
+      description: 'wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用',
+      content: errorContent,
+    },
+  },
+});
 
 export const wechatLoginRoute = createRoute({
   method: 'post',

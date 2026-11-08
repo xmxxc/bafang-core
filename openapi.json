@@ -88,7 +88,11 @@
                   "login_method_last",
                   "login_method_not_found",
                   "position_exists",
-                  "trade_not_cancellable"
+                  "trade_not_cancellable",
+                  "bind_code_web_required",
+                  "bind_code_expired",
+                  "bind_code_used",
+                  "bind_code_invalid"
                 ],
                 "description": "机器可读的错误码"
               },
@@ -1204,6 +1208,26 @@
           "user",
           "session",
           "token"
+        ]
+      },
+      "BindCodeResult": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^\\d{6}$",
+            "example": "123456",
+            "description": "6 位数字绑定码"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "绑定码过期时间"
+          }
+        },
+        "required": [
+          "code",
+          "expiresAt"
         ]
       },
       "Me": {
@@ -3690,6 +3714,209 @@
           },
           "502": {
             "description": "wechat_unavailable：微信暂不可用或返回格式异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/bind-code": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "生成绑定码",
+        "description": "仅已登录的网页会话可生成 6 位数字绑定码。绑定码有效 10 分钟，同一用户再次生成时作废旧码；服务端只存带密钥 HMAC，不保存可直接使用的明文。",
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "绑定码已生成",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BindCodeResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "bind_code_web_required：需要网页会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "database_unavailable：数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/wechat/bind": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "用微信登录凭据消费绑定码",
+        "description": "提交 wx.login 凭据与绑定码。微信 code2session、绑定码消费、登录方式关联和小程序会话创建在同一数据库事务边界内完成；成功返回与微信登录一致的小程序会话。IP 每分钟最多 5 次，成功与失败均计数。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "pattern": "^\\S+$"
+                  },
+                  "wechatCode": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "pattern": "^\\S+$"
+                  },
+                  "bindCode": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "example": "123456",
+                    "description": "6 位数字绑定码"
+                  }
+                },
+                "required": [
+                  "bindCode"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "绑定成功，返回小程序会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WeChatLoginResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法；wechat_code_invalid：微信凭据无效；bind_code_invalid：绑定码不存在；bind_code_expired：绑定码过期；bind_code_used：绑定码已使用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "login_method_conflict：微信已属于有持仓用户；login_method_type_conflict：绑定码所属用户已有其他微信登录方式",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：提交过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "wechat_unavailable：微信暂不可用",
             "content": {
               "application/json": {
                 "schema": {
