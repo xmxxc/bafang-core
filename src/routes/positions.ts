@@ -48,8 +48,38 @@ const CalibrateBody = z
   .refine(onlyOneCost, { message: ONE_COST_MESSAGE })
   .openapi('PositionCalibrate');
 
+const gainFields = {
+  todayGain: z.string().nullable().openapi({
+    description:
+      '今日收益（元），2 位小数；不可用为 null。估算 = 份额 × 上一净值 × 估值涨跌幅，确认 = 份额 ×（当日净值 − 上一净值）',
+  }),
+  todayGainRate: z
+    .string()
+    .nullable()
+    .openapi({ description: '今日收益 ÷ 上一市值，比值、4 位小数；分母为 0 或缺失为 null' }),
+  todayGainDate: z
+    .string()
+    .openapi({ description: '今日收益所属日期，按注入时钟的 Asia/Shanghai 日期 YYYY-MM-DD' }),
+  previousMarketValue: z.string().nullable().openapi({
+    description:
+      '份额 × 今日之前最近一期已公布净值，8 位小数；汇总仅计入今日收益可用的持仓；缺失为 null',
+  }),
+  realizedGain: z
+    .string()
+    .openapi({ description: '已实现收益，2 位小数；#20 接入卖出结算前确定为 0.00' }),
+  totalGain: z
+    .string()
+    .nullable()
+    .openapi({ description: '累计收益 = 持有收益 + 已实现收益，2 位小数；缺失为 null' }),
+};
+const gainStatus = z.enum(['estimated', 'confirmed', 'unavailable']);
+
 export const PositionSchema = z
   .object({
+    ...gainFields,
+    todayGainStatus: gainStatus.openapi({
+      description: '估算 / 确认 / 不可用；休市与盘前不沿用上一交易日收益',
+    }),
     id: z.uuid(),
     fundCode: z.string(),
     channelId: z.uuid(),
@@ -183,6 +213,92 @@ export const positionDeleteRoute = createRoute({
     204: { description: '已删除' },
     400: { description: '参数不合法', content: errorContent },
     404: notOwned,
+    ...commonErrors,
+  },
+});
+
+const SummarySchema = z
+  .object({
+    ...gainFields,
+    totalAssets: z.string().nullable().openapi({
+      description: '可取得净值的持仓市值合计，2 位小数；有持仓但全部缺失为 null，空持仓为 0.00',
+    }),
+    totalCost: z.string().openapi({ description: '全部持仓总成本合计，2 位小数' }),
+    holdingGain: z
+      .string()
+      .nullable()
+      .openapi({ description: '可取得净值的持仓持有收益合计，2 位小数；全部缺失为 null' }),
+    holdingGainRate: z.string().nullable().openapi({
+      description: '持有收益合计 ÷ 可取得净值的持仓成本合计，比值、4 位小数；分母为 0 为 null',
+    }),
+    todayGainStatus: z.enum(['estimated', 'confirmed', 'mixed', 'unavailable']).openapi({
+      description: '仅看可计入的持仓：估算 / 确认 / 两者混合 / 无可用收益（含空持仓）',
+    }),
+    valuationComplete: z.boolean().openapi({
+      description: '所有持仓市值、持有收益、累计收益均可用；缺净值的持仓不计入这些合计',
+    }),
+    todayGainComplete: z.boolean().openapi({
+      description: '所有持仓今日收益均可用；不可用的持仓及其分母不计入今日收益及收益率',
+    }),
+    isComplete: z
+      .boolean()
+      .openapi({ description: 'valuationComplete 与 todayGainComplete 均为 true；空持仓为 true' }),
+  })
+  .openapi('PositionSummary');
+const FundSummarySchema = SummarySchema.extend({
+  fundCode: z.string(),
+  shares: z.string().openapi({ description: '同基金跨渠道份额合计，4 位小数' }),
+  unitPrice: z
+    .string()
+    .nullable()
+    .openapi({ description: '合计总成本 ÷ 合计份额，4 位小数；份额为 0 为 null' }),
+}).openapi('FundPositionSummary');
+const summaryQuery = z.object({
+  channelId: z
+    .uuid()
+    .toLowerCase()
+    .optional()
+    .openapi({ description: '仅统计自己的此渠道；渠道不存在或属于别人时返回 404 not_found' }),
+});
+
+export const positionSummaryRoute = createRoute({
+  security,
+  method: 'get',
+  path: '/v1/positions/summary',
+  tags: ['positions'],
+  summary: '查看自己的持仓汇总',
+  description:
+    '金额按持仓舍入后的值相加；不可用的数据及其收益率分母不计入对应合计，并通过完整性字段标明。空持仓的金额合计为 0，收益率为 null。',
+  request: { query: summaryQuery },
+  responses: {
+    200: { description: '持仓汇总', content: { 'application/json': { schema: SummarySchema } } },
+    400: { description: '参数不合法', content: errorContent },
+    404: { description: 'not_found：渠道不存在（包含别人的渠道）', content: errorContent },
+    ...commonErrors,
+  },
+});
+export const positionByFundRoute = createRoute({
+  security,
+  method: 'get',
+  path: '/v1/positions/by-fund',
+  tags: ['positions'],
+  summary: '按基金汇总自己的跨渠道持仓',
+  description:
+    '同一基金跨渠道的份额、成本、市值与收益相加，单价与收益率重算；按基金首次建仓顺序返回。',
+  request: { query: summaryQuery },
+  responses: {
+    200: {
+      description: '按基金汇总',
+      content: {
+        'application/json': {
+          schema: z
+            .object({ items: z.array(FundSummarySchema) })
+            .openapi('FundPositionSummaryList'),
+        },
+      },
+    },
+    400: { description: '参数不合法', content: errorContent },
+    404: { description: 'not_found：渠道不存在（包含别人的渠道）', content: errorContent },
     ...commonErrors,
   },
 });

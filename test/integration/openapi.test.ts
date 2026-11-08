@@ -109,6 +109,54 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     }
   });
 
+  it('documents today gains, authenticated totals and per-fund summaries', async () => {
+    const doc = (await (await createApp().request('/v1/openapi')).json()) as OpenApiDoc;
+    for (const path of ['/v1/positions/summary', '/v1/positions/by-fund']) {
+      const operation = doc.paths[path]?.get;
+      expect(operation?.security).toEqual([{ SessionCookie: [] }, { SessionBearer: [] }]);
+      expect(Object.keys(operation?.responses ?? {}).sort()).toEqual([
+        '200',
+        '400',
+        '401',
+        '404',
+        '500',
+        '503',
+      ]);
+    }
+    for (const name of ['Position', 'PositionSummary', 'FundPositionSummary']) {
+      const schema = doc.components.schemas[name] as {
+        properties?: Record<string, unknown>;
+        allOf?: unknown[];
+      };
+      expect(schema).toBeDefined();
+    }
+    const position = doc.components.schemas.Position as { properties: Record<string, unknown> };
+    for (const field of [
+      'todayGain',
+      'todayGainRate',
+      'todayGainStatus',
+      'todayGainDate',
+      'previousMarketValue',
+      'realizedGain',
+      'totalGain',
+    ]) {
+      expect(position.properties[field]).toBeDefined();
+    }
+    const summary = doc.components.schemas.PositionSummary as {
+      properties: Record<string, unknown>;
+    };
+    for (const field of [
+      'totalAssets',
+      'holdingGain',
+      'totalGain',
+      'isComplete',
+      'valuationComplete',
+      'todayGainComplete',
+    ]) {
+      expect(summary.properties[field]).toBeDefined();
+    }
+  });
+
   it('documents trade operations, status codes, session requirements and schemas', async () => {
     const app = createApp({ db: createHealthProbe(db.pool) });
     const doc = (await (await app.request('/v1/openapi')).json()) as OpenApiDoc;

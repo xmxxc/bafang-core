@@ -125,6 +125,28 @@ docker compose up -d
 - 新建要求份额大于 0、基金存在（按基金详情校验，不存在返回 404 `fund_not_found`，上游不可用返回 502 `upstream_unavailable`）、渠道是自己的（否则 404 `not_found`）；`snapshotDate` 缺省为当天（上海时间）。同一组合已有持仓返回 409 `position_exists`，由数据库唯一约束保证并发下只成功一个。校准可以把份额改为 0（已清仓）。
 - 市值 = 份额 × 最新净值（与 `GET /v1/funds/{code}/nav` 同一来源）；持有收益 = 市值 − 总成本；收益率 = 持有收益 ÷ 总成本。暂无净值或行情不可用时 `nav`、`navDate`、`marketValue`、`holdingGain`、`holdingGainRate` 为 `null`（不是 0）；总成本为 0 时收益率为 `null`。
 
+### 今日收益与汇总
+
+持仓的列表、详情、新建与校准响应均增加 `todayGain`、`todayGainRate`、`todayGainStatus`、`todayGainDate`、`previousMarketValue`、`realizedGain`、`totalGain`。今日收益、市值及汇总均以持仓当前已确认份额为准；在途加仓金额通过持仓 `pendingAmount` 展示，确认前不增加份额、成本或收益。
+
+- “今日”是注入时钟的 Asia/Shanghai 日期；当天净值已公布时，`todayGain = 份额 ×（当日净值 − 上一净值）`，状态为 `confirmed`。上一净值取今日之前最近一期已公布净值，不使用上游已舍入的涨跌幅反推涨跌额。
+- 当天净值未公布时，`todayGain = 份额 × 上一净值 × 估值涨跌幅`，状态为 `estimated`。复用估值模块的日期、基准核对与回退规则；所有来源不可用、缺上一净值时，收益与收益率为 `null`、状态为 `unavailable`。
+- 周末与日历休市日的今日收益为 `unavailable`，不沿用上一交易日的确认收益。交易日盘前没有当日净值时同样为 `unavailable`，与估值接口的 `holiday` / `pre_market` 约定一致；最新净值仍用于市值与持有收益。
+- 估值模块提供的百分数先转十进制文本（含指数形式），用 bigint 定点四舍五入到 **6 位百分数小数**，再以调整 scale 的方式除以 100。`份额 × 上一净值` 保留完整 **8 位小数**，最终收益只舍入一次到 2 位。`todayGainRate = 已舍入的今日收益 ÷ previousMarketValue`，舍入到 4 位比值；分母为 0 或缺失时为 `null`。
+- 已实现收益由 #20 接入卖出结算；本票 `realizedGain` 为确定值 `0.00`，累计收益 `totalGain = holdingGain + realizedGain`，持有收益缺失则累计收益也为 `null`。不新增迁移。
+
+| 接口                                   | 响应                                                                                                        |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `GET /v1/positions/summary?channelId=` | `PositionSummary`，总资产、总成本、今日收益及收益率、持有收益及收益率、已实现收益、累计收益与完整性         |
+| `GET /v1/positions/by-fund?channelId=` | `{ items: [FundPositionSummary] }`，同基金跨渠道合并，并增加 `fundCode`、合计 `shares` 与重算的 `unitPrice` |
+
+两个接口均要求登录，只统计当前用户；可选 `channelId` 筛选，渠道不存在或属于别人时返回 404 `not_found`，格式不合法返回 400 `validation_error`。固定路径先于持仓详情路由注册。新接口复用 `ErrorCodeSchema` 中的 `unauthorized`、`validation_error`、`not_found`、`database_unavailable`、`internal_error`，无新增错误码。
+
+- 金额合计按每笔持仓已舍入的金额相加；份额与成本也相加。收益率按合计后的分子、分母重算，不平均各持仓收益率。按基金汇总沿用基金首次建仓顺序。
+- `totalAssets` 是可取得净值的市值合计；缺净值的持仓不计入总资产、持有收益和累计收益，`valuationComplete: false`。`totalCost` 仍包含全部持仓；汇总持有收益率仅使用净值可用持仓的成本作分母。
+- 不可用的今日收益及其上一市值均不计入今日收益与收益率汇总，`todayGainComplete: false`。`isComplete` 仅在两个完整性字段都为 true 时为 true。汇总状态仅看可计入部分：全为估算是 `estimated`，全为确认是 `confirmed`，两者并存是 `mixed`，无可用收益是 `unavailable`。
+- 有持仓但对应数据全部缺失时，该项合计为 `null`；空持仓的金额合计为 `0.00`（上一市值 `0.00000000`）、收益率为 `null`、状态为 `unavailable`，完整性为 true。
+
 ### 加仓与交易记录
 
 需要登录，持仓与交易均只能操作自己的，别人的返回 404 `not_found`。

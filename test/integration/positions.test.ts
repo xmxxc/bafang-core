@@ -6,6 +6,7 @@ import type { EmailLoginResponse } from '../../src/routes/auth';
 import { UpstreamError } from '../../src/market/upstream';
 import {
   eastmoneySamples,
+  estimateSamples,
   RecordedUpstream,
   sample,
   type Replay,
@@ -51,7 +52,11 @@ describe('持仓：建仓快照、校准与持有收益', () => {
   function makeApp(replay: Replay = eastmoneySamples, extra: AppDeps = {}): App {
     return createApp({
       database: createDb(db.pool),
-      upstream: new RecordedUpstream(replay),
+      upstream: new RecordedUpstream((url) =>
+        url.hostname === 'fundcomapi.tiantianfunds.com' || url.hostname === 'hq.sinajs.cn'
+          ? estimateSamples({ nav: replay })(url)
+          : replay(url),
+      ),
       clock,
       mailer: {
         async sendVerificationCode(_email, sentCode) {

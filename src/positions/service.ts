@@ -4,6 +4,9 @@ import { channels, positions, trades, users } from '../db/schema';
 import type { ErrorCode } from '../errors';
 import type { FundService } from '../market/funds';
 import type { LatestNav, NavService } from '../market/nav';
+import type { EstimateService } from '../market/estimates';
+import type { TradingCalendar } from '../trading-calendar';
+import { createPositionGains, type PositionGains } from './gains';
 import { shanghaiDate, type Clock } from '../clock';
 import {
   divide,
@@ -49,7 +52,7 @@ export interface PositionCreateInput extends CostInput {
   snapshotDate?: string;
 }
 
-export interface PositionView {
+export interface PositionValuation {
   id: string;
   fundCode: string;
   channelId: string;
@@ -64,6 +67,8 @@ export interface PositionView {
   holdingGain: string | null;
   holdingGainRate: string | null;
 }
+
+export type PositionView = PositionValuation & PositionGains;
 
 export interface PositionService {
   list(userId: string, channelId?: string): Promise<PositionView[]>;
@@ -150,7 +155,7 @@ export function positionView(
   row: PositionRow,
   latest: LatestNav | null,
   pendingAmount = '0.00',
-): PositionView {
+): PositionValuation {
   const shares = fixedFromDb(row.shares, SHARES_SCALE);
   const totalCost = fixedFromDb(row.totalCost, AMOUNT_SCALE);
   const base = {
@@ -208,7 +213,10 @@ export function createPositionService(deps: {
   funds: FundService;
   nav: NavService;
   clock: Clock;
+  estimates: EstimateService;
+  calendar: TradingCalendar;
 }): PositionService {
+  const withGains = createPositionGains(deps);
   async function latestNav(code: string): Promise<LatestNav | null> {
     try {
       return await deps.nav.latest(code);
@@ -244,9 +252,16 @@ export function createPositionService(deps: {
         formatFixed(fixedFromDb(total.amount, AMOUNT_SCALE)),
       ]),
     );
-    return Promise.all(
-      rows.map(async (row) =>
-        positionView(row, await latestNav(row.fundCode), amounts.get(row.id) ?? '0.00'),
+    const navs = new Map(
+      await Promise.all(
+        [...new Set(rows.map((row) => row.fundCode))].map(
+          async (code) => [code, await latestNav(code)] as const,
+        ),
+      ),
+    );
+    return withGains(
+      rows.map((row) =>
+        positionView(row, navs.get(row.fundCode) ?? null, amounts.get(row.id) ?? '0.00'),
       ),
     );
   }

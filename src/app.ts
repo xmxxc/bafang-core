@@ -1,7 +1,7 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 import { HTTPException } from 'hono/http-exception';
-import { SystemClock, type Clock } from './clock';
+import { shanghaiDate, SystemClock, type Clock } from './clock';
 import {
   ChineseTradingCalendar,
   HongKongTradingCalendar,
@@ -75,8 +75,12 @@ import {
   positionDeleteRoute,
   positionDetailRoute,
   positionListRoute,
+  positionSummaryRoute,
+  positionByFundRoute,
 } from './routes/positions';
 import { PositionError, createPositionService } from './positions/service';
+import { summarizePositions, summarizeByFund } from './positions/summary';
+
 import { createTradeService } from './positions/trades';
 import { tradeCreateRoute, tradeListRoute, tradeCancelRoute } from './routes/trades';
 
@@ -177,7 +181,14 @@ export function createApp(deps: AppDeps = {}): App {
     nav,
   });
   const positions = resolved.database
-    ? createPositionService({ db: resolved.database, funds, nav, clock: resolved.clock })
+    ? createPositionService({
+        db: resolved.database,
+        funds,
+        nav,
+        estimates,
+        clock: resolved.clock,
+        calendar: resolved.tradingCalendar,
+      })
     : null;
   const trades = resolved.database
     ? createTradeService({
@@ -300,6 +311,17 @@ export function createApp(deps: AppDeps = {}): App {
     if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     const { channelId } = c.req.valid('query');
     return c.json({ items: await positions.list(getAuth(c).userId, channelId) }, 200);
+  });
+  // 固定路径先于 /{id} 注册，避免被当成持仓 UUID。
+  app.openapi(positionSummaryRoute, async (c) => {
+    if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const items = await positions.list(getAuth(c).userId, c.req.valid('query').channelId);
+    return c.json(summarizePositions(items, shanghaiDate(resolved.clock.now())), 200);
+  });
+  app.openapi(positionByFundRoute, async (c) => {
+    if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const items = await positions.list(getAuth(c).userId, c.req.valid('query').channelId);
+    return c.json({ items: summarizeByFund(items, shanghaiDate(resolved.clock.now())) }, 200);
   });
   app.openapi(positionDetailRoute, async (c) => {
     if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
