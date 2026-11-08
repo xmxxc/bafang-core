@@ -69,6 +69,14 @@ import {
   channelOrderRoute,
   channelRenameRoute,
 } from './routes/channels';
+import {
+  positionCalibrateRoute,
+  positionCreateRoute,
+  positionDeleteRoute,
+  positionDetailRoute,
+  positionListRoute,
+} from './routes/positions';
+import { PositionError, createPositionService } from './positions/service';
 
 export interface AppDeps {
   db?: HealthProbe;
@@ -166,6 +174,9 @@ export function createApp(deps: AppDeps = {}): App {
     calendar: resolved.tradingCalendar,
     nav,
   });
+  const positions = resolved.database
+    ? createPositionService({ db: resolved.database, funds, nav, clock: resolved.clock })
+    : null;
   const marketRateLimit = rateLimit(ANONYMOUS_MARKET_RATE_LIMIT, resolved.clock);
   app.use('/v1/funds/*', marketRateLimit);
   app.use('/v1/market/*', marketRateLimit);
@@ -268,6 +279,36 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(channelDeleteRoute, async (c) => {
     if (!channels) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     await channels.delete(getAuth(c).userId, c.req.valid('param').id);
+    return c.body(null, 204);
+  });
+
+  app.use('/v1/positions/*', async (c, next) => {
+    if (!requireLogin) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return requireLogin(c, next);
+  });
+  app.openapi(positionListRoute, async (c) => {
+    if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { channelId } = c.req.valid('query');
+    return c.json({ items: await positions.list(getAuth(c).userId, channelId) }, 200);
+  });
+  app.openapi(positionDetailRoute, async (c) => {
+    if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(await positions.get(getAuth(c).userId, c.req.valid('param').id), 200);
+  });
+  app.openapi(positionCreateRoute, async (c) => {
+    if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(await positions.create(getAuth(c).userId, c.req.valid('json')), 201);
+  });
+  app.openapi(positionCalibrateRoute, async (c) => {
+    if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(
+      await positions.calibrate(getAuth(c).userId, c.req.valid('param').id, c.req.valid('json')),
+      200,
+    );
+  });
+  app.openapi(positionDeleteRoute, async (c) => {
+    if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    await positions.delete(getAuth(c).userId, c.req.valid('param').id);
     return c.body(null, 204);
   });
 
@@ -448,7 +489,7 @@ export function createApp(deps: AppDeps = {}): App {
       console.warn('[bafang-core] upstream failure', err.kind, err.status ?? '', err.message);
       return c.json(errorBody('upstream_unavailable', '行情上游暂不可用，请稍后再试'), 502);
     }
-    if (err instanceof AuthError || err instanceof ChannelError) {
+    if (err instanceof AuthError || err instanceof ChannelError || err instanceof PositionError) {
       return c.json(errorBody(err.code, err.message), err.status);
     }
     console.error('[bafang-core] unhandled error', err);

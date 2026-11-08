@@ -57,6 +57,13 @@
       "when": 1794113194229,
       "tag": "0007_cheerful_naoko",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794119971932,
+      "tag": "0008_regular_scrambler",
+      "breakpoints": true
     }
   ]
 }

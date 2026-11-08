@@ -6,6 +6,7 @@ import { createApp, type AppDeps } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { GitHubOAuth } from '../../src/auth/github';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
+import { eastmoneySamples, RecordedUpstream } from '../support/recorded-upstream';
 
 describe('login method management over HTTP', () => {
   let db: TestSchema;
@@ -36,6 +37,7 @@ describe('login method management over HTTP', () => {
       database: createDb(db.pool),
       mailer,
       clock,
+      upstream: new RecordedUpstream(eastmoneySamples),
       github: { oauth, redirectUrl: 'https://studio.test/' },
       ...extra,
     });
@@ -161,6 +163,42 @@ describe('login method management over HTTP', () => {
     await githubLogin(heldTarget, 'github-held');
     const heldCurrent = await emailLogin(heldTarget, 'held@example.com');
     expect((await linkGithub(heldTarget, heldCurrent, 'github-held')).status).toBe(409);
+  });
+
+  it('rejects linking when the other user holds a real position, even a cleared one', async () => {
+    const target = app();
+    const holder = await githubLogin(target, 'github-holder');
+    const channels = (await (
+      await target.request('/v1/channels', { headers: { Cookie: holder } })
+    ).json()) as { items: { id: string }[] };
+    const created = await target.request('/v1/positions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: holder },
+      body: JSON.stringify({
+        fundCode: '110020',
+        channelId: channels.items[0]!.id,
+        shares: '1',
+        totalCost: '1',
+      }),
+    });
+    expect(created.status).toBe(201);
+    const positionId = ((await created.json()) as { id: string }).id;
+    const current = await emailLogin(target, 'wants-holder@example.com');
+    const rejected = await linkGithub(target, current, 'github-holder');
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toMatchObject({ error: { code: 'login_method_conflict' } });
+
+    // 已清仓的持仓也算有数据。
+    const cleared = await target.request(`/v1/positions/${positionId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Cookie: holder },
+      body: JSON.stringify({ shares: '0', totalCost: '0' }),
+    });
+    expect(cleared.status).toBe(200);
+    const stillRejected = await linkGithub(target, current, 'github-holder');
+    expect(stillRejected.status).toBe(409);
+    expect(await stillRejected.json()).toMatchObject({ error: { code: 'login_method_conflict' } });
+    expect((await target.request('/v1/me', { headers: { Cookie: holder } })).status).toBe(200);
   });
 
   it('enforces one type per user and serializes concurrent final unlinks', async () => {

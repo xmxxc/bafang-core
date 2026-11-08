@@ -2,6 +2,7 @@ import {
   date,
   index,
   integer,
+  numeric,
   pgTable,
   primaryKey,
   text,
@@ -114,6 +115,31 @@ export const channels = pgTable(
   (t) => [
     index('channels_user_idx').on(t.userId),
     uniqueIndex('channels_user_name_uidx').on(t.userId, t.name),
+  ],
+);
+
+/** 用户在某渠道持有某基金的一笔建仓快照。金额与份额使用定点小数。 */
+export const positions = pgTable(
+  'positions',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    // 不级联：渠道删除规则在服务层判断，外键兜底，避免删除渠道时连带删掉持仓。
+    channelId: uuid('channel_id')
+      .notNull()
+      .references(() => channels.id),
+    fundCode: text('fund_code').notNull(),
+    shares: numeric('shares', { precision: 24, scale: 4 }).notNull(),
+    totalCost: numeric('total_cost', { precision: 24, scale: 2 }).notNull(),
+    snapshotDate: date('snapshot_date', { mode: 'string' }).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('positions_user_channel_idx').on(t.userId, t.channelId),
+    uniqueIndex('positions_user_fund_channel_uidx').on(t.userId, t.fundCode, t.channelId),
   ],
 );
 

@@ -29,6 +29,7 @@ export const ErrorCodeSchema = z.enum([
   'login_method_type_conflict',
   'login_method_last',
   'login_method_not_found',
+  'position_exists',
 ]);
 
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
