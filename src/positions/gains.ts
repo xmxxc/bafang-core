@@ -3,6 +3,7 @@ import type { EstimateService } from '../market/estimates';
 import type { NavService } from '../market/nav';
 import type { TradingCalendar } from '../trading-calendar';
 import {
+  add,
   divide,
   fixedFromDb,
   formatFixed,
@@ -20,7 +21,6 @@ export interface PositionGains {
   todayGainDate: string;
   /** 份额 × 上一净值，保留乘积的全部 8 位小数，避免小额分母提前舍入成 0。 */
   previousMarketValue: string | null;
-  realizedGain: string;
   totalGain: string | null;
 }
 
@@ -88,9 +88,10 @@ export function createPositionGains(deps: {
         todayGainStatus: status,
         todayGainDate: today,
         previousMarketValue: denominator ? formatFixed(denominator) : null,
-        // #20 引入卖出结算前，已实现收益确定为 0；累计收益随持有收益是否可用。
-        realizedGain: '0.00',
-        totalGain: item.holdingGain,
+        totalGain:
+          item.holdingGain === null
+            ? null
+            : formatFixed(add(fixedFromDb(item.holdingGain, 2), fixedFromDb(item.realizedGain, 2))),
       };
     });
   };

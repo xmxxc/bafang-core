@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server';
 import { createApp } from './app';
 import { createDb, createHealthProbe, createPool } from './db';
-import { loadConfig, toDbConfig } from './config';
+import { loadConfig, parseSettlementRunMinutes, toDbConfig } from './config';
 import { loadHongKongTradingCalendar, loadTradingCalendar } from './trading-calendar';
 import { createMailer } from './auth/mailer';
 import { createGitHubLogin } from './auth/github';
@@ -26,10 +26,14 @@ const app = createApp({
 });
 
 const stopSettlementScheduler = app.settlementJob
-  ? startSettlementScheduler(app.settlementJob, {
-      clock: { now: () => new Date() },
-      calendar: tradingCalendar,
-    })
+  ? startSettlementScheduler(
+      app.settlementJob,
+      {
+        clock: { now: () => new Date() },
+        calendar: tradingCalendar,
+      },
+      { runMinutes: parseSettlementRunMinutes(config.SETTLEMENT_ROUNDS) },
+    )
   : () => undefined;
 
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {

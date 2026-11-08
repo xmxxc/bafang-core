@@ -7,7 +7,7 @@ import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { WeChatLoginResponse } from '../../src/routes/auth';
 import { createTestSchema, dropTestSchema } from '../support/test-db';
 
-it('upgrades 0000–0010 to 0011, preserves the existing user and delivers their web session over HTTP', async () => {
+it('upgrades 0000–0011 to 0012, preserves the existing user and delivers their web session over HTTP', async () => {
   const prior = await mkdtemp(join(tmpdir(), 'qr-migrations-'));
   let database: Awaited<ReturnType<typeof createTestSchema>> | undefined;
   try {
@@ -15,7 +15,7 @@ it('upgrades 0000–0010 to 0011, preserves the existing user and delivers their
     const journal = JSON.parse(
       await readFile(join(MIGRATIONS_FOLDER, 'meta/_journal.json'), 'utf8'),
     ) as { entries: { idx: number; tag: string }[] };
-    journal.entries = journal.entries.filter((entry) => entry.idx <= 10);
+    journal.entries = journal.entries.filter((entry) => entry.idx <= 11);
     await writeFile(join(prior, 'meta/_journal.json'), JSON.stringify(journal));
     for (const entry of journal.entries)
       await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(prior, `${entry.tag}.sql`));

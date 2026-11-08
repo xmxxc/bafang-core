@@ -1,0 +1,2 @@
+ALTER TABLE "positions" ADD COLUMN "realized_gain" numeric(24, 2) DEFAULT '0' NOT NULL;--> statement-breakpoint
+ALTER TABLE "positions" ADD COLUMN "realized_gain_cost" numeric(24, 2) DEFAULT '0' NOT NULL;

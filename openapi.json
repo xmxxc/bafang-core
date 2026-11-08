@@ -101,10 +101,14 @@
                   "login_method_not_found",
                   "position_exists",
                   "trade_not_cancellable",
+                  "insufficient_shares",
+                  "channel_position_conflict",
                   "bind_code_web_required",
                   "bind_code_expired",
                   "bind_code_used",
-                  "bind_code_invalid"
+                  "bind_code_invalid",
+                  "bind_code_not_configured",
+                  "bind_code_unavailable"
                 ],
                 "description": "机器可读的错误码"
               },
@@ -641,7 +645,7 @@
           },
           "realizedGain": {
             "type": "string",
-            "description": "已实现收益，2 位小数；#20 接入卖出结算前确定为 0.00"
+            "description": "已实现收益，2 位小数；跨持有周期保留并累加"
           },
           "totalGain": {
             "type": "string",
@@ -672,6 +676,22 @@
             "type": "string",
             "example": "1000.0000",
             "description": "份额，4 位小数"
+          },
+          "isCleared": {
+            "type": "boolean",
+            "description": "份额为 0 且没有任何在途交易；按当前状态派生"
+          },
+          "realizedGainCost": {
+            "type": "string",
+            "description": "已实现收益对应的累计结转成本，2 位小数；校准与再次加仓均保留"
+          },
+          "pendingShares": {
+            "type": "string",
+            "description": "在途减仓与调仓转出预留份额合计，4 位小数"
+          },
+          "availableShares": {
+            "type": "string",
+            "description": "可用份额 = 已确认份额 − 预留份额，最低为 0，4 位小数"
           },
           "pendingAmount": {
             "type": "string",
@@ -731,6 +751,10 @@
           "fundCode",
           "channelId",
           "shares",
+          "isCleared",
+          "realizedGainCost",
+          "pendingShares",
+          "availableShares",
           "pendingAmount",
           "totalCost",
           "unitPrice",
@@ -766,7 +790,7 @@
           },
           "realizedGain": {
             "type": "string",
-            "description": "已实现收益，2 位小数；#20 接入卖出结算前确定为 0.00"
+            "description": "已实现收益，2 位小数；跨持有周期保留并累加"
           },
           "totalGain": {
             "type": "string",
@@ -804,7 +828,7 @@
           },
           "valuationComplete": {
             "type": "boolean",
-            "description": "所有持仓市值、持有收益、累计收益均可用；缺净值的持仓不计入这些合计"
+            "description": "所有持仓市值与持有收益均可用；缺净值时不计入其市值与持有收益，累计收益仍包含全部已实现收益"
           },
           "todayGainComplete": {
             "type": "boolean",
@@ -1043,27 +1067,31 @@
           "source"
         ]
       },
+      "TradeCreate": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/BuyTradeCreate"
+          },
+          {
+            "$ref": "#/components/schemas/SellTradeCreate"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "type",
+          "mapping": {
+            "buy": "#/components/schemas/BuyTradeCreate",
+            "sell": "#/components/schemas/SellTradeCreate"
+          }
+        }
+      },
       "BuyTradeCreate": {
         "type": "object",
         "properties": {
-          "type": {
-            "type": "string",
-            "enum": [
-              "buy"
-            ],
-            "description": "加仓"
-          },
-          "amount": {
-            "type": "string",
-            "pattern": "^\\d{1,16}(\\.\\d{1,2})?$",
-            "example": "100.01",
-            "description": "加仓金额，必须大于 0，最多 2 位小数"
-          },
           "feeRate": {
             "type": "string",
             "pattern": "^(0(\\.\\d{1,6})?|1(\\.0{1,6})?)$",
             "example": "0.0015",
-            "description": "买入费率比值，0–1，最多 6 位小数；0.0015 表示 0.15%"
+            "description": "买入或卖出费率比值，0–1，最多 6 位小数"
           },
           "submittedDate": {
             "type": "string",
@@ -1073,13 +1101,62 @@
           "beforeCutoff": {
             "type": "boolean",
             "description": "是否在 15:00 前；false 含 15:00 整。省略时按当前上海时间判断"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "buy"
+            ]
+          },
+          "amount": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,2})?$",
+            "description": "加仓金额，必须大于 0，最多 2 位小数"
           }
         },
         "required": [
+          "feeRate",
           "type",
-          "amount",
-          "feeRate"
-        ]
+          "amount"
+        ],
+        "additionalProperties": false
+      },
+      "SellTradeCreate": {
+        "type": "object",
+        "properties": {
+          "feeRate": {
+            "type": "string",
+            "pattern": "^(0(\\.\\d{1,6})?|1(\\.0{1,6})?)$",
+            "example": "0.0015",
+            "description": "买入或卖出费率比值，0–1，最多 6 位小数"
+          },
+          "submittedDate": {
+            "type": "string",
+            "format": "date",
+            "description": "提交日 YYYY-MM-DD；省略为上海今天，填写时必须同时提供 beforeCutoff"
+          },
+          "beforeCutoff": {
+            "type": "boolean",
+            "description": "是否在 15:00 前；false 含 15:00 整。省略时按当前上海时间判断"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "sell"
+            ]
+          },
+          "shares": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,4})?$",
+            "description": "减仓份额，必须大于 0 且不超过可用份额，最多 4 位小数"
+          }
+        },
+        "required": [
+          "feeRate",
+          "type",
+          "shares"
+        ],
+        "additionalProperties": false
       },
       "TradeList": {
         "type": "object",
@@ -2220,8 +2297,8 @@
         "tags": [
           "channels"
         ],
-        "summary": "删除自己的无持仓渠道",
-        "description": "需要登录，“未指定”不能删除；仅允许删除没有任何持仓的渠道。",
+        "summary": "删除自己的渠道",
+        "description": "需要登录，“未指定”不能删除。有份额或任意在途交易时拒绝；只剩已清仓持仓时在同一事务中移到“未指定”后删除。若“未指定”已有同基金持仓则拒绝，以保留原持仓 ID 与交易历史。",
         "parameters": [
           {
             "schema": {
@@ -2270,7 +2347,7 @@
             }
           },
           "409": {
-            "description": "channel_protected：“未指定”不能删除；channel_has_positions：渠道下仍有持仓",
+            "description": "channel_protected：“未指定”不能删除；channel_has_positions：渠道下有份额或在途交易；channel_position_conflict：“未指定”已有同基金持仓",
             "content": {
               "application/json": {
                 "schema": {
@@ -2316,7 +2393,7 @@
           "positions"
         ],
         "summary": "查看自己的持仓",
-        "description": "需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓；渠道不存在或属于别人时返回 404 `not_found`。",
+        "description": "需要登录，按创建先后返回；默认隐藏已清仓，includeCleared=true 时包含；传 channelId 只返回该渠道的持仓；渠道不存在或属于别人时返回 404 `not_found`。",
         "parameters": [
           {
             "schema": {
@@ -2327,6 +2404,20 @@
             "required": false,
             "description": "按渠道筛选",
             "name": "channelId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "true 包含已清仓，缺省 false；不影响汇总接口"
+            },
+            "required": false,
+            "description": "true 包含已清仓，缺省 false；不影响汇总接口",
+            "name": "includeCleared",
             "in": "query"
           }
         ],
@@ -2515,7 +2606,7 @@
           "positions"
         ],
         "summary": "查看自己的持仓汇总",
-        "description": "金额按持仓舍入后的值相加；不可用的数据及其收益率分母不计入对应合计，并通过完整性字段标明。空持仓的金额合计为 0，收益率为 null。",
+        "description": "始终包含已清仓持仓的历史已实现收益。金额按持仓舍入后的值相加；不可用的数据及其收益率分母不计入对应合计，并通过完整性字段标明。空持仓的金额合计为 0，收益率为 null。",
         "parameters": [
           {
             "schema": {
@@ -2607,7 +2698,7 @@
           "positions"
         ],
         "summary": "按基金汇总自己的跨渠道持仓",
-        "description": "同一基金跨渠道的份额、成本、市值与收益相加，单价与收益率重算；按基金首次建仓顺序返回。",
+        "description": "包含已清仓持仓的历史已实现收益。同一基金跨渠道的份额、成本、市值与收益相加，单价与收益率重算；按基金首次建仓顺序返回。",
         "parameters": [
           {
             "schema": {
@@ -2789,7 +2880,7 @@
           "positions"
         ],
         "summary": "校准持仓",
-        "description": "需要登录。用新的份额与成本（总成本或单价二选一）覆盖当前值，不生成交易记录；份额可为 0（已清仓）。",
+        "description": "需要登录。用新的份额与成本（总成本或单价二选一）覆盖当前值，不生成交易记录；保留已实现收益、其成本基数与在途交易。份额可为 0；无在途交易时为已清仓。",
         "parameters": [
           {
             "schema": {
@@ -2973,8 +3064,8 @@
         "tags": [
           "trades"
         ],
-        "summary": "提交加仓交易",
-        "description": "按提交日期、15:00 截止点与基金 T+N/交易日历返回预计确认日。在途不改变持仓份额或成本。此接口每次调用创建一笔交易，重试可能重复记录。",
+        "summary": "提交加仓或减仓交易",
+        "description": "按提交日期、15:00 截止点与基金 T+N/交易日历返回预计确认日。在途不改变持仓份额或成本；减仓预留可用份额（已确认份额减去在途减仓/调仓转出），超额返回 409 insufficient_shares。此接口每次调用创建一笔交易，重试可能重复记录。",
         "parameters": [
           {
             "schema": {
@@ -2993,7 +3084,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/BuyTradeCreate"
+                "$ref": "#/components/schemas/TradeCreate"
               }
             }
           }
@@ -3031,6 +3122,16 @@
           },
           "404": {
             "description": "not_found：持仓不存在（含别人的）；fund_not_found：基金不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "insufficient_shares：减仓超过可用份额",
             "content": {
               "application/json": {
                 "schema": {
@@ -4193,7 +4294,7 @@
             }
           },
           "503": {
-            "description": "database_unavailable：数据库不可用",
+            "description": "database_unavailable：数据库不可用；bind_code_not_configured：绑定码功能未配置；bind_code_unavailable：绑定码暂时无法生成",
             "content": {
               "application/json": {
                 "schema": {
@@ -4211,7 +4312,7 @@
           "auth"
         ],
         "summary": "用微信登录凭据消费绑定码",
-        "description": "提交 wx.login 凭据与绑定码。微信 code2session、绑定码消费、登录方式关联和小程序会话创建在同一数据库事务边界内完成；成功返回与微信登录一致的小程序会话。IP 每分钟最多 5 次，成功与失败均计数。",
+        "description": "提交 wx.login 凭据与绑定码。网络 code2session 交换完成后，绑定码消费、登录方式关联和小程序会话创建在同一数据库事务边界内完成；成功返回与微信登录一致的小程序会话。IP 每分钟最多 5 次，并有按 openid 每 24 小时 10 次、全站每小时 300 次的持久化失败预算。",
         "requestBody": {
           "required": true,
           "content": {
@@ -4307,7 +4408,7 @@
             }
           },
           "503": {
-            "description": "wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用",
+            "description": "wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用；bind_code_not_configured：绑定码功能未配置",
             "content": {
               "application/json": {
                 "schema": {

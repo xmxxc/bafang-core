@@ -4,36 +4,53 @@ import { ErrorResponseSchema } from '../errors';
 const errorContent = { 'application/json': { schema: ErrorResponseSchema } };
 const security: Record<string, string[]>[] = [{ SessionCookie: [] }, { SessionBearer: [] }];
 const PositionParam = z.object({ id: z.uuid().toLowerCase().openapi({ description: '持仓 id' }) });
-const BuyBody = z
-  .object({
-    type: z.literal('buy').openapi({ description: '加仓' }),
-    amount: z
-      .string()
-      .regex(/^\d{1,16}(\.\d{1,2})?$/)
-      .openapi({ example: '100.01', description: '加仓金额，必须大于 0，最多 2 位小数' }),
-    feeRate: z
-      .string()
-      .regex(/^(0(\.\d{1,6})?|1(\.0{1,6})?)$/)
-      .openapi({
-        example: '0.0015',
-        description: '买入费率比值，0–1，最多 6 位小数；0.0015 表示 0.15%',
-      }),
-    submittedDate: z.iso
-      .date()
-      .refine((date) => !date.startsWith('0000-'), { message: '提交日年份必须大于 0' })
-      .optional()
-      .openapi({
-        description: '提交日 YYYY-MM-DD；省略为上海今天，填写时必须同时提供 beforeCutoff',
-      }),
-    beforeCutoff: z
-      .boolean()
-      .optional()
-      .openapi({ description: '是否在 15:00 前；false 含 15:00 整。省略时按当前上海时间判断' }),
-  })
+const timingFields = {
+  feeRate: z
+    .string()
+    .regex(/^(0(\.\d{1,6})?|1(\.0{1,6})?)$/)
+    .openapi({
+      example: '0.0015',
+      description: '买入或卖出费率比值，0–1，最多 6 位小数',
+    }),
+  submittedDate: z.iso
+    .date()
+    .refine((date) => !date.startsWith('0000-'), { message: '提交日年份必须大于 0' })
+    .optional()
+    .openapi({ description: '提交日 YYYY-MM-DD；省略为上海今天，填写时必须同时提供 beforeCutoff' }),
+  beforeCutoff: z
+    .boolean()
+    .optional()
+    .openapi({ description: '是否在 15:00 前；false 含 15:00 整。省略时按当前上海时间判断' }),
+};
+const TradeBody = z
+  .discriminatedUnion('type', [
+    z
+      .object({
+        ...timingFields,
+        type: z.literal('buy'),
+        amount: z
+          .string()
+          .regex(/^\d{1,16}(\.\d{1,2})?$/)
+          .openapi({ description: '加仓金额，必须大于 0，最多 2 位小数' }),
+      })
+      .strict()
+      .openapi('BuyTradeCreate'),
+    z
+      .object({
+        ...timingFields,
+        type: z.literal('sell'),
+        shares: z
+          .string()
+          .regex(/^\d{1,16}(\.\d{1,4})?$/)
+          .openapi({ description: '减仓份额，必须大于 0 且不超过可用份额，最多 4 位小数' }),
+      })
+      .strict()
+      .openapi('SellTradeCreate'),
+  ])
   .refine((value) => value.submittedDate === undefined || value.beforeCutoff !== undefined, {
     message: '填写提交日时必须同时填写 beforeCutoff',
   })
-  .openapi('BuyTradeCreate');
+  .openapi('TradeCreate');
 
 export const TradeSchema = z
   .object({
@@ -74,12 +91,12 @@ export const tradeCreateRoute = createRoute({
   method: 'post',
   path: '/v1/positions/{id}/trades',
   tags: ['trades'],
-  summary: '提交加仓交易',
+  summary: '提交加仓或减仓交易',
   description:
-    '按提交日期、15:00 截止点与基金 T+N/交易日历返回预计确认日。在途不改变持仓份额或成本。此接口每次调用创建一笔交易，重试可能重复记录。',
+    '按提交日期、15:00 截止点与基金 T+N/交易日历返回预计确认日。在途不改变持仓份额或成本；减仓预留可用份额（已确认份额减去在途减仓/调仓转出），超额返回 409 insufficient_shares。此接口每次调用创建一笔交易，重试可能重复记录。',
   request: {
     params: PositionParam,
-    body: { required: true, content: { 'application/json': { schema: BuyBody } } },
+    body: { required: true, content: { 'application/json': { schema: TradeBody } } },
   },
   responses: {
     ...commonErrors,
@@ -88,6 +105,7 @@ export const tradeCreateRoute = createRoute({
       description: 'not_found：持仓不存在（含别人的）；fund_not_found：基金不存在',
       content: errorContent,
     },
+    409: { description: 'insufficient_shares：减仓超过可用份额', content: errorContent },
     502: { description: 'upstream_unavailable：基金规则上游不可用', content: errorContent },
   },
 });

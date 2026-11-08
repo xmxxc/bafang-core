@@ -1,7 +1,7 @@
 import { and, eq, max } from 'drizzle-orm';
 import type { Db } from '../db';
-import { channels, users } from '../db/schema';
-import { channelHasAnyPositions, channelHasPositions } from '../positions/service';
+import { channels, positions, users } from '../db/schema';
+import { channelHasPositions } from '../positions/service';
 import type { ErrorCode } from '../errors';
 
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -99,10 +99,31 @@ export function createChannelService(db: Db) {
         if (await channelHasPositions(tx, userId, id)) {
           throw new ChannelError('channel_has_positions', '渠道下仍有持仓，不能删除', 409);
         }
-        // 只剩已清仓持仓时应移到“未指定”后再删除（#19）；在那之前也拒绝，避免丢失持仓。
-        if (await channelHasAnyPositions(tx, userId, id)) {
-          throw new ChannelError('channel_has_positions', '渠道下还有已清仓持仓，暂不能删除', 409);
+        const [unspecified] = await tx
+          .select({ id: channels.id })
+          .from(channels)
+          .where(and(eq(channels.userId, userId), eq(channels.name, '未指定')));
+        if (!unspecified) throw new Error('用户缺少“未指定”渠道');
+        const source = await tx
+          .select({ fundCode: positions.fundCode })
+          .from(positions)
+          .where(and(eq(positions.userId, userId), eq(positions.channelId, id)));
+        const target = await tx
+          .select({ fundCode: positions.fundCode })
+          .from(positions)
+          .where(and(eq(positions.userId, userId), eq(positions.channelId, unspecified.id)));
+        const targetFunds = new Set(target.map((row) => row.fundCode));
+        if (source.some((row) => targetFunds.has(row.fundCode))) {
+          throw new ChannelError(
+            'channel_position_conflict',
+            '“未指定”已有同基金持仓，无法迁移已清仓历史',
+            409,
+          );
         }
+        await tx
+          .update(positions)
+          .set({ channelId: unspecified.id })
+          .where(and(eq(positions.userId, userId), eq(positions.channelId, id)));
         await tx.delete(channels).where(and(eq(channels.userId, userId), eq(channels.id, id)));
       });
     },

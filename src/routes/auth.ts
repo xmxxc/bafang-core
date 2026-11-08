@@ -120,7 +120,11 @@ export const bindCodeGenerateRoute = createRoute({
     403: { description: 'bind_code_web_required：需要网页会话', content: errorContent },
     429: { description: 'rate_limited：请求过于频繁', content: errorContent },
     500: { description: '内部错误', content: errorContent },
-    503: { description: 'database_unavailable：数据库不可用', content: errorContent },
+    503: {
+      description:
+        'database_unavailable：数据库不可用；bind_code_not_configured：绑定码功能未配置；bind_code_unavailable：绑定码暂时无法生成',
+      content: errorContent,
+    },
   },
 });
 
@@ -140,7 +144,7 @@ export const wechatBindCodeRoute = createRoute({
   tags: ['auth'],
   summary: '用微信登录凭据消费绑定码',
   description:
-    '提交 wx.login 凭据与绑定码。微信 code2session、绑定码消费、登录方式关联和小程序会话创建在同一数据库事务边界内完成；成功返回与微信登录一致的小程序会话。IP 每分钟最多 5 次，成功与失败均计数。',
+    '提交 wx.login 凭据与绑定码。网络 code2session 交换完成后，绑定码消费、登录方式关联和小程序会话创建在同一数据库事务边界内完成；成功返回与微信登录一致的小程序会话。IP 每分钟最多 5 次，并有按 openid 每 24 小时 10 次、全站每小时 300 次的持久化失败预算。',
   request: {
     body: {
       required: true,
@@ -166,7 +170,8 @@ export const wechatBindCodeRoute = createRoute({
     500: { description: '内部错误', content: errorContent },
     502: { description: 'wechat_unavailable：微信暂不可用', content: errorContent },
     503: {
-      description: 'wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用',
+      description:
+        'wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用；bind_code_not_configured：绑定码功能未配置',
       content: errorContent,
     },
   },

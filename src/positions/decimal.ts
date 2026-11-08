@@ -46,6 +46,11 @@ export function divide(a: Fixed, b: Fixed, scale: number): Fixed {
   return { value: divRound(a.value, b.value * POW10(-exponent)), scale };
 }
 
+export function add(a: Fixed, b: Fixed): Fixed {
+  const scale = Math.max(a.scale, b.scale);
+  return { value: rescale(a, scale).value + rescale(b, scale).value, scale };
+}
+
 export function subtract(a: Fixed, b: Fixed): Fixed {
   const scale = Math.max(a.scale, b.scale);
   return { value: rescale(a, scale).value - rescale(b, scale).value, scale };

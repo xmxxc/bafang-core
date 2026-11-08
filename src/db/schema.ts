@@ -12,6 +12,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 export const appMeta = pgTable('app_meta', {
   key: text('key').primaryKey(),
@@ -88,13 +89,31 @@ export const bindCodes = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     codeHash: text('code_hash').notNull(),
+    active: boolean('active').notNull().default(true),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     usedAt: timestamp('used_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex('bind_codes_code_hash_uidx').on(t.codeHash),
+    uniqueIndex('bind_codes_code_hash_active_uidx')
+      .on(t.codeHash)
+      .where(sql`${t.active}`),
     index('bind_codes_user_created_idx').on(t.userId, t.createdAt),
+  ],
+);
+
+/** 绑定码猜测失败预算；按 openid 和全局窗口持久化，跨进程共享。 */
+export const bindCodeFailures = pgTable(
+  'bind_code_failures',
+  {
+    scope: text('scope').notNull(),
+    key: text('key').notNull(),
+    windowStarted: timestamp('window_started', { withTimezone: true }).notNull(),
+    failures: integer('failures').notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.scope, t.key] }),
+    index('bind_code_failures_window_idx').on(t.windowStarted),
   ],
 );
 
@@ -154,6 +173,10 @@ export const positions = pgTable(
     fundCode: text('fund_code').notNull(),
     shares: numeric('shares', { precision: 24, scale: 4 }).notNull(),
     totalCost: numeric('total_cost', { precision: 24, scale: 2 }).notNull(),
+    realizedGain: numeric('realized_gain', { precision: 24, scale: 2 }).notNull().default('0'),
+    realizedGainCost: numeric('realized_gain_cost', { precision: 24, scale: 2 })
+      .notNull()
+      .default('0'),
     snapshotDate: date('snapshot_date', { mode: 'string' }).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
@@ -164,7 +187,7 @@ export const positions = pgTable(
   ],
 );
 
-/** 交易类型预留减仓及成对调仓；本票仅创建加仓。 */
+/** 交易类型；成对调仓由后续服务创建。 */
 export const tradeType = pgEnum('trade_type', ['buy', 'sell', 'switch_out', 'switch_in']);
 export const tradeStatus = pgEnum('trade_status', ['pending', 'confirmed']);
 
