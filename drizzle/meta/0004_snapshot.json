@@ -1,5 +1,5 @@
 {
-  "id": "e1d45ac7-9126-4462-adfe-44098f6a1fc1",
+  "id": "26305f10-db7f-44d0-873a-92c535f4e92f",
   "prevId": "71c56ba7-5ac4-429e-af07-522eb6d20c05",
   "version": "7",
   "dialect": "postgresql",
@@ -174,6 +174,59 @@
             },
             {
               "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.github_oauth_states": {
+      "name": "github_oauth_states",
+      "schema": "",
+      "columns": {
+        "state_hash": {
+          "name": "state_hash",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "browser_hash": {
+          "name": "browser_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "verifier": {
+          "name": "verifier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {
+        "github_oauth_states_expires_idx": {
+          "name": "github_oauth_states_expires_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -377,17 +430,10 @@
       "name": "trading_holidays",
       "schema": "",
       "columns": {
-        "market": {
-          "name": "market",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'cn'"
-        },
         "date": {
           "name": "date",
           "type": "date",
-          "primaryKey": false,
+          "primaryKey": true,
           "notNull": true
         },
         "name": {
@@ -395,25 +441,11 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "early_close": {
-          "name": "early_close",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {},
       "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "trading_holidays_market_date_pk": {
-          "name": "trading_holidays_market_date_pk",
-          "columns": [
-            "market",
-            "date"
-          ]
-        }
-      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},

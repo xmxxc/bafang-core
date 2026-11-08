@@ -18,6 +18,12 @@ export const EMAIL_CODE_REQUEST_RATE_LIMIT: RateLimitPolicy = { limit: 5, window
 /** 邮箱验证码登录接口对每个客户端 IP 的限流：每分钟 10 次。 */
 export const EMAIL_LOGIN_RATE_LIMIT: RateLimitPolicy = { limit: 10, windowMs: 60_000 };
 
+/** GitHub 发起与回调接口各自按客户端 IP 每分钟最多 10 次。 */
+export const GITHUB_LOGIN_RATE_LIMIT: RateLimitPolicy = { limit: 10, windowMs: 60_000 };
+
+/** 微信小程序登录按客户端 IP 每分钟最多 10 次。 */
+export const WECHAT_LOGIN_RATE_LIMIT: RateLimitPolicy = { limit: 10, windowMs: 60_000 };
+
 interface Bucket {
   windowStart: number;
   count: number;

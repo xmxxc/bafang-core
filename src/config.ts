@@ -18,6 +18,12 @@ const EnvSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   /** Resend 发信人地址；配置 RESEND_API_KEY 时必须同时配置。 */
   RESEND_FROM: z.string().optional(),
+  GITHUB_CLIENT_ID: z.string().optional(),
+  GITHUB_CLIENT_SECRET: z.string().optional(),
+  GITHUB_CALLBACK_URL: z.string().optional(),
+  GITHUB_LOGIN_REDIRECT_URL: z.string().optional(),
+  WECHAT_APP_ID: z.string().optional(),
+  WECHAT_APP_SECRET: z.string().optional(),
 });
 
 export type Config = z.infer<typeof EnvSchema>;

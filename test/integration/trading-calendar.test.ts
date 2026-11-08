@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/app';
 import { createHealthProbe } from '../../src/db';
 import type { MarketStatusResponse } from '../../src/routes/market-status';
@@ -12,6 +12,9 @@ import { loadHongKongTradingCalendar, loadTradingCalendar } from '../../src/trad
 import type { MarketIndicesResponse } from '../../src/routes/market-indices';
 import { quoteSamples, RecordedUpstream } from '../support/recorded-upstream';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
+
+// 双份全量测试并发时，CLI 用例实测最慢约 6.5 秒；取 2 倍余量并向上取整。
+vi.setConfig({ testTimeout: 15_000 });
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
 
