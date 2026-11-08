@@ -64,6 +64,13 @@
       "when": 1794119971932,
       "tag": "0008_regular_scrambler",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794123117197,
+      "tag": "0009_solid_shatterstar",
+      "breakpoints": true
     }
   ]
 }

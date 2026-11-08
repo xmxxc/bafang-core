@@ -1,8 +1,10 @@
 import {
+  boolean,
   date,
   index,
   integer,
   numeric,
+  pgEnum,
   pgTable,
   primaryKey,
   text,
@@ -140,6 +142,43 @@ export const positions = pgTable(
   (t) => [
     index('positions_user_channel_idx').on(t.userId, t.channelId),
     uniqueIndex('positions_user_fund_channel_uidx').on(t.userId, t.fundCode, t.channelId),
+  ],
+);
+
+/** 交易类型预留减仓及成对调仓；本票仅创建加仓。 */
+export const tradeType = pgEnum('trade_type', ['buy', 'sell', 'switch_out', 'switch_in']);
+export const tradeStatus = pgEnum('trade_status', ['pending', 'confirmed']);
+
+/** 交易保存提交时的日期推算结果；确认前不更改持仓快照。撤销即删除。 */
+export const trades = pgTable(
+  'trades',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    positionId: uuid('position_id')
+      .notNull()
+      .references(() => positions.id, { onDelete: 'cascade' }),
+    type: tradeType('type').notNull(),
+    status: tradeStatus('status').notNull().default('pending'),
+    submittedDate: date('submitted_date', { mode: 'string' }).notNull(),
+    beforeCutoff: boolean('before_cutoff').notNull(),
+    applicationDate: date('application_date', { mode: 'string' }).notNull(),
+    settlementDate: date('settlement_date', { mode: 'string' }).notNull(),
+    // 加仓按金额，减仓按份额；确认任务可回填另一项及确认结果。
+    amount: numeric('amount', { precision: 24, scale: 2 }),
+    shares: numeric('shares', { precision: 24, scale: 4 }),
+    // 比值（0.0015 = 0.15%），最多 6 位小数，HTTP 限制为 0–1。
+    feeRate: numeric('fee_rate', { precision: 9, scale: 6 }).notNull(),
+    confirmedNav: numeric('confirmed_nav', { precision: 24, scale: 4 }),
+    confirmedShares: numeric('confirmed_shares', { precision: 24, scale: 4 }),
+    switchId: uuid('switch_id'),
+    // 不限长度，后续可保存访问令牌名。
+    source: text('source').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('trades_position_created_idx').on(t.positionId, t.createdAt, t.id),
+    index('trades_status_settlement_idx').on(t.status, t.settlementDate),
+    index('trades_switch_idx').on(t.switchId),
   ],
 );
 

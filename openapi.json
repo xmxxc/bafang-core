@@ -87,7 +87,8 @@
                   "login_method_type_conflict",
                   "login_method_last",
                   "login_method_not_found",
-                  "position_exists"
+                  "position_exists",
+                  "trade_not_cancellable"
                 ],
                 "description": "机器可读的错误码"
               },
@@ -619,6 +620,11 @@
             "example": "1000.0000",
             "description": "份额，4 位小数"
           },
+          "pendingAmount": {
+            "type": "string",
+            "example": "100.01",
+            "description": "加仓在途金额合计，2 位小数；不计入份额或成本"
+          },
           "totalCost": {
             "type": "string",
             "example": "1234.56",
@@ -665,6 +671,7 @@
           "fundCode",
           "channelId",
           "shares",
+          "pendingAmount",
           "totalCost",
           "unitPrice",
           "snapshotDate",
@@ -744,6 +751,155 @@
         },
         "required": [
           "shares"
+        ]
+      },
+      "Trade": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "positionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "buy",
+              "sell",
+              "switch_out",
+              "switch_in"
+            ],
+            "description": "加仓、减仓、调仓转出、调仓转入"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "confirmed"
+            ],
+            "description": "在途、已确认"
+          },
+          "submittedDate": {
+            "type": "string",
+            "description": "提交日 YYYY-MM-DD"
+          },
+          "beforeCutoff": {
+            "type": "boolean"
+          },
+          "applicationDate": {
+            "type": "string",
+            "description": "申请所属交易日 YYYY-MM-DD"
+          },
+          "settlementDate": {
+            "type": "string",
+            "description": "预计确认日 YYYY-MM-DD"
+          },
+          "amount": {
+            "type": "string",
+            "nullable": true,
+            "description": "金额，2 位小数；未有金额时为 null"
+          },
+          "shares": {
+            "type": "string",
+            "nullable": true,
+            "description": "申请份额，4 位小数；按金额加仓时为 null"
+          },
+          "feeRate": {
+            "type": "string",
+            "description": "费率比值，6 位小数"
+          },
+          "confirmedNav": {
+            "type": "string",
+            "nullable": true,
+            "description": "确认净值，4 位小数；在途为 null"
+          },
+          "confirmedShares": {
+            "type": "string",
+            "nullable": true,
+            "description": "确认份额，4 位小数；在途为 null"
+          },
+          "switchId": {
+            "type": "string",
+            "nullable": true,
+            "format": "uuid",
+            "description": "调仓关联 id；非调仓为 null"
+          },
+          "source": {
+            "type": "string",
+            "description": "来源；P1 为 web，后续可保存访问令牌名"
+          }
+        },
+        "required": [
+          "id",
+          "positionId",
+          "type",
+          "status",
+          "submittedDate",
+          "beforeCutoff",
+          "applicationDate",
+          "settlementDate",
+          "amount",
+          "shares",
+          "feeRate",
+          "confirmedNav",
+          "confirmedShares",
+          "switchId",
+          "source"
+        ]
+      },
+      "BuyTradeCreate": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "buy"
+            ],
+            "description": "加仓"
+          },
+          "amount": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,2})?$",
+            "example": "100.01",
+            "description": "加仓金额，必须大于 0，最多 2 位小数"
+          },
+          "feeRate": {
+            "type": "string",
+            "pattern": "^(0(\\.\\d{1,6})?|1(\\.0{1,6})?)$",
+            "example": "0.0015",
+            "description": "买入费率比值，0–1，最多 6 位小数；0.0015 表示 0.15%"
+          },
+          "submittedDate": {
+            "type": "string",
+            "format": "date",
+            "description": "提交日 YYYY-MM-DD；省略为上海今天，填写时必须同时提供 beforeCutoff"
+          },
+          "beforeCutoff": {
+            "type": "boolean",
+            "description": "是否在 15:00 前；false 含 15:00 整。省略时按当前上海时间判断"
+          }
+        },
+        "required": [
+          "type",
+          "amount",
+          "feeRate"
+        ]
+      },
+      "TradeList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Trade"
+            }
+          }
+        },
+        "required": [
+          "items"
         ]
       },
       "EmailCodeRequestResult": {
@@ -2336,7 +2492,7 @@
           "positions"
         ],
         "summary": "彻底删除一笔持仓",
-        "description": "需要登录，删除持仓连同它的交易（交易由 #17 起以外键级联删除）。",
+        "description": "需要登录，删除持仓连同它的交易（交易以外键级联删除）。",
         "parameters": [
           {
             "schema": {
@@ -2376,6 +2532,312 @@
           },
           "404": {
             "description": "持仓不存在（包含别人的持仓）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/positions/{id}/trades": {
+      "post": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "trades"
+        ],
+        "summary": "提交加仓交易",
+        "description": "按提交日期、15:00 截止点与基金 T+N/交易日历返回预计确认日。在途不改变持仓份额或成本。此接口每次调用创建一笔交易，重试可能重复记录。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "持仓 id"
+            },
+            "required": true,
+            "description": "持仓 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BuyTradeCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "已提交，在途",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Trade"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：未登录或会话失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：持仓不存在（含别人的）；fund_not_found：基金不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "upstream_unavailable：基金规则上游不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "trades"
+        ],
+        "summary": "查看持仓交易记录",
+        "description": "仅能查看自己的持仓；按创建先后排序，同一时刻按交易 id 排序。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "持仓 id"
+            },
+            "required": true,
+            "description": "持仓 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "交易列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TradeList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：未登录或会话失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：持仓或交易不存在（含别人的）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/positions/{id}/trades/{tradeId}": {
+      "delete": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "trades"
+        ],
+        "summary": "撤销在途交易",
+        "description": "按上海日期判断：仅确认日前且仍为在途的交易可撤销；撤销即删除。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "持仓 id"
+            },
+            "required": true,
+            "description": "持仓 id",
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "tradeId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已撤销并删除"
+          },
+          "400": {
+            "description": "validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：未登录或会话失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：持仓或交易不存在（含别人的）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "trade_not_cancellable：已到确认日或已确认，不能撤销",
             "content": {
               "application/json": {
                 "schema": {
