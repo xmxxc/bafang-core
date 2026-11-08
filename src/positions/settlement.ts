@@ -17,6 +17,7 @@ import {
 
 const CALCULATION_SCALE = 18;
 export const SETTLEMENT_RUN_MINUTES = 21 * 60 + 30;
+export const DEFAULT_SETTLEMENT_RUN_MINUTES = [21 * 60 + 30, 22 * 60 + 30, 23 * 60 + 30] as const;
 const SCHEDULER_INTERVAL_MS = 60_000;
 
 export interface SettlementFailure {
@@ -33,6 +34,12 @@ export interface SettlementSummary {
 
 export interface SettlementJob {
   run(): Promise<SettlementSummary>;
+}
+
+export interface SettlementScheduler {
+  (): void;
+  stop(): void;
+  tick(): Promise<void>;
 }
 
 interface Candidate {
@@ -260,34 +267,65 @@ export function createSettlementJob(deps: {
 export function startSettlementScheduler(
   job: SettlementJob,
   deps: { clock: Clock; calendar: TradingCalendar },
-  options: { intervalMs?: number; runMinutes?: number } = {},
-): () => void {
+  options: {
+    intervalMs?: number;
+    runMinutes?: number | readonly number[];
+    autoStart?: boolean;
+  } = {},
+): SettlementScheduler {
   const intervalMs = options.intervalMs ?? SCHEDULER_INTERVAL_MS;
-  const runMinutes = options.runMinutes ?? SETTLEMENT_RUN_MINUTES;
-  let lastRunDate: string | null = null;
+  const runMinutes = [
+    ...(Array.isArray(options.runMinutes)
+      ? options.runMinutes
+      : options.runMinutes === undefined
+        ? DEFAULT_SETTLEMENT_RUN_MINUTES
+        : [options.runMinutes]),
+  ].sort((a, b) => a - b);
+  let currentDate: string | null = null;
+  const handledRounds = new Set<string>();
   let stopped = false;
-  const tick = async () => {
+  const tick = async (): Promise<void> => {
     if (stopped) return;
     const now = deps.clock.now();
     const date = shanghaiDate(now);
-    if (
-      deps.calendar.isTradingDay(now) &&
-      shanghaiMinutesOfDay(now) >= runMinutes &&
-      lastRunDate !== date
-    ) {
-      lastRunDate = date;
+    const minutes = shanghaiMinutesOfDay(now);
+    if (date !== currentDate) {
+      currentDate = date;
+      for (const key of handledRounds) {
+        if (!key.startsWith(`${date}:`)) handledRounds.delete(key);
+      }
+      // Starting after a round does not backfill that round. Later rounds still run.
+      for (const round of runMinutes) {
+        if (round < minutes) handledRounds.add(`${date}:${round}`);
+      }
+    }
+    if (!deps.calendar.isTradingDay(now)) return;
+    const round = runMinutes.find(
+      (candidate) => candidate <= minutes && !handledRounds.has(`${date}:${candidate}`),
+    );
+    if (round !== undefined) {
+      handledRounds.add(`${date}:${round}`);
       try {
         const summary = await job.run();
-        console.log('[bafang-core] trade settlement', JSON.stringify(summary));
+        console.log(
+          '[bafang-core] trade settlement',
+          JSON.stringify({ round: `${date} ${formatMinutes(round)}`, ...summary }),
+        );
       } catch (error) {
         console.error('[bafang-core] trade settlement failed', error);
       }
     }
   };
   const timer = setInterval(() => void tick(), intervalMs);
-  void tick();
-  return () => {
+  const stop = () => {
     stopped = true;
     clearInterval(timer);
   };
+  const scheduler = Object.assign(stop, { stop, tick }) as SettlementScheduler;
+  if (options.autoStart !== false) void tick();
+  return scheduler;
+}
+
+function formatMinutes(minutes: number): string {
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
 }

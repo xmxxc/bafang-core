@@ -239,4 +239,321 @@ describe('binding codes over HTTP', () => {
     );
     expect(errors[0]).toMatchObject({ error: { code: 'bind_code_used' } });
   });
+
+  it.each([undefined, '', '  '])(
+    'fails closed with production secret %j and accepts an explicit secret',
+    async (secret) => {
+      const originalNodeEnv = process.env.NODE_ENV;
+      const originalSecret = process.env.BIND_CODE_SECRET;
+      try {
+        process.env.NODE_ENV = 'production';
+        if (secret === undefined) delete process.env.BIND_CODE_SECRET;
+        else process.env.BIND_CODE_SECRET = secret;
+        const missing = app();
+        const web = await webLogin(missing, 'production-missing@example.com');
+        const generated = await missing.request('/v1/auth/bind-code', {
+          method: 'POST',
+          headers: { Cookie: web },
+        });
+        expect(generated.status).toBe(503);
+        expect((await generated.json()) as object).toMatchObject({
+          error: { code: 'bind_code_not_configured' },
+        });
+        const submitted = await missing.request('/v1/auth/wechat/bind', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: 'production-missing', bindCode: '000000' }),
+        });
+        expect(submitted.status).toBe(503);
+        expect((await submitted.json()) as object).toMatchObject({
+          error: { code: 'bind_code_not_configured' },
+        });
+
+        process.env.BIND_CODE_SECRET = 'production-only-secret';
+        const configured = app();
+        const configuredWeb = await webLogin(configured, 'production-configured@example.com');
+        const configuredResult = await configured.request('/v1/auth/bind-code', {
+          method: 'POST',
+          headers: { Cookie: configuredWeb },
+        });
+        expect(configuredResult.status).toBe(201);
+        const { code } = (await configuredResult.json()) as { code: string };
+        expect(
+          (
+            await configured.request('/v1/auth/wechat/bind', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ code: 'configured', bindCode: code }),
+            })
+          ).status,
+        ).toBe(200);
+      } finally {
+        if (originalNodeEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = originalNodeEnv;
+        if (originalSecret === undefined) delete process.env.BIND_CODE_SECRET;
+        else process.env.BIND_CODE_SECRET = originalSecret;
+      }
+    },
+  );
+
+  it('enforces persistent openid and global failure budgets across client IPs', async () => {
+    const target = app({
+      wechat: {
+        async openid(code: string) {
+          return code === 'same-openid' ? 'openid-budget' : `openid-${code}`;
+        },
+      },
+    });
+    const otherInstance = app({
+      wechat: {
+        async openid(code) {
+          return code === 'same-openid' ? 'openid-budget' : `openid-${code}`;
+        },
+      },
+    });
+    let requests = 0;
+    const attempt = (code: string, bindCode: string, ip: string) =>
+      (requests++ % 2 ? target : otherInstance).request('/v1/auth/wechat/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': ip },
+        body: JSON.stringify({ code, bindCode }),
+      });
+    for (let i = 0; i < 10; i += 1)
+      expect((await attempt('same-openid', '000000', `192.0.2.${i + 1}`)).status).toBe(400);
+    for (let i = 11; i <= 20; i += 1) {
+      expect((await attempt('same-openid', '000000', `192.0.2.${i}`)).status).toBe(429);
+    }
+    offsetMs = 24 * 60 * 60 * 1000 + 1;
+    expect((await attempt('same-openid', '000000', '192.0.2.21')).status).toBe(400);
+
+    for (let i = 0; i < 298; i += 1)
+      expect((await attempt(`global-${i}`, '000000', `198.51.100.${i + 1}`)).status).toBe(400);
+    expect((await attempt('global-limit', '000000', '198.51.100.300')).status).toBe(400);
+    const globalLimited = await attempt('global-after', '000000', '203.0.113.1');
+    expect(globalLimited.status).toBe(429);
+    const cookie = await webLogin(target, 'global-budget-valid@example.com');
+    const generate = async () => {
+      const response = await target.request('/v1/auth/bind-code', {
+        method: 'POST',
+        headers: { Cookie: cookie },
+      });
+      expect(response.status).toBe(201);
+      return ((await response.json()) as { code: string }).code;
+    };
+    const validCode = await generate();
+    expect((await attempt('global-valid', validCode, '203.0.113.3')).status).toBe(429);
+    offsetMs += 60 * 60 * 1000 + 1;
+    const freshCode = await generate();
+    expect((await attempt('global-valid', freshCode, '203.0.113.4')).status).toBe(200);
+    expect((await attempt('global-recovered', '000000', '203.0.113.2')).status).toBe(400);
+  });
+
+  it('retries active-code collisions and permits reuse of expired or used historical values', async () => {
+    const target = app({ bindCodeGenerator: () => '123456' });
+    const first = await webLogin(target, 'collision-first@example.com');
+    const firstCode = await target.request('/v1/auth/bind-code', {
+      method: 'POST',
+      headers: { Cookie: first, 'X-Forwarded-For': '192.0.2.101' },
+    });
+    expect(firstCode.status).toBe(201);
+
+    const second = await webLogin(target, 'collision-second@example.com');
+    const activeCollision = await target.request('/v1/auth/bind-code', {
+      method: 'POST',
+      headers: { Cookie: second, 'X-Forwarded-For': '192.0.2.102' },
+    });
+    expect(activeCollision.status).toBe(503);
+    expect((await activeCollision.json()) as object).toMatchObject({
+      error: { code: 'bind_code_unavailable' },
+    });
+
+    offsetMs = 10 * 60 * 1000 + 1;
+    const expiredCollision = await target.request('/v1/auth/bind-code', {
+      method: 'POST',
+      headers: { Cookie: second, 'X-Forwarded-For': '192.0.2.103' },
+    });
+    expect(expiredCollision.status).toBe(201);
+    const consumed = await target.request('/v1/auth/wechat/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '192.0.2.104' },
+      body: JSON.stringify({ code: 'historical-used', bindCode: '123456' }),
+    });
+    expect(consumed.status).toBe(200);
+    const consumedBody = (await consumed.json()) as { user: { id: string } };
+    const secondUser = (await (
+      await target.request('/v1/me', { headers: { Cookie: second } })
+    ).json()) as { user: { id: string } };
+    expect(consumedBody.user.id).toBe(secondUser.user.id);
+
+    const third = await webLogin(target, 'collision-third@example.com');
+    const usedCollision = await target.request('/v1/auth/bind-code', {
+      method: 'POST',
+      headers: { Cookie: third, 'X-Forwarded-For': '192.0.2.105' },
+    });
+    expect(usedCollision.status).toBe(201);
+  });
+
+  it('retries a collision with a fresh value and keeps ownership unambiguous', async () => {
+    const candidates = ['123456', '123456', '654321'];
+    const target = app({ bindCodeGenerator: () => candidates.shift()! });
+    const first = await webLogin(target, 'retry-first@example.com');
+    const second = await webLogin(target, 'retry-second@example.com');
+    const generate = (cookie: string) =>
+      target.request('/v1/auth/bind-code', { method: 'POST', headers: { Cookie: cookie } });
+    expect((await generate(first)).status).toBe(201);
+    const retry = await generate(second);
+    expect(retry.status).toBe(201);
+    expect(await retry.json()).toMatchObject({ code: '654321' });
+    const response = await target.request('/v1/auth/wechat/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: 'retry', bindCode: '654321' }),
+    });
+    const secondMe = await target.request('/v1/me', { headers: { Cookie: second } });
+    expect(await response.json()).toMatchObject({
+      user: ((await secondMe.json()) as { user: { id: string } }).user,
+    });
+  });
+
+  it('retries collisions with its own active code and preserves it when all five candidates collide', async () => {
+    let candidate = '123456';
+    const target = app({ bindCodeGenerator: () => candidate });
+    const cookie = await webLogin(target, 'own-collision@example.com');
+    const generate = () =>
+      target.request('/v1/auth/bind-code', { method: 'POST', headers: { Cookie: cookie } });
+    expect((await generate()).status).toBe(201);
+    offsetMs += 1000;
+    const exhausted = await generate();
+    expect(exhausted.status).toBe(503);
+    expect(await exhausted.json()).toMatchObject({ error: { code: 'bind_code_unavailable' } });
+    const oldCodeStillWorks = await target.request('/v1/auth/wechat/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: 'own-collision', bindCode: '123456' }),
+    });
+    expect(oldCodeStillWorks.status).toBe(200);
+    candidate = '654321';
+    const fresh = await generate();
+    expect(fresh.status).toBe(201);
+    expect(await fresh.json()).toMatchObject({ code: '654321' });
+  });
+
+  it('retries its own active code with a fresh candidate and invalidates the previous code', async () => {
+    const candidates = ['123456', '123456', '654321'];
+    const target = app({ bindCodeGenerator: () => candidates.shift()! });
+    const cookie = await webLogin(target, 'own-retry@example.com');
+    const generate = () =>
+      target.request('/v1/auth/bind-code', { method: 'POST', headers: { Cookie: cookie } });
+    expect((await generate()).status).toBe(201);
+    const next = await generate();
+    expect(next.status).toBe(201);
+    expect(await next.json()).toMatchObject({ code: '654321' });
+    const submit = (bindCode: string) =>
+      target.request('/v1/auth/wechat/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: 'own-retry', bindCode }),
+      });
+    const old = await submit('123456');
+    expect(old.status).toBe(400);
+    expect(await old.json()).toMatchObject({ error: { code: 'bind_code_used' } });
+    expect((await submit('654321')).status).toBe(200);
+  });
+
+  it('does not reset failure budgets after success, blocks valid codes at the limit and recovers', async () => {
+    const target = app({ bindCodeGenerator: () => '123456' });
+    const cookie = await webLogin(target, 'failure-success@example.com');
+    const generate = () =>
+      target.request('/v1/auth/bind-code', { method: 'POST', headers: { Cookie: cookie } });
+    let ip = 1;
+    const submit = (bindCode: string) =>
+      target.request('/v1/auth/wechat/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': `192.0.2.${ip++}` },
+        body: JSON.stringify({ code: 'stable-identity', bindCode }),
+      });
+    for (let i = 0; i < 9; i++) expect((await submit('000000')).status).toBe(400);
+    expect((await generate()).status).toBe(201);
+    expect((await submit('123456')).status).toBe(200);
+    expect((await submit('000000')).status).toBe(400);
+    expect((await generate()).status).toBe(201);
+    expect((await submit('123456')).status).toBe(429);
+    offsetMs += 24 * 60 * 60 * 1000 + 1;
+    expect((await generate()).status).toBe(201);
+    expect((await submit('123456')).status).toBe(200);
+  });
+
+  it('serializes generation with paused consumption after the user rows are locked', async () => {
+    let resume!: () => void;
+    let entered!: () => void;
+    const paused = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      resume = resolve;
+    });
+    let candidate = 100000;
+    const target = app({
+      bindCodeGenerator: () => String(candidate++),
+      hasUserPositions: async () => {
+        entered();
+        await gate;
+        return false;
+      },
+    });
+    const cookie = await webLogin(target, 'lock-order@example.com');
+    const generated = await target.request('/v1/auth/bind-code', {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    });
+    const bindCode = ((await generated.json()) as { code: string }).code;
+    await miniLogin(target, 'lock-owner');
+    const consume = target.request('/v1/auth/wechat/bind', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: 'lock-owner', bindCode }),
+    });
+    await paused;
+    const regenerate = target.request('/v1/auth/bind-code', {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    });
+    try {
+      // Give the generator time to reach its user lock while consumption is paused.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      resume();
+    }
+    const [consumed, regenerated] = await Promise.all([consume, regenerate]);
+    expect(consumed.status).toBe(200);
+    expect(regenerated.status).toBe(201);
+    const me = await target.request('/v1/me', { headers: { Cookie: cookie } });
+    expect(await me.json()).toMatchObject({
+      loginMethods: expect.arrayContaining([{ type: 'wechat', externalId: 'openid-lock-owner' }]),
+    });
+  });
+  it('limits historical error recognition to 24 hours and cleans history when generating', async () => {
+    let candidate = '123456';
+    const target = app({ bindCodeGenerator: () => candidate });
+    const cookie = await webLogin(target, 'retention@example.com');
+    expect(
+      (await target.request('/v1/auth/bind-code', { method: 'POST', headers: { Cookie: cookie } }))
+        .status,
+    ).toBe(201);
+    offsetMs = 10 * 60 * 1000;
+    const submit = () =>
+      target.request('/v1/auth/wechat/bind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: 'retention', bindCode: '123456' }),
+      });
+    expect(await (await submit()).json()).toMatchObject({ error: { code: 'bind_code_expired' } });
+    offsetMs = 24 * 60 * 60 * 1000 + 1;
+    candidate = '654321';
+    expect(
+      (await target.request('/v1/auth/bind-code', { method: 'POST', headers: { Cookie: cookie } }))
+        .status,
+    ).toBe(201);
+    expect(await (await submit()).json()).toMatchObject({ error: { code: 'bind_code_invalid' } });
+  });
 });

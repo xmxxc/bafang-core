@@ -37,6 +37,8 @@ export const ErrorCodeSchema = z.enum([
   'bind_code_expired',
   'bind_code_used',
   'bind_code_invalid',
+  'bind_code_not_configured',
+  'bind_code_unavailable',
 ]);
 
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;

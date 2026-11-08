@@ -76,8 +76,11 @@ docker compose up -d
 ### 绑定码
 
 - 已登录的网页会话调用 `POST /v1/auth/bind-code` 生成 6 位数字绑定码；有效期 10 分钟，同一用户再次生成会作废旧码。小程序会话调用该接口返回 403 `bind_code_web_required`。生成接口按 IP 每分钟最多 5 次。
-- glance 将 `wx.login` 凭据和绑定码提交到 `POST /v1/auth/wechat/bind`，请求体为 `{ "code": "wx.login 的 code", "bindCode": "123456" }`（也接受 `wechatCode` 字段）。微信 code2session 后，绑定码消费、微信登录方式关联和小程序会话创建在同一事务内完成；返回形状与微信登录一致。
-- 绑定码只存服务端密钥 HMAC，数据库泄露不能直接拿明文码使用。不存在、过期、已使用分别返回 `bind_code_invalid`、`bind_code_expired`、`bind_code_used`；提交入口按 IP 每分钟最多 5 次，成功与失败都计数。
+- glance 将 `wx.login` 凭据和绑定码提交到 `POST /v1/auth/wechat/bind`，请求体为 `{ "code": "wx.login 的 code", "bindCode": "123456" }`（也接受 `wechatCode` 字段）。网络 code2session 交换完成后，绑定码消费、微信登录方式关联和小程序会话创建在同一数据库事务内完成；返回形状与微信登录一致。
+- 绑定码只存服务端密钥 HMAC，数据库泄露不能直接拿明文码使用。生产环境缺少 `BIND_CODE_SECRET` 时绑定码能力返回 503 `bind_code_not_configured`；只有明确的 development/test 环境使用开发默认值。不存在、过期、已使用分别返回 `bind_code_invalid`、`bind_code_expired`、`bind_code_used`；提交入口按 IP 每分钟最多 5 次，成功与失败都计数。
+- 除 IP 限流外，数据库持久化两层失败预算：同一 openid 每 24 小时最多 10 次失败，全站每小时最多 300 次失败，达到后返回 429 `rate_limited`，窗口滚动后恢复。失败只统计不存在、过期、已使用；成功不清零计数。策略数值集中在 `src/config.ts` 的 `BIND_CODE_POLICY`。绑定码空间为 10⁶，同时有 N 个有效码、猜测 m 次时命中任意一个的条件概率约为 `1-(1-N/10⁶)^m`；单个有效码下，每身份 10 次约 0.001%，全站 300 次约 0.03%。若同时有 100 个有效码，全站 300 次约 2.96%。码仅有效 10 分钟，上述按整段预算都集中在有效期内估算；IP、身份和全站三层共同限制分散猜测。
+- 有效码用部分唯一索引保证唯一；与任一有效码碰撞（包括自己的旧码）最多抽取 5 次，耗尽返回 503 `bind_code_unavailable`，原码保持可用。已使用或过期的历史码允许重用；查找优先有效码，否则按创建时间倒序、同时间按 id 倒序取一条历史记录判定错误。历史只用于创建后 24 小时内的错误识别，超过后返回不存在，并在下一次成功生成时清理。
+- 锁顺序：提交先按“全局预算 → openid 预算”锁住预算行，之后生成与提交均遵守“绑定码身份锁 → 微信身份锁（提交）→ 用户行按 id 升序 FOR UPDATE → 绑定码行”。生成清理或退役历史时也先锁相关用户行。提交在用户锁内重新校验码；作废竞态通过 SAVEPOINT 回滚关联与会话，同时保留失败预算。
 - 关联复用登录方式的身份锁与冲突规则：空用户自动转移并删除，有持仓用户返回 `login_method_conflict`，当前用户已有其他微信返回 `login_method_type_conflict`，已是当前用户的微信幂等成功。迁移为 `0010`。
 
 ### 登录方式管理
@@ -181,7 +184,7 @@ docker compose up -d
 ### 交易确认任务
 
 - `app.runSettlement()` 是进程内确认入口，返回 `{ confirmed, pending, failed, failures }` 摘要；任务只用申请交易日的已公布净值，净值缺失时保持在途，单笔行情或数据错误会记录在 `failures` 中并继续处理其他交易。
-- 服务入口在每个交易日上海时间 21:30 注册定时补跑；进程重启后的补跑由状态条件更新和下一次任务运行保证幂等。需要手动补跑时执行 `pnpm trades:settle`。
+- 服务入口按 `SETTLEMENT_ROUNDS` 在每个交易日上海时间分轮补跑，默认 21:30、22:30、23:30；每个“日期 + 轮次”只触发一次，非交易日不运行。进程在某轮次之后启动不会补跑已错过的轮次，但会在当天下一轮运行；次日第一轮会继续处理前一天仍在途且已到确认日的交易。需要手动补跑时执行 `pnpm trades:settle`。
 - 所有到期交易按申请交易日、创建时间、交易 ID 顺序确认；同日加仓与减仓按创建顺序逐笔使用当前平均成本。某笔缺净值或失败时，同持仓后续交易留在途，其他持仓继续处理。校准保留在途交易；若校准后份额不足以确认减仓，该交易记录失败并保持在途，待修正份额后重跑。
 - 减仓到账金额 = 份额 × 申请交易日净值 ×（1 − 费率）；结转成本 = 当前总成本 × 卖出份额 ÷ 卖出前份额。乘积保留全部定点小数，仅在最终到账金额、结转成本分别舍入到 2 位；已实现收益增加到账金额减结转成本，其成本基数增加结转成本，份额与总成本相应减少。卖光时结转全部剩余成本，总成本严格归零。交易写入到账金额、确认净值及确认份额，与持仓在同一事务中更新，重复运行不重复入账。
 - 加仓份额使用 `(amount - amount × feeRate / (1 + feeRate)) ÷ applicationDateNav`，中间计算保留 18 位定点小数，最后一次舍入到 4 位份额；成本按原始金额舍入到 2 位累加。
@@ -231,7 +234,7 @@ A 股与港股的交易日历都由 core 自己维护：特殊日期按市场、
 
 ## 错误结构
 
-所有错误统一返回 `{ error: { code, message } }`，其中 `code` 是机器可读的错误码、`message` 是人类可读的说明；该结构出现在 OpenAPI 文档的 `Error` schema 中，绑定码接口的错误码包括 `bind_code_web_required`、`bind_code_expired`、`bind_code_used`、`bind_code_invalid`。未捕获的异常由全局处理返回统一的 `internal_error`，诊断详情只留在服务端日志。
+所有错误统一返回 `{ error: { code, message } }`，其中 `code` 是机器可读的错误码、`message` 是人类可读的说明；该结构出现在 OpenAPI 文档的 `Error` schema 中，绑定码接口的错误码包括 `bind_code_web_required`、`bind_code_expired`、`bind_code_used`、`bind_code_invalid`、`bind_code_not_configured`、`bind_code_unavailable`。未捕获的异常由全局处理返回统一的 `internal_error`，诊断详情只留在服务端日志。
 
 ## CI
 

@@ -90,6 +90,8 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'bind_code_expired',
       'bind_code_used',
       'bind_code_invalid',
+      'bind_code_not_configured',
+      'bind_code_unavailable',
     ]);
   });
 
