@@ -16,6 +16,12 @@
         "type": "http",
         "scheme": "bearer",
         "description": "小程序会话令牌"
+      },
+      "QrBrowserCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-bafang_qr",
+        "description": "申请扫码登录票据时设置的临时浏览器凭据"
       }
     },
     "schemas": {
@@ -70,6 +76,12 @@
                   "wechat_not_configured",
                   "wechat_code_invalid",
                   "wechat_unavailable",
+                  "qr_browser_invalid",
+                  "qr_ticket_invalid",
+                  "qr_ticket_expired",
+                  "qr_ticket_used",
+                  "qr_ticket_confirmed",
+                  "qr_miniprogram_required",
                   "github_not_configured",
                   "github_state_invalid",
                   "github_authorization_failed",
@@ -3632,6 +3644,375 @@
           },
           "503": {
             "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/wechat/qr": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "申请扫码登录票据",
+        "description": "匿名申请，返回带票据 scene 的小程序码图片（base64）。默认有效 5 分钟，临时 __Host-bafang_qr Cookie 绑定发起浏览器，在票据到期后额外保留 5 分钟供读取过期状态。IP 每分钟最多 5 次。",
+        "responses": {
+          "201": {
+            "description": "票据已生成",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ticketId": {
+                      "type": "string",
+                      "pattern": "^[A-Za-z0-9_-]{32}$"
+                    },
+                    "expiresAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    },
+                    "image": {
+                      "type": "object",
+                      "properties": {
+                        "contentType": {
+                          "type": "string",
+                          "enum": [
+                            "image/png",
+                            "image/jpeg"
+                          ]
+                        },
+                        "base64": {
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "contentType",
+                        "base64"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "ticketId",
+                    "expiresAt",
+                    "image"
+                  ]
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "wechat_unavailable：小程序码生成失败",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "wechat_not_configured；database_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/wechat/qr/{ticketId}": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "轮询扫码登录票据",
+        "security": [
+          {
+            "QrBrowserCookie": []
+          }
+        ],
+        "description": "必须携带申请时的 __Host-bafang_qr Cookie。pending 待确认，confirmed 首次交付网页会话（同邮箱登录形状，token 为 null，设置会话 Cookie），consumed 已交付，expired 已过期。第一次 confirmed 轮询原子消费票据与创建会话，不可重试获取。IP 每分钟 120 次、每票据每分钟 60 次。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{32}$"
+            },
+            "required": true,
+            "name": "ticketId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "票据状态",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "pending",
+                            "expired",
+                            "consumed"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status"
+                      ]
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/components/schemas/EmailLoginResult"
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "session": {
+                              "allOf": [
+                                {
+                                  "$ref": "#/components/schemas/Session"
+                                },
+                                {
+                                  "type": "object",
+                                  "properties": {
+                                    "device": {
+                                      "type": "string",
+                                      "enum": [
+                                        "web"
+                                      ]
+                                    }
+                                  }
+                                }
+                              ]
+                            },
+                            "token": {
+                              "nullable": true
+                            },
+                            "status": {
+                              "type": "string",
+                              "enum": [
+                                "confirmed"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "status"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "qr_browser_invalid：票据不存在或缺少/错误的浏览器凭据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：轮询过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "wechat_not_configured；database_unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/wechat/qr/{ticketId}/confirm": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "小程序确认扫码登录",
+        "description": "仅 Authorization Bearer 携带的有效小程序会话可确认。一次性操作，并发确认仅一个成功。",
+        "security": [
+          {
+            "SessionBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{32}$"
+            },
+            "required": true,
+            "name": "ticketId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "已确认，网页下一次有效轮询可取会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "confirmed"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error；qr_ticket_expired",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：需要有效的 Bearer 会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "qr_miniprogram_required：需要小程序会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "qr_ticket_invalid：票据不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "qr_ticket_confirmed：已确认；qr_ticket_used：已消费",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "wechat_not_configured；database_unavailable",
             "content": {
               "application/json": {
                 "schema": {

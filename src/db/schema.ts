@@ -215,3 +215,17 @@ export const githubOAuthStates = pgTable(
   },
   (t) => [index('github_oauth_states_expires_idx').on(t.expiresAt)],
 );
+
+/** 扫码登录票据与浏览器凭据只存 SHA-256，确认者删除时票据一并作废。 */
+export const qrLoginTickets = pgTable(
+  'qr_login_tickets',
+  {
+    ticketHash: text('ticket_hash').primaryKey(),
+    browserHash: text('browser_hash').notNull(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('qr_login_tickets_expires_idx').on(t.expiresAt)],
+);

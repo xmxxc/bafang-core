@@ -481,3 +481,97 @@ export const loginMethodDeleteRoute = createRoute({
     503: { description: '数据库不可用', content: errorContent },
   },
 });
+
+const QrTicketIdSchema = z.string().regex(/^[A-Za-z0-9_-]{32}$/);
+export const qrStartRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/wechat/qr',
+  tags: ['auth'],
+  summary: '申请扫码登录票据',
+  description:
+    '匿名申请，返回带票据 scene 的小程序码图片（base64）。默认有效 5 分钟，临时 __Host-bafang_qr Cookie 绑定发起浏览器，在票据到期后额外保留 5 分钟供读取过期状态。IP 每分钟最多 5 次。',
+  responses: {
+    201: {
+      description: '票据已生成',
+      content: {
+        'application/json': {
+          schema: z.object({
+            ticketId: QrTicketIdSchema,
+            expiresAt: z.string().openapi({ format: 'date-time' }),
+            image: z.object({
+              contentType: z.enum(['image/png', 'image/jpeg']),
+              base64: z.string(),
+            }),
+          }),
+        },
+      },
+    },
+    429: { description: 'rate_limited：请求过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    502: { description: 'wechat_unavailable：小程序码生成失败', content: errorContent },
+    503: { description: 'wechat_not_configured；database_unavailable', content: errorContent },
+  },
+});
+export const qrPollRoute = createRoute({
+  method: 'get',
+  path: '/v1/auth/wechat/qr/{ticketId}',
+  tags: ['auth'],
+  summary: '轮询扫码登录票据',
+  security: [{ QrBrowserCookie: [] }],
+  description:
+    '必须携带申请时的 __Host-bafang_qr Cookie。pending 待确认，confirmed 首次交付网页会话（同邮箱登录形状，token 为 null，设置会话 Cookie），consumed 已交付，expired 已过期。第一次 confirmed 轮询原子消费票据与创建会话，不可重试获取。IP 每分钟 120 次、每票据每分钟 60 次。',
+  request: { params: z.object({ ticketId: QrTicketIdSchema }) },
+  responses: {
+    200: {
+      description: '票据状态',
+      content: {
+        'application/json': {
+          schema: z.union([
+            z.object({ status: z.enum(['pending', 'expired', 'consumed']) }),
+            EmailLoginResponseSchema.extend({
+              status: z.literal('confirmed'),
+              session: SessionSchema.extend({ device: z.literal('web') }),
+              token: z.null(),
+            }),
+          ]),
+        },
+      },
+    },
+    400: { description: 'validation_error', content: errorContent },
+    403: {
+      description: 'qr_browser_invalid：票据不存在或缺少/错误的浏览器凭据',
+      content: errorContent,
+    },
+    429: { description: 'rate_limited：轮询过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    503: { description: 'wechat_not_configured；database_unavailable', content: errorContent },
+  },
+});
+
+export const qrConfirmRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/wechat/qr/{ticketId}/confirm',
+  tags: ['auth'],
+  summary: '小程序确认扫码登录',
+  description:
+    '仅 Authorization Bearer 携带的有效小程序会话可确认。一次性操作，并发确认仅一个成功。',
+  security: [{ SessionBearer: [] }],
+  request: { params: z.object({ ticketId: QrTicketIdSchema }) },
+  responses: {
+    200: {
+      description: '已确认，网页下一次有效轮询可取会话',
+      content: { 'application/json': { schema: z.object({ status: z.literal('confirmed') }) } },
+    },
+    400: { description: 'validation_error；qr_ticket_expired', content: errorContent },
+    401: { description: 'unauthorized：需要有效的 Bearer 会话', content: errorContent },
+    403: { description: 'qr_miniprogram_required：需要小程序会话', content: errorContent },
+    404: { description: 'qr_ticket_invalid：票据不存在', content: errorContent },
+    409: {
+      description: 'qr_ticket_confirmed：已确认；qr_ticket_used：已消费',
+      content: errorContent,
+    },
+    429: { description: 'rate_limited：请求过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    503: { description: 'wechat_not_configured；database_unavailable', content: errorContent },
+  },
+});
