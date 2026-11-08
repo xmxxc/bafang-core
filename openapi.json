@@ -2103,7 +2103,7 @@
           "positions"
         ],
         "summary": "查看自己的持仓",
-        "description": "需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓（别人的渠道返回空列表）。",
+        "description": "需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓；渠道不存在或属于别人时返回 404 `not_found`。",
         "parameters": [
           {
             "schema": {
@@ -2140,6 +2140,16 @@
           },
           "401": {
             "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：渠道不存在（包含别人的渠道）",
             "content": {
               "application/json": {
                 "schema": {

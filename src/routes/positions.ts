@@ -96,7 +96,7 @@ export const positionListRoute = createRoute({
   tags: ['positions'],
   summary: '查看自己的持仓',
   description:
-    '需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓（别人的渠道返回空列表）。',
+    '需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓；渠道不存在或属于别人时返回 404 `not_found`。',
   request: {
     query: z.object({
       channelId: z.uuid().toLowerCase().optional().openapi({ description: '按渠道筛选' }),
@@ -108,6 +108,7 @@ export const positionListRoute = createRoute({
       content: { 'application/json': { schema: PositionListSchema } },
     },
     400: { description: '参数不合法', content: errorContent },
+    404: { description: 'not_found：渠道不存在（包含别人的渠道）', content: errorContent },
     ...commonErrors,
   },
 });
