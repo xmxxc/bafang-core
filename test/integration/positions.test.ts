@@ -377,7 +377,15 @@ describe('持仓：建仓快照、校准与持有收益', () => {
 
     const other = await login(app);
     expect(await ids('/v1/positions', other)).toEqual([]);
-    expect(await ids(`/v1/positions?channelId=${first}`, other)).toEqual([]);
+    // 别人的渠道与不存在的渠道都返回 404，不暴露为空列表。
+    for (const [path, as] of [
+      [`/v1/positions?channelId=${first}`, other],
+      [`/v1/positions?channelId=${randomUUID()}`, headers],
+    ] as const) {
+      const response = await app.request(path, { headers: as });
+      expect(response.status).toBe(404);
+      expect(await errorCode(response)).toBe('not_found');
+    }
   });
 
   it('calibrates by overwriting shares and cost, keeping snapshot identity', async () => {

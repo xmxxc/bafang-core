@@ -226,6 +226,15 @@ export function createPositionService(deps: {
 
   return {
     async list(userId, channelId) {
+      if (channelId) {
+        // 与渠道接口一致：不存在或别人的渠道都返回 404，而不是空列表。
+        const [channel] = await deps.db
+          .select({ id: channels.id })
+          .from(channels)
+          .where(and(eq(channels.id, channelId), eq(channels.userId, userId)))
+          .limit(1);
+        if (!channel) throw new PositionError('not_found', '渠道不存在', 404);
+      }
       const rows = await deps.db
         .select()
         .from(positions)

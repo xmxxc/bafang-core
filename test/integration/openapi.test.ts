@@ -92,7 +92,7 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     const list = doc.paths['/v1/positions'];
     const item = doc.paths['/v1/positions/{id}'];
     const expected: [Record<string, unknown> | undefined, string[]][] = [
-      [list?.get?.responses, ['200', '400', '401', '500', '503']],
+      [list?.get?.responses, ['200', '400', '401', '404', '500', '503']],
       [list?.post?.responses, ['201', '400', '401', '404', '409', '500', '502', '503']],
       [item?.get?.responses, ['200', '400', '401', '404', '500', '503']],
       [item?.patch?.responses, ['200', '400', '401', '404', '500', '503']],

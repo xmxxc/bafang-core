@@ -113,13 +113,13 @@ docker compose up -d
 
 需要登录（会话 Cookie 或 `Authorization: Bearer <token>`），只能操作自己的持仓，别人的持仓返回 404 `not_found`。持仓的唯一键是用户 × 基金 × 渠道（ADR 0001）。
 
-| 接口                           | 请求体                                                                   | 成功响应                                                  |
-| ------------------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------- |
-| `GET /v1/positions?channelId=` | —                                                                        | 200 `{ items: [Position] }`，按创建先后；`channelId` 可选 |
-| `GET /v1/positions/{id}`       | —                                                                        | 200 `Position`                                            |
-| `POST /v1/positions`           | `{ fundCode, channelId, shares, totalCost \| unitPrice, snapshotDate? }` | 201 `Position`                                            |
-| `PATCH /v1/positions/{id}`     | `{ shares, totalCost \| unitPrice }`                                     | 200 `Position`（校准，不生成交易）                        |
-| `DELETE /v1/positions/{id}`    | —                                                                        | 204，连同交易一起删除                                     |
+| 接口                           | 请求体                                                                   | 成功响应                                                                                          |
+| ------------------------------ | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| `GET /v1/positions?channelId=` | —                                                                        | 200 `{ items: [Position] }`，按创建先后；`channelId` 可选，渠道不存在或属于别人时 404 `not_found` |
+| `GET /v1/positions/{id}`       | —                                                                        | 200 `Position`                                                                                    |
+| `POST /v1/positions`           | `{ fundCode, channelId, shares, totalCost \| unitPrice, snapshotDate? }` | 201 `Position`                                                                                    |
+| `PATCH /v1/positions/{id}`     | `{ shares, totalCost \| unitPrice }`                                     | 200 `Position`（校准，不生成交易）                                                                |
+| `DELETE /v1/positions/{id}`    | —                                                                        | 204，连同交易一起删除                                                                             |
 
 - 数值一律是十进制字符串（JSON 数字返回 400），计算用 bigint 定点、不经过浮点：份额、单价、净值 4 位，金额 2 位，收益率是比值、4 位。总成本与单价必须且只能填一个；用单价时总成本 = 份额 × 单价，返回的 `unitPrice` 总是总成本 ÷ 份额。降精度一律四舍五入（远离零），与 `src/market/quote.ts` 一致。输入的小数位超过精度时返回 400，不替用户舍入。
 - 新建要求份额大于 0、基金存在（按基金详情校验，不存在返回 404 `fund_not_found`，上游不可用返回 502 `upstream_unavailable`）、渠道是自己的（否则 404 `not_found`）；`snapshotDate` 缺省为当天（上海时间）。同一组合已有持仓返回 409 `position_exists`，由数据库唯一约束保证并发下只成功一个。校准可以把份额改为 0（已清仓）。
