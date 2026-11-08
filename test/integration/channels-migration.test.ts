@@ -1,4 +1,5 @@
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it } from 'vitest';
@@ -6,6 +7,27 @@ import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { EmailLoginResponse } from '../../src/routes/auth';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
+
+async function migrationFolderThrough(maxIdx: number): Promise<string> {
+  const folder = await mkdtemp(join(tmpdir(), `channels-migrations-${maxIdx}-`));
+  const sourceMeta = join(MIGRATIONS_FOLDER, 'meta');
+  await mkdir(join(folder, 'meta'));
+  const journal = JSON.parse(await readFile(join(sourceMeta, '_journal.json'), 'utf8')) as {
+    entries: { idx: number; tag: string }[];
+  };
+  journal.entries = journal.entries.filter((entry) => entry.idx <= maxIdx);
+  await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
+  for (const entry of journal.entries) {
+    await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(folder, `${entry.tag}.sql`));
+  }
+  for (const name of await readdir(sourceMeta)) {
+    if (name.endsWith('.json') && name !== '_journal.json') {
+      const snapshot = Number(name.slice(0, 4));
+      if (snapshot <= maxIdx) await copyFile(join(sourceMeta, name), join(folder, 'meta', name));
+    }
+  }
+  return folder;
+}
 
 it('preserves existing users preset order when upgrading from migration 0003, observed over HTTP', async () => {
   const folder = await mkdtemp(join(tmpdir(), 'channels-migrations-'));
@@ -79,5 +101,40 @@ it('preserves existing users preset order when upgrading from migration 0003, ob
   } finally {
     if (db) await dropTestSchema(db);
     await rm(folder, { recursive: true, force: true });
+  }
+});
+
+it('applies the 0006 unique index when upgrading a schema already migrated through 0005', async () => {
+  const prior = await migrationFolderThrough(5);
+  const db = await createTestSchema(prior);
+  try {
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    const result = await db.pool.query(
+      `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND indexname = 'channels_user_name_uidx'`,
+      [db.schema],
+    );
+    expect(result.rows).toHaveLength(1);
+  } finally {
+    await dropTestSchema(db);
+    await rm(prior, { recursive: true, force: true });
+  }
+});
+
+it('fails clearly instead of silently skipping 0006 when existing data violates its unique index', async () => {
+  const prior = await migrationFolderThrough(5);
+  const db = await createTestSchema(prior);
+  try {
+    const userId = randomUUID();
+    await db.pool.query('INSERT INTO users (id) VALUES ($1)', [userId]);
+    await db.pool.query(
+      'INSERT INTO channels (user_id, name, sort_order) VALUES ($1, $2, $3), ($1, $2, $3)',
+      [userId, '重复渠道', 0],
+    );
+    await expect(migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema)).rejects.toThrow(
+      /channels_user_name_uidx|could not create unique index|duplicate key/i,
+    );
+  } finally {
+    await dropTestSchema(db);
+    await rm(prior, { recursive: true, force: true });
   }
 });
