@@ -489,7 +489,7 @@ describe('持仓：建仓快照、校准与持有收益', () => {
     expect((await create(app, headers, body)).status).toBe(201);
   });
 
-  it('blocks deleting a channel that still holds positions', async () => {
+  it('blocks deletion with active positions and moves cleared history before deleting the channel', async () => {
     const app = makeApp();
     const headers = await login(app);
     const channel = await send(app, headers, 'POST', '/v1/channels', { name: '有持仓渠道' });
@@ -502,17 +502,16 @@ describe('持仓：建仓快照、校准与持有收益', () => {
     expect(open.status).toBe(409);
     expect(await errorCode(open)).toBe('channel_has_positions');
 
-    // 只剩已清仓持仓：#19 之前同样拒绝，持仓不会随渠道被删掉。
+    // 只剩已清仓持仓：迁移到“未指定”，保留详情。
     await send(app, headers, 'PATCH', `/v1/positions/${created.id}`, {
       shares: '0',
       totalCost: '0',
     });
     const cleared = await send(app, headers, 'DELETE', `/v1/channels/${channelId}`);
-    expect(cleared.status).toBe(409);
-    expect(await errorCode(cleared)).toBe('channel_has_positions');
+    expect(cleared.status).toBe(204);
     expect((await app.request(`/v1/positions/${created.id}`, { headers })).status).toBe(200);
 
     expect((await send(app, headers, 'DELETE', `/v1/positions/${created.id}`)).status).toBe(204);
-    expect((await send(app, headers, 'DELETE', `/v1/channels/${channelId}`)).status).toBe(204);
+    expect((await send(app, headers, 'DELETE', `/v1/channels/${channelId}`)).status).toBe(404);
   });
 });

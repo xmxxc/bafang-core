@@ -4,7 +4,16 @@ import { positions, trades, users } from '../db/schema';
 import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { LatestNav, NavPoint, NavService } from '../market/nav';
 import type { TradingCalendar } from '../trading-calendar';
-import { divide, fixedFromDb, formatFixed, parseFixed, type Fixed } from './decimal';
+import {
+  add,
+  divide,
+  fixedFromDb,
+  formatFixed,
+  multiply,
+  parseFixed,
+  subtract,
+  type Fixed,
+} from './decimal';
 
 const CALCULATION_SCALE = 18;
 export const SETTLEMENT_RUN_MINUTES = 21 * 60 + 30;
@@ -42,13 +51,6 @@ interface Candidate {
   feeRate: string;
   fundCode: string;
   userId: string;
-}
-
-function add(a: Fixed, b: Fixed): Fixed {
-  const scale = Math.max(a.scale, b.scale);
-  const left = fixedFromDb(formatFixed(a), scale).value;
-  const right = fixedFromDb(formatFixed(b), scale).value;
-  return { value: left + right, scale };
 }
 
 function exactNav(
@@ -114,7 +116,7 @@ export function createSettlementJob(deps: {
       .from(trades)
       .innerJoin(positions, eq(positions.id, trades.positionId))
       .where(and(eq(trades.status, 'pending'), lte(trades.settlementDate, today)))
-      .orderBy(asc(trades.settlementDate), asc(trades.createdAt), asc(trades.id));
+      .orderBy(asc(trades.applicationDate), asc(trades.createdAt), asc(trades.id));
   }
 
   async function confirm(candidate: Candidate, navPoint: NavPoint): Promise<boolean> {
@@ -129,6 +131,8 @@ export function createSettlementJob(deps: {
       const [trade] = await tx
         .select({
           id: trades.id,
+          type: trades.type,
+          shares: trades.shares,
           amount: trades.amount,
           feeRate: trades.feeRate,
           positionId: trades.positionId,
@@ -138,30 +142,67 @@ export function createSettlementJob(deps: {
         .where(and(eq(trades.id, candidate.id), eq(trades.status, 'pending')))
         .for('update');
       if (!trade || trade.positionId !== candidate.positionId) return false;
-      if (!trade.amount) throw new Error('加仓交易缺少金额');
-      const shares = confirmationShares(trade.amount, trade.feeRate, navPoint.unitNav);
       const [position] = await tx
-        .select({ id: positions.id, shares: positions.shares, totalCost: positions.totalCost })
+        .select()
         .from(positions)
         .where(and(eq(positions.id, candidate.positionId), eq(positions.userId, candidate.userId)))
         .for('update');
       if (!position) throw new Error('交易对应的持仓不存在');
       const currentShares = fixedFromDb(position.shares, 4);
       const currentCost = fixedFromDb(position.totalCost, 2);
-      await tx
-        .update(positions)
-        .set({
-          shares: formatFixed(add(currentShares, shares)),
-          totalCost: formatFixed(add(currentCost, fixedFromDb(trade.amount, 2))),
-          updatedAt: deps.clock.now(),
-        })
-        .where(eq(positions.id, candidate.positionId));
+      let confirmedShares: Fixed;
+      let proceeds: string | null = null;
+      if (trade.type === 'buy') {
+        if (!trade.amount) throw new Error('加仓交易缺少金额');
+        confirmedShares = confirmationShares(trade.amount, trade.feeRate, navPoint.unitNav);
+        await tx
+          .update(positions)
+          .set({
+            shares: formatFixed(add(currentShares, confirmedShares)),
+            totalCost: formatFixed(add(currentCost, fixedFromDb(trade.amount, 2))),
+            updatedAt: deps.clock.now(),
+          })
+          .where(eq(positions.id, candidate.positionId));
+      } else if (trade.type === 'sell') {
+        if (!trade.shares) throw new Error('减仓交易缺少份额');
+        confirmedShares = fixedFromDb(trade.shares, 4);
+        if (confirmedShares.value <= 0n || confirmedShares.value > currentShares.value) {
+          throw new Error('减仓份额超过当前已确认份额，请校准后重试');
+        }
+        const nav = parseFixed(navPoint.unitNav, 4, { round: true });
+        if (!nav || nav.value <= 0n) throw new Error('确认净值无效');
+        const feeRate = fixedFromDb(trade.feeRate, 6);
+        // Preserve every digit of both products and round only the final amount.
+        const gross = multiply(confirmedShares, nav, 8);
+        const net = multiply(gross, { value: 1_000_000n - feeRate.value, scale: 6 }, 2);
+        // Selling all remaining shares carries the entire remaining cost, including rounding residue.
+        const cost =
+          confirmedShares.value === currentShares.value
+            ? currentCost
+            : divide(multiply(currentCost, confirmedShares, 6), currentShares, 2);
+        proceeds = formatFixed(net);
+        await tx
+          .update(positions)
+          .set({
+            shares: formatFixed(subtract(currentShares, confirmedShares)),
+            totalCost: formatFixed(subtract(currentCost, cost)),
+            realizedGain: formatFixed(
+              add(fixedFromDb(position.realizedGain, 2), subtract(net, cost)),
+            ),
+            realizedGainCost: formatFixed(add(fixedFromDb(position.realizedGainCost, 2), cost)),
+            updatedAt: deps.clock.now(),
+          })
+          .where(eq(positions.id, candidate.positionId));
+      } else {
+        throw new Error(`暂不支持确认交易类型：${trade.type}`);
+      }
       const [updated] = await tx
         .update(trades)
         .set({
           status: 'confirmed',
           confirmedNav: formatFixed(parseFixed(navPoint.unitNav, 4, { round: true })!),
-          confirmedShares: formatFixed(shares),
+          confirmedShares: formatFixed(confirmedShares),
+          ...(proceeds === null ? {} : { amount: proceeds }),
         })
         .where(and(eq(trades.id, candidate.id), eq(trades.status, 'pending')))
         .returning({ id: trades.id });
@@ -184,16 +225,20 @@ export function createSettlementJob(deps: {
         });
         return summary;
       }
+      const blockedPositions = new Set<string>();
       for (const candidate of rows) {
+        if (blockedPositions.has(candidate.positionId)) continue;
         try {
-          if (candidate.type !== 'buy') throw new Error(`暂不支持确认交易类型：${candidate.type}`);
+          if (candidate.type !== 'buy' && candidate.type !== 'sell')
+            throw new Error(`暂不支持确认交易类型：${candidate.type}`);
           const navPoint = await findNav(deps.nav, candidate.fundCode, candidate.applicationDate);
           if (!navPoint) {
-            summary.pending++;
+            blockedPositions.add(candidate.positionId);
             continue;
           }
           if (await confirm(candidate, navPoint)) summary.confirmed++;
         } catch (error) {
+          blockedPositions.add(candidate.positionId);
           summary.failed++;
           summary.failures.push({
             tradeId: candidate.id,

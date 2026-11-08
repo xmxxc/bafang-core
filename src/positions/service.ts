@@ -1,4 +1,4 @@
-import { and, eq, gt, inArray, sql } from 'drizzle-orm';
+import { and, eq, gt, inArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../db';
 import { channels, positions, trades, users } from '../db/schema';
 import type { ErrorCode } from '../errors';
@@ -59,6 +59,11 @@ export interface PositionValuation {
   shares: string;
   totalCost: string;
   pendingAmount: string;
+  pendingShares: string;
+  availableShares: string;
+  isCleared: boolean;
+  realizedGain: string;
+  realizedGainCost: string;
   unitPrice: string | null;
   snapshotDate: string;
   nav: string | null;
@@ -71,7 +76,7 @@ export interface PositionValuation {
 export type PositionView = PositionValuation & PositionGains;
 
 export interface PositionService {
-  list(userId: string, channelId?: string): Promise<PositionView[]>;
+  list(userId: string, channelId?: string, includeCleared?: boolean): Promise<PositionView[]>;
   get(userId: string, id: string): Promise<PositionView>;
   create(userId: string, input: PositionCreateInput): Promise<PositionView>;
   calibrate(userId: string, id: string, input: CostInput): Promise<PositionView>;
@@ -88,10 +93,7 @@ export async function userHasPositions(tx: Transaction, userId: string): Promise
   return Boolean(row);
 }
 
-/**
- * 渠道删除规则（#15）：在调用方事务里查询该渠道下是否有未清仓持仓。
- * #16 还没有交易，未清仓即份额大于 0；#17 引入在途交易后由 #19 一并补全。
- */
+/** 与列表的已清仓定义一致：有份额或任意在途交易的持仓仍占用渠道。 */
 export async function channelHasPositions(
   tx: Transaction,
   userId: string,
@@ -104,23 +106,12 @@ export async function channelHasPositions(
       and(
         eq(positions.userId, userId),
         eq(positions.channelId, channelId),
-        gt(positions.shares, '0'),
+        or(
+          gt(positions.shares, '0'),
+          sql`exists (select 1 from ${trades} where ${trades.positionId} = ${positions.id} and ${trades.status} = 'pending')`,
+        ),
       ),
     )
-    .limit(1);
-  return Boolean(row);
-}
-
-/** 渠道下是否有任何持仓（含已清仓）；#19 把已清仓持仓移到“未指定”之前，渠道删除用它兜底。 */
-export async function channelHasAnyPositions(
-  tx: Transaction,
-  userId: string,
-  channelId: string,
-): Promise<boolean> {
-  const [row] = await tx
-    .select({ id: positions.id })
-    .from(positions)
-    .where(and(eq(positions.userId, userId), eq(positions.channelId, channelId)))
     .limit(1);
   return Boolean(row);
 }
@@ -155,15 +146,26 @@ export function positionView(
   row: PositionRow,
   latest: LatestNav | null,
   pendingAmount = '0.00',
+  pendingShares = '0.0000',
+  hasPending = false,
 ): PositionValuation {
   const shares = fixedFromDb(row.shares, SHARES_SCALE);
   const totalCost = fixedFromDb(row.totalCost, AMOUNT_SCALE);
+  const available = subtract(shares, fixedFromDb(pendingShares, SHARES_SCALE));
   const base = {
     id: row.id,
     fundCode: row.fundCode,
     channelId: row.channelId,
     shares: formatFixed(shares),
     pendingAmount,
+    pendingShares,
+    availableShares: formatFixed({
+      value: available.value < 0n ? 0n : available.value,
+      scale: SHARES_SCALE,
+    }),
+    isCleared: shares.value === 0n && !hasPending,
+    realizedGain: row.realizedGain,
+    realizedGainCost: row.realizedGainCost,
     totalCost: formatFixed(totalCost),
     unitPrice: shares.value === 0n ? null : formatFixed(divide(totalCost, shares, PRICE_SCALE)),
     snapshotDate: row.snapshotDate,
@@ -232,7 +234,8 @@ export function createPositionService(deps: {
     const totals = await deps.db
       .select({
         positionId: trades.positionId,
-        amount: sql<string>`sum(${trades.amount})::text`,
+        amount: sql<string>`coalesce(sum(${trades.amount}) filter (where ${trades.type} = 'buy'), 0)::text`,
+        shares: sql<string>`coalesce(sum(${trades.shares}) filter (where ${trades.type} in ('sell', 'switch_out')), 0)::text`,
       })
       .from(trades)
       .where(
@@ -242,16 +245,10 @@ export function createPositionService(deps: {
             rows.map((row) => row.id),
           ),
           eq(trades.status, 'pending'),
-          eq(trades.type, 'buy'),
         ),
       )
       .groupBy(trades.positionId);
-    const amounts = new Map(
-      totals.map((total) => [
-        total.positionId,
-        formatFixed(fixedFromDb(total.amount, AMOUNT_SCALE)),
-      ]),
-    );
+    const pending = new Map(totals.map((total) => [total.positionId, total]));
     const navs = new Map(
       await Promise.all(
         [...new Set(rows.map((row) => row.fundCode))].map(
@@ -260,9 +257,16 @@ export function createPositionService(deps: {
       ),
     );
     return withGains(
-      rows.map((row) =>
-        positionView(row, navs.get(row.fundCode) ?? null, amounts.get(row.id) ?? '0.00'),
-      ),
+      rows.map((row) => {
+        const total = pending.get(row.id);
+        return positionView(
+          row,
+          navs.get(row.fundCode) ?? null,
+          total ? formatFixed(fixedFromDb(total.amount, AMOUNT_SCALE)) : '0.00',
+          total ? formatFixed(fixedFromDb(total.shares, SHARES_SCALE)) : '0.0000',
+          Boolean(total),
+        );
+      }),
     );
   }
 
@@ -279,7 +283,7 @@ export function createPositionService(deps: {
   }
 
   return {
-    async list(userId, channelId) {
+    async list(userId, channelId, includeCleared = false) {
       if (channelId) {
         // 与渠道接口一致：不存在或别人的渠道都返回 404，而不是空列表。
         const [channel] = await deps.db
@@ -298,7 +302,8 @@ export function createPositionService(deps: {
             : eq(positions.userId, userId),
         )
         .orderBy(positions.createdAt, positions.id);
-      return views(rows);
+      const items = await views(rows);
+      return includeCleared ? items : items.filter((item) => !item.isCleared);
     },
 
     async get(userId, id) {

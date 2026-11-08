@@ -31,6 +31,8 @@ export const ErrorCodeSchema = z.enum([
   'login_method_not_found',
   'position_exists',
   'trade_not_cancellable',
+  'insufficient_shares',
+  'channel_position_conflict',
   'bind_code_web_required',
   'bind_code_expired',
   'bind_code_used',

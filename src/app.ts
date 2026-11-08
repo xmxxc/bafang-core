@@ -348,18 +348,21 @@ export function createApp(deps: AppDeps = {}): App {
   });
   app.openapi(positionListRoute, async (c) => {
     if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
-    const { channelId } = c.req.valid('query');
-    return c.json({ items: await positions.list(getAuth(c).userId, channelId) }, 200);
+    const { channelId, includeCleared } = c.req.valid('query');
+    return c.json(
+      { items: await positions.list(getAuth(c).userId, channelId, includeCleared === 'true') },
+      200,
+    );
   });
   // 固定路径先于 /{id} 注册，避免被当成持仓 UUID。
   app.openapi(positionSummaryRoute, async (c) => {
     if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
-    const items = await positions.list(getAuth(c).userId, c.req.valid('query').channelId);
+    const items = await positions.list(getAuth(c).userId, c.req.valid('query').channelId, true);
     return c.json(summarizePositions(items, shanghaiDate(resolved.clock.now())), 200);
   });
   app.openapi(positionByFundRoute, async (c) => {
     if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
-    const items = await positions.list(getAuth(c).userId, c.req.valid('query').channelId);
+    const items = await positions.list(getAuth(c).userId, c.req.valid('query').channelId, true);
     return c.json({ items: summarizeByFund(items, shanghaiDate(resolved.clock.now())) }, 200);
   });
   app.openapi(positionDetailRoute, async (c) => {

@@ -112,15 +112,17 @@ export const channelDeleteRoute = createRoute({
   method: 'delete',
   path: '/v1/channels/{id}',
   tags: ['channels'],
-  summary: '删除自己的无持仓渠道',
-  description: '需要登录，“未指定”不能删除；仅允许删除没有任何持仓的渠道。',
+  summary: '删除自己的渠道',
+  description:
+    '需要登录，“未指定”不能删除。有份额或任意在途交易时拒绝；只剩已清仓持仓时在同一事务中移到“未指定”后删除。若“未指定”已有同基金持仓则拒绝，以保留原持仓 ID 与交易历史。',
   request: { params: ChannelParam },
   responses: {
     204: { description: '已删除' },
     400: { description: '参数不合法', content: errorContent },
     404: { description: '渠道不存在（包含别人的渠道）', content: errorContent },
     409: {
-      description: 'channel_protected：“未指定”不能删除；channel_has_positions：渠道下仍有持仓',
+      description:
+        'channel_protected：“未指定”不能删除；channel_has_positions：渠道下有份额或在途交易；channel_position_conflict：“未指定”已有同基金持仓',
       content: errorContent,
     },
     ...commonErrors,
