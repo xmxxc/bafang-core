@@ -29,6 +29,34 @@ async function migrationFolderThrough(maxIdx: number): Promise<string> {
   return folder;
 }
 
+async function loggedInApp(db: TestSchema) {
+  let code = '';
+  const app = createApp({
+    database: createDb(db.pool),
+    mailer: {
+      async sendVerificationCode(_email, sentCode) {
+        code = sentCode;
+      },
+    },
+  });
+  const email = `migration-${randomUUID()}@example.com`;
+  const request = await app.request('/v1/auth/email/request', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email }),
+  });
+  expect(request.status).toBe(200);
+  const login = await app.request('/v1/auth/email/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, code, device: 'miniprogram' }),
+  });
+  expect(login.status).toBe(200);
+  const token = ((await login.json()) as EmailLoginResponse).token;
+  expect(token).toBeTruthy();
+  return { app, headers: { Authorization: `Bearer ${token}` } };
+}
+
 it('preserves existing users preset order when upgrading from migration 0003, observed over HTTP', async () => {
   const folder = await mkdtemp(join(tmpdir(), 'channels-migrations-'));
   let db: TestSchema | undefined;
@@ -108,12 +136,23 @@ it('applies the 0006 unique index when upgrading a schema already migrated throu
   const prior = await migrationFolderThrough(5);
   const db = await createTestSchema(prior);
   try {
+    const { app, headers } = await loggedInApp(db);
+    const first = await app.request('/v1/channels', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '迁移唯一性检查' }),
+    });
+    expect(first.status).toBe(201);
     await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
-    const result = await db.pool.query(
-      `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND indexname = 'channels_user_name_uidx'`,
-      [db.schema],
-    );
-    expect(result.rows).toHaveLength(1);
+    const duplicate = await app.request('/v1/channels', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: '迁移唯一性检查' }),
+    });
+    expect(duplicate.status).toBe(409);
+    expect(await duplicate.json()).toMatchObject({
+      error: { code: 'channel_name_conflict' },
+    });
   } finally {
     await dropTestSchema(db);
     await rm(prior, { recursive: true, force: true });
@@ -124,12 +163,15 @@ it('fails clearly instead of silently skipping 0006 when existing data violates 
   const prior = await migrationFolderThrough(5);
   const db = await createTestSchema(prior);
   try {
-    const userId = randomUUID();
-    await db.pool.query('INSERT INTO users (id) VALUES ($1)', [userId]);
-    await db.pool.query(
-      'INSERT INTO channels (user_id, name, sort_order) VALUES ($1, $2, $3), ($1, $2, $3)',
-      [userId, '重复渠道', 0],
-    );
+    const { app, headers } = await loggedInApp(db);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const duplicate = await app.request('/v1/channels', {
+        method: 'POST',
+        headers: { ...headers, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: '迁移前重名渠道' }),
+      });
+      expect(duplicate.status).toBe(201);
+    }
     await expect(migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema)).rejects.toThrow(
       /channels_user_name_uidx|could not create unique index|duplicate key/i,
     );
