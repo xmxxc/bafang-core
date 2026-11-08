@@ -650,6 +650,29 @@
           "expiresAt"
         ]
       },
+      "LoginMethod": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "email",
+              "github",
+              "wechat"
+            ],
+            "description": "登录方式类型"
+          },
+          "externalId": {
+            "type": "string",
+            "example": "user@example.com",
+            "description": "外部标识"
+          }
+        },
+        "required": [
+          "type",
+          "externalId"
+        ]
+      },
       "WeChatLoginResult": {
         "type": "object",
         "properties": {
@@ -710,7 +733,7 @@
           "channels"
         ]
       },
-      "LoginMethod": {
+      "LoginMethodDisplay": {
         "type": "object",
         "properties": {
           "type": {
@@ -719,18 +742,16 @@
               "email",
               "github",
               "wechat"
-            ],
-            "description": "登录方式类型"
+            ]
           },
-          "externalId": {
+          "display": {
             "type": "string",
-            "example": "user@example.com",
-            "description": "外部标识"
+            "description": "展示信息，不包含密钥或令牌"
           }
         },
         "required": [
           "type",
-          "externalId"
+          "display"
         ]
       }
     },
@@ -1913,6 +1934,189 @@
         }
       }
     },
+    "/v1/auth/email/link/request": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "请求关联邮箱验证码",
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "example": "user@example.com",
+                    "description": "邮箱地址"
+                  }
+                },
+                "required": [
+                  "email"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "验证码已发出",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailCodeRequestResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "验证码请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/email/link": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "用验证码关联邮箱",
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "example": "user@example.com",
+                    "description": "邮箱地址"
+                  },
+                  "code": {
+                    "type": "string",
+                    "pattern": "^\\d{6}$",
+                    "example": "123456",
+                    "description": "6 位数字验证码"
+                  }
+                },
+                "required": [
+                  "email",
+                  "code"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "邮箱已关联",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginMethod"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "验证码不正确、过期、已使用或作废",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "邮箱冲突或当前用户已有邮箱",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/auth/wechat/login": {
       "post": {
         "tags": [
@@ -2012,6 +2216,21 @@
         ],
         "summary": "发起 GitHub 网页登录",
         "description": "生成有效期 10 分钟、与浏览器 Cookie 绑定的一次性 state，并重定向到 GitHub（S256 PKCE）。不接受请求指定回调或登录后跳转地址。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "login",
+                "link"
+              ],
+              "default": "login"
+            },
+            "required": false,
+            "name": "intent",
+            "in": "query"
+          }
+        ],
         "responses": {
           "302": {
             "description": "前往 GitHub 授权；设置 httpOnly + Secure + SameSite=Lax 的临时 Cookie",
@@ -2082,7 +2301,7 @@
           "auth"
         ],
         "summary": "GitHub 授权回调",
-        "description": "先原子消费 state，再换取 GitHub 数字用户 ID；首次创建用户与三个渠道，建立与邮箱网页登录相同的会话 Cookie，跳回配置的网页地址。失败后需重新发起登录。",
+        "description": "登录意图建立网页会话；关联意图要求原网页会话仍有效，并将 GitHub 登录方式关联到该用户。",
         "parameters": [
           {
             "schema": {
@@ -2125,6 +2344,26 @@
           },
           "400": {
             "description": "github_state_invalid：state 缺失、不匹配、过期、已使用；github_authorization_failed：授权被拒绝或缺少 code；validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "关联回调时会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "登录方式冲突",
             "content": {
               "application/json": {
                 "schema": {
@@ -2250,6 +2489,153 @@
           },
           "500": {
             "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/login-methods": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "列出已关联的登录方式",
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "登录方式类型与展示信息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/LoginMethodDisplay"
+                      }
+                    }
+                  },
+                  "required": [
+                    "items"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/me/login-methods/{type}": {
+      "delete": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "解绑登录方式",
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "email",
+                "github",
+                "wechat"
+              ],
+              "description": "登录方式类型"
+            },
+            "required": true,
+            "description": "登录方式类型",
+            "name": "type",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已解绑"
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "未关联该登录方式",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "仅剩一种登录方式时不能解绑",
             "content": {
               "application/json": {
                 "schema": {

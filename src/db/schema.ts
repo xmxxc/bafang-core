@@ -123,6 +123,8 @@ export const githubOAuthStates = pgTable(
     stateHash: text('state_hash').primaryKey(),
     browserHash: text('browser_hash').notNull(),
     verifier: text('verifier').notNull(),
+    purpose: text('purpose').notNull().default('login'),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   },
   (t) => [index('github_oauth_states_expires_idx').on(t.expiresAt)],

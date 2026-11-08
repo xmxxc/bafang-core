@@ -18,7 +18,7 @@ export function createGitHubLoginService(deps: {
 }) {
   const { db, clock, oauth, auth } = deps;
   return {
-    async start() {
+    async start(purpose: 'login' | 'link' = 'login', userId?: string) {
       const state = generateSessionToken();
       const browser = generateSessionToken();
       const verifier = generateSessionToken();
@@ -29,6 +29,8 @@ export function createGitHubLoginService(deps: {
         stateHash: sha256Hex(state),
         browserHash: sha256Hex(browser),
         verifier,
+        purpose,
+        userId,
         expiresAt: new Date(now.getTime() + GITHUB_STATE_TTL_MS),
       });
       return { browser, url: oauth.authorizationUrl(state, challenge) };
@@ -39,6 +41,7 @@ export function createGitHubLoginService(deps: {
       browser: string | undefined,
       code: string | undefined,
       error: string | undefined,
+      currentUserId?: string,
     ) {
       if (!state || !browser)
         throw new AuthError('github_state_invalid', 'GitHub 登录请求无效或已过期，请重新登录', 400);
@@ -52,7 +55,11 @@ export function createGitHubLoginService(deps: {
             gt(githubOAuthStates.expiresAt, clock.now()),
           ),
         )
-        .returning({ verifier: githubOAuthStates.verifier });
+        .returning({
+          verifier: githubOAuthStates.verifier,
+          purpose: githubOAuthStates.purpose,
+          userId: githubOAuthStates.userId,
+        });
       if (!request)
         throw new AuthError('github_state_invalid', 'GitHub 登录请求无效或已过期，请重新登录', 400);
       if (error !== undefined || !code)
@@ -64,7 +71,15 @@ export function createGitHubLoginService(deps: {
         // 不传播上游响应、授权码或令牌，且失败前不写用户、登录方式或会话。
         throw new AuthError('github_unavailable', 'GitHub 登录暂不可用，请稍后重试', 502);
       }
-      return auth.loginWithGitHubId(externalId);
+      if (request.purpose === 'link') {
+        if (!currentUserId || request.userId !== currentUserId) {
+          throw new AuthError('unauthorized', '关联登录方式需要当前会话仍然有效', 401);
+        }
+        await auth.associateLoginMethod(currentUserId, 'github', externalId);
+        return { kind: 'link' as const, userId: currentUserId };
+      }
+      const result = await auth.loginWithGitHubId(externalId);
+      return { kind: 'login' as const, ...result };
     },
   };
 }
