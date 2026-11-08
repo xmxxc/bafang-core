@@ -78,6 +78,10 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'channel_name_conflict',
       'channel_protected',
       'channel_has_positions',
+      'login_method_conflict',
+      'login_method_type_conflict',
+      'login_method_last',
+      'login_method_not_found',
     ]);
   });
 

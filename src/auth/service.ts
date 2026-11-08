@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import { and, count, desc, eq, gt, gte, isNull, lt, sql } from 'drizzle-orm';
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
 import { shanghaiDate, type Clock } from '../clock';
 import type { Db } from '../db';
 import { channels, emailVerificationCodes, loginMethods, sessions, users } from '../db/schema';
@@ -12,13 +12,14 @@ export type Device = 'web' | 'miniprogram';
 
 /** 登录方式类型。 */
 export type LoginMethodType = 'email' | 'github' | 'wechat';
+export type VerificationPurpose = 'login' | 'link';
 
 /** 业务规则抛出的错误：由路由层映射成统一的错误响应。 */
 export class AuthError extends Error {
   constructor(
     readonly code: ErrorCode,
     message: string,
-    readonly status: 400 | 429 | 502,
+    readonly status: 400 | 401 | 404 | 409 | 429 | 502,
   ) {
     super(message);
     this.name = 'AuthError';
@@ -46,7 +47,7 @@ export interface SessionInfo {
 }
 
 export interface AuthService {
-  requestCode(email: string): Promise<void>;
+  requestCode(email: string, purpose?: VerificationPurpose): Promise<void>;
   loginWithEmail(
     email: string,
     code: string,
@@ -54,6 +55,18 @@ export interface AuthService {
   ): Promise<{ userId: string; token: string; device: Device; expiresAt: Date }>;
   loginWithGitHubId(externalId: string): ReturnType<AuthService['loginWithEmail']>;
   loginWithWeChatOpenId(openid: string): ReturnType<AuthService['loginWithEmail']>;
+  associateLoginMethod(
+    userId: string,
+    type: LoginMethodType,
+    externalId: string,
+  ): Promise<{ userId: string; type: LoginMethodType; externalId: string }>;
+  associateEmail(
+    userId: string,
+    email: string,
+    code: string,
+  ): Promise<{ userId: string; type: LoginMethodType; externalId: string }>;
+  unlinkLoginMethod(userId: string, type: LoginMethodType): Promise<void>;
+  listLoginMethods(userId: string): Promise<{ type: LoginMethodType; display: string }[]>;
   logout(sessionId: string): Promise<void>;
   authenticate(token: string): Promise<SessionInfo | null>;
   me(userId: string): Promise<{
@@ -61,6 +74,17 @@ export interface AuthService {
     loginMethods: { type: LoginMethodType; externalId: string }[];
     channels: { id: string; name: string }[];
   }>;
+}
+
+type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
+export type UserPositionsChecker = (tx: Transaction, userId: string) => Promise<boolean>;
+
+/** #16 接入持仓表后，在当前事务里查询用户是否有任何持仓。 */
+export async function userHasPositions(_tx: Transaction, _userId: string): Promise<boolean> {
+  // 当前分支尚无持仓表；渠道、会话和其他登录方式都不算持仓。
+  void _tx;
+  void _userId;
+  return false;
 }
 
 function normalizeEmail(email: string): string {
@@ -78,42 +102,192 @@ function shanghaiDayStart(date: Date): Date {
   return new Date(`${shanghaiDate(date)}T00:00:00+08:00`);
 }
 
-export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }): AuthService {
+export function createAuthService(deps: {
+  db: Db;
+  mailer: Mailer;
+  clock: Clock;
+  hasPositions?: UserPositionsChecker;
+}): AuthService {
   const { db, mailer, clock } = deps;
+  const hasPositions = deps.hasPositions ?? userHasPositions;
 
-  // 三种登录方式共用用户创建、预置渠道与会话写入路径；相同身份的并发首次登录串行化。
+  async function lockIdentity(tx: Transaction, type: LoginMethodType, externalId: string) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${type + ':' + externalId}))`);
+  }
+
+  // 三种登录方式共用用户创建、预置渠道与会话写入路径。
+  // 加锁顺序（登录、关联、转移、解绑一致）：先身份锁，再按 id 升序锁用户行。
   async function loginWithIdentity(
-    tx: Parameters<Parameters<Db['transaction']>[0]>[0],
+    tx: Transaction,
     type: LoginMethodType,
     externalId: string,
     device: Device,
     tokenHash: string,
     expiresAt: Date,
   ): Promise<{ userId: string }> {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${type + ':' + externalId}))`);
-    const [method] = await tx
-      .select()
+    await lockIdentity(tx, type, externalId);
+    // 身份锁内重新读取归属；持有者被并发转移删除（同一空用户的另一身份被关联走）时重读。
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const [method] = await tx
+        .select({ userId: loginMethods.userId })
+        .from(loginMethods)
+        .where(and(eq(loginMethods.type, type), eq(loginMethods.externalId, externalId)))
+        .limit(1);
+      if (!method) break;
+      const [owner] = await tx
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.id, method.userId))
+        .for('share');
+      if (owner) {
+        await tx.insert(sessions).values({ userId: owner.id, tokenHash, device, expiresAt });
+        return { userId: owner.id };
+      }
+    }
+    const [created] = await tx.insert(users).values({}).returning({ id: users.id });
+    if (!created) throw new Error('创建用户失败');
+    await tx.insert(loginMethods).values({ userId: created.id, type, externalId });
+    await tx
+      .insert(channels)
+      .values(PRESET_CHANNELS.map((name, sortOrder) => ({ userId: created.id, name, sortOrder })));
+    await tx.insert(sessions).values({ userId: created.id, tokenHash, device, expiresAt });
+    return { userId: created.id };
+  }
+
+  /** 按 id 升序锁定用户行，返回仍存在的用户 id。 */
+  async function lockUsers(tx: Transaction, userIds: string[]): Promise<Set<string>> {
+    const rows = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(inArray(users.id, [...new Set(userIds)]))
+      .orderBy(asc(users.id))
+      .for('update');
+    return new Set(rows.map((row) => row.id));
+  }
+
+  async function associateInTransaction(
+    tx: Transaction,
+    currentUserId: string,
+    type: LoginMethodType,
+    externalId: string,
+  ) {
+    await lockIdentity(tx, type, externalId);
+    const [found] = await tx
+      .select({ userId: loginMethods.userId })
       .from(loginMethods)
       .where(and(eq(loginMethods.type, type), eq(loginMethods.externalId, externalId)))
       .limit(1);
-    let userId = method?.userId;
-    if (!userId) {
-      const [created] = await tx.insert(users).values({}).returning({ id: users.id });
-      if (!created) throw new Error('创建用户失败');
-      userId = created.id;
-      await tx.insert(loginMethods).values({ userId, type, externalId });
-      await tx
-        .insert(channels)
-        .values(
-          PRESET_CHANNELS.map((name, sortOrder) => ({ userId: created.id, name, sortOrder })),
-        );
+    const locked = await lockUsers(tx, found ? [currentUserId, found.userId] : [currentUserId]);
+    if (!locked.has(currentUserId)) {
+      // 当前用户已被并发转移删除，其会话随之失效。
+      throw new AuthError('unauthorized', '关联登录方式需要当前会话仍然有效', 401);
     }
-    await tx.insert(sessions).values({ userId, tokenHash, device, expiresAt });
-    return { userId };
+
+    const [existingForUser] = await tx
+      .select({ id: loginMethods.id, externalId: loginMethods.externalId })
+      .from(loginMethods)
+      .where(and(eq(loginMethods.userId, currentUserId), eq(loginMethods.type, type)))
+      .limit(1);
+    if (existingForUser) {
+      if (existingForUser.externalId === externalId) {
+        return { userId: currentUserId, type, externalId };
+      }
+      throw new AuthError('login_method_type_conflict', '当前用户已关联该类型的登录方式', 409);
+    }
+
+    // 用户行锁内重读：持有者可能已被并发转移删除，登录方式随之级联消失。
+    const [target] = await tx
+      .select({ id: loginMethods.id, userId: loginMethods.userId })
+      .from(loginMethods)
+      .where(and(eq(loginMethods.type, type), eq(loginMethods.externalId, externalId)))
+      .limit(1);
+    if (!target) {
+      await tx.insert(loginMethods).values({ userId: currentUserId, type, externalId });
+      return { userId: currentUserId, type, externalId };
+    }
+    if (target.userId === currentUserId) {
+      return { userId: currentUserId, type, externalId };
+    }
+    if (!locked.has(target.userId) || (await hasPositions(tx, target.userId))) {
+      throw new AuthError('login_method_conflict', '该登录方式已属于有持仓的其他用户', 409);
+    }
+    await tx
+      .update(loginMethods)
+      .set({ userId: currentUserId })
+      .where(eq(loginMethods.id, target.id));
+    // 空用户的会话、渠道及其余登录方式随用户级联清理；整个转移仍在本事务内。
+    await tx.delete(users).where(eq(users.id, target.userId));
+    return { userId: currentUserId, type, externalId };
+  }
+
+  async function loginWithExternalIdentity(
+    type: LoginMethodType,
+    externalId: string,
+    device: Device,
+  ) {
+    const token = generateSessionToken();
+    const expiresAt = new Date(clock.now().getTime() + SESSION_TTL_MS);
+    const result = await db.transaction((tx) =>
+      loginWithIdentity(tx, type, externalId, device, sha256Hex(token), expiresAt),
+    );
+    return { userId: result.userId, token, device, expiresAt };
+  }
+
+  async function consumeVerificationCode(
+    tx: Transaction,
+    email: string,
+    code: string,
+    now: Date,
+    purpose: VerificationPurpose,
+  ): Promise<AuthError | null> {
+    const [latest] = await tx
+      .select()
+      .from(emailVerificationCodes)
+      .where(
+        and(eq(emailVerificationCodes.email, email), eq(emailVerificationCodes.purpose, purpose)),
+      )
+      .orderBy(desc(emailVerificationCodes.createdAt))
+      .limit(1);
+    if (!latest) return new AuthError('verification_code_invalid', '验证码不正确', 400);
+    if (latest.usedAt) return new AuthError('verification_code_used', '验证码已使用', 400);
+    if (latest.expiresAt <= now)
+      return new AuthError('verification_code_expired', '验证码已过期', 400);
+    if (latest.attempts >= EMAIL_CODE_MAX_ATTEMPTS)
+      return new AuthError('verification_code_max_attempts', '验证码已作废，请重新获取', 400);
+    if (!hashMatches(latest.codeHash, sha256Hex(code.trim()))) {
+      const [updated] = await tx
+        .update(emailVerificationCodes)
+        .set({ attempts: sql`${emailVerificationCodes.attempts} + 1` })
+        .where(
+          and(
+            eq(emailVerificationCodes.id, latest.id),
+            isNull(emailVerificationCodes.usedAt),
+            gt(emailVerificationCodes.expiresAt, now),
+            lt(emailVerificationCodes.attempts, EMAIL_CODE_MAX_ATTEMPTS),
+          ),
+        )
+        .returning({ attempts: emailVerificationCodes.attempts });
+      if (updated?.attempts && updated.attempts >= EMAIL_CODE_MAX_ATTEMPTS)
+        return new AuthError('verification_code_max_attempts', '验证码错误次数过多，已作废', 400);
+      return new AuthError('verification_code_invalid', '验证码不正确', 400);
+    }
+    const [consumed] = await tx
+      .update(emailVerificationCodes)
+      .set({ usedAt: now })
+      .where(
+        and(
+          eq(emailVerificationCodes.id, latest.id),
+          isNull(emailVerificationCodes.usedAt),
+          gt(emailVerificationCodes.expiresAt, now),
+          lt(emailVerificationCodes.attempts, EMAIL_CODE_MAX_ATTEMPTS),
+        ),
+      )
+      .returning({ id: emailVerificationCodes.id });
+    return consumed ? null : new AuthError('verification_code_used', '验证码已使用', 400);
   }
 
   return {
-    async requestCode(email) {
+    async requestCode(email, purpose: VerificationPurpose = 'login') {
       const normalized = normalizeEmail(email);
       const now = clock.now();
       const code = generateVerificationCode();
@@ -156,13 +330,14 @@ export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }
           .where(
             and(
               eq(emailVerificationCodes.email, normalized),
+              eq(emailVerificationCodes.purpose, purpose),
               isNull(emailVerificationCodes.usedAt),
             ),
           );
 
         const [inserted] = await tx
           .insert(emailVerificationCodes)
-          .values({ email: normalized, codeHash, expiresAt, createdAt: now })
+          .values({ email: normalized, purpose, codeHash, expiresAt, createdAt: now })
           .returning({ id: emailVerificationCodes.id });
         return inserted?.id;
       });
@@ -180,119 +355,99 @@ export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }
 
     async loginWithEmail(email, code, device) {
       const normalized = normalizeEmail(email);
-      const trimmedCode = code.trim();
       const now = clock.now();
-      const candidateHash = sha256Hex(trimmedCode);
-
-      const [latest] = await db
-        .select()
-        .from(emailVerificationCodes)
-        .where(eq(emailVerificationCodes.email, normalized))
-        .orderBy(desc(emailVerificationCodes.createdAt))
-        .limit(1);
-      if (!latest) {
-        throw new AuthError('verification_code_invalid', '验证码不正确', 400);
-      }
-      if (latest.usedAt) {
-        throw new AuthError('verification_code_used', '验证码已使用', 400);
-      }
-      if (latest.expiresAt <= now) {
-        throw new AuthError('verification_code_expired', '验证码已过期', 400);
-      }
-      if (latest.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
-        throw new AuthError('verification_code_max_attempts', '验证码已作废，请重新获取', 400);
-      }
-
-      if (!hashMatches(latest.codeHash, candidateHash)) {
-        // 原子自增尝试次数：只有仍活跃且未达上限的验证码才被计入（E1）。
-        const [updated] = await db
-          .update(emailVerificationCodes)
-          .set({ attempts: sql`${emailVerificationCodes.attempts} + 1` })
-          .where(
-            and(
-              eq(emailVerificationCodes.id, latest.id),
-              isNull(emailVerificationCodes.usedAt),
-              gt(emailVerificationCodes.expiresAt, now),
-              lt(emailVerificationCodes.attempts, EMAIL_CODE_MAX_ATTEMPTS),
-            ),
-          )
-          .returning({ attempts: emailVerificationCodes.attempts });
-        if (updated) {
-          if (updated.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
-            throw new AuthError(
-              'verification_code_max_attempts',
-              '验证码错误次数过多，已作废',
-              400,
-            );
-          }
-          throw new AuthError('verification_code_invalid', '验证码不正确', 400);
-        }
-        // 并发竞争下没有更新到行：验证码已被消费/过期/作废，重读以给出准确的错误码。
-        const [current] = await db
-          .select({
-            usedAt: emailVerificationCodes.usedAt,
-            attempts: emailVerificationCodes.attempts,
-            expiresAt: emailVerificationCodes.expiresAt,
-          })
-          .from(emailVerificationCodes)
-          .where(eq(emailVerificationCodes.id, latest.id))
-          .limit(1);
-        if (current?.usedAt) {
-          throw new AuthError('verification_code_used', '验证码已使用', 400);
-        }
-        if (current && current.expiresAt <= now) {
-          throw new AuthError('verification_code_expired', '验证码已过期', 400);
-        }
-        throw new AuthError('verification_code_max_attempts', '验证码已作废，请重新获取', 400);
-      }
-
       const token = generateSessionToken();
-      const tokenHash = sha256Hex(token);
       const expiresAt = new Date(now.getTime() + SESSION_TTL_MS);
-
-      const result = await db.transaction(async (tx): Promise<{ userId: string } | null> => {
-        // 原子消费验证码：只有仍活跃且未达上限时才消费成功；并发同码登录只有一个能拿到（E2）。
-        const [consumed] = await tx
-          .update(emailVerificationCodes)
-          .set({ usedAt: now })
-          .where(
-            and(
-              eq(emailVerificationCodes.id, latest.id),
-              isNull(emailVerificationCodes.usedAt),
-              gt(emailVerificationCodes.expiresAt, now),
-              lt(emailVerificationCodes.attempts, EMAIL_CODE_MAX_ATTEMPTS),
-            ),
-          )
-          .returning({ id: emailVerificationCodes.id });
-        if (!consumed) {
-          return null;
-        }
-
-        return loginWithIdentity(tx, 'email', normalized, device, tokenHash, expiresAt);
+      const result = await db.transaction(async (tx) => {
+        // 身份锁先于用户锁；验证码校验、消费和归属读取在同一锁内完成。
+        await lockIdentity(tx, 'email', normalized);
+        const verificationError = await consumeVerificationCode(tx, normalized, code, now, 'login');
+        if (verificationError) return { error: verificationError };
+        return {
+          value: await loginWithIdentity(
+            tx,
+            'email',
+            normalized,
+            device,
+            sha256Hex(token),
+            expiresAt,
+          ),
+        };
       });
-
-      if (!result) {
-        throw new AuthError('verification_code_used', '验证码已使用', 400);
-      }
-      return { userId: result.userId, token, device, expiresAt };
+      if ('error' in result) throw result.error;
+      return { userId: result.value.userId, token, device, expiresAt };
     },
 
     async loginWithGitHubId(externalId) {
-      const token = generateSessionToken();
-      const expiresAt = new Date(clock.now().getTime() + SESSION_TTL_MS);
-      const result = await db.transaction((tx) =>
-        loginWithIdentity(tx, 'github', externalId, 'web', sha256Hex(token), expiresAt),
-      );
-      return { userId: result.userId, token, device: 'web', expiresAt };
+      return loginWithExternalIdentity('github', externalId, 'web');
     },
 
     async loginWithWeChatOpenId(openid) {
-      const token = generateSessionToken();
-      const expiresAt = new Date(clock.now().getTime() + SESSION_TTL_MS);
-      const result = await db.transaction((tx) =>
-        loginWithIdentity(tx, 'wechat', openid, 'miniprogram', sha256Hex(token), expiresAt),
-      );
-      return { userId: result.userId, token, device: 'miniprogram', expiresAt };
+      return loginWithExternalIdentity('wechat', openid, 'miniprogram');
+    },
+
+    async associateLoginMethod(userId, type, externalId) {
+      const normalized = type === 'email' ? normalizeEmail(externalId) : externalId;
+      return db.transaction((tx) => associateInTransaction(tx, userId, type, normalized));
+    },
+
+    async associateEmail(userId, email, code) {
+      const normalized = normalizeEmail(email);
+      const now = clock.now();
+      const result = await db.transaction(async (tx) => {
+        await lockIdentity(tx, 'email', normalized);
+        const verificationError = await consumeVerificationCode(tx, normalized, code, now, 'link');
+        if (verificationError) return { error: verificationError };
+        return { value: await associateInTransaction(tx, userId, 'email', normalized) };
+      });
+      if ('error' in result) throw result.error;
+      return result.value;
+    },
+
+    async unlinkLoginMethod(userId, type) {
+      await db.transaction(async (tx) => {
+        // 先身份锁再用户锁；加锁前读到的标识在锁内复核，变了就换锁重读。
+        let locked: string | undefined;
+        for (;;) {
+          const [candidate] = await tx
+            .select({ externalId: loginMethods.externalId })
+            .from(loginMethods)
+            .where(and(eq(loginMethods.userId, userId), eq(loginMethods.type, type)))
+            .limit(1);
+          if (!candidate || candidate.externalId === locked) break;
+          await lockIdentity(tx, type, candidate.externalId);
+          locked = candidate.externalId;
+        }
+        await lockUsers(tx, [userId]);
+        const methods = await tx
+          .select({ id: loginMethods.id })
+          .from(loginMethods)
+          .where(eq(loginMethods.userId, userId));
+        if (methods.length <= 1) {
+          throw new AuthError('login_method_last', '至少保留一种登录方式', 409);
+        }
+        const [deleted] = await tx
+          .delete(loginMethods)
+          .where(and(eq(loginMethods.userId, userId), eq(loginMethods.type, type)))
+          .returning({ id: loginMethods.id });
+        if (!deleted) throw new AuthError('login_method_not_found', '未关联该登录方式', 404);
+      });
+    },
+
+    async listLoginMethods(userId) {
+      const methods = await db
+        .select({ type: loginMethods.type, externalId: loginMethods.externalId })
+        .from(loginMethods)
+        .where(eq(loginMethods.userId, userId));
+      return methods.map((method) => ({
+        type: method.type as LoginMethodType,
+        display:
+          method.type === 'email'
+            ? method.externalId
+            : method.type === 'github'
+              ? `GitHub 用户 ${method.externalId}`
+              : `微信用户 ${method.externalId}`,
+      }));
     },
 
     async logout(sessionId) {

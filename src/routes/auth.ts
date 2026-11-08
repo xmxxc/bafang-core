@@ -58,6 +58,13 @@ const LoginMethodSchema = z
   })
   .openapi('LoginMethod');
 
+const LoginMethodDisplaySchema = z
+  .object({
+    type: z.enum(['email', 'github', 'wechat']),
+    display: z.string().openapi({ description: '展示信息，不包含密钥或令牌' }),
+  })
+  .openapi('LoginMethodDisplay');
+
 const WeChatLoginResponseSchema = z
   .object({
     user: UserSummarySchema,
@@ -171,7 +178,12 @@ export const emailLoginRoute = createRoute({
       description: '登录成功，建立会话',
       content: { 'application/json': { schema: EmailLoginResponseSchema } },
     },
-    400: { description: '参数不合法，或验证码过期/错误/已使用/作废', content: errorContent },
+    400: {
+      description:
+        'validation_error：参数不合法；verification_code_invalid / verification_code_expired / verification_code_used / verification_code_max_attempts：登录验证码错误、过期、已使用或作废（关联邮箱的验证码不能用于登录）',
+      content: errorContent,
+    },
+    429: { description: 'rate_limited：同一 IP 请求过于频繁', content: errorContent },
     500: { description: '内部错误', content: errorContent },
     503: { description: '数据库不可用', content: errorContent },
   },
@@ -230,12 +242,17 @@ export const githubStartRoute = createRoute({
   summary: '发起 GitHub 网页登录',
   description:
     '生成有效期 10 分钟、与浏览器 Cookie 绑定的一次性 state，并重定向到 GitHub（S256 PKCE）。不接受请求指定回调或登录后跳转地址。',
+  request: { query: z.object({ intent: z.enum(['login', 'link']).default('login') }) },
   responses: {
     302: {
       description: '前往 GitHub 授权；设置 httpOnly + Secure + SameSite=Lax 的临时 Cookie',
       headers: { Location: { schema: { type: 'string' } } },
     },
     ...githubErrors,
+    401: {
+      description: 'unauthorized：intent=link 时未登录或会话已失效（关联 state 绑定发起会话）',
+      content: errorContent,
+    },
   },
 });
 
@@ -245,7 +262,7 @@ export const githubCallbackRoute = createRoute({
   tags: ['auth'],
   summary: 'GitHub 授权回调',
   description:
-    '先原子消费 state，再换取 GitHub 数字用户 ID；首次创建用户与三个渠道，建立与邮箱网页登录相同的会话 Cookie，跳回配置的网页地址。失败后需重新发起登录。',
+    '登录意图建立网页会话；关联意图要求回调携带发起关联的同一网页会话且该会话仍有效（未退出、未过期），并将 GitHub 登录方式关联到该用户。',
   request: {
     query: z.object({
       state: z.string().max(128).optional(),
@@ -259,5 +276,126 @@ export const githubCallbackRoute = createRoute({
       headers: { Location: { schema: { type: 'string' } } },
     },
     ...githubErrors,
+    401: {
+      description:
+        'unauthorized：关联回调未携带发起关联的会话，或该会话已退出/过期，或换成了同一用户的其他会话',
+      content: errorContent,
+    },
+    409: {
+      description:
+        'login_method_conflict：该 GitHub 登录方式已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他 GitHub 登录方式',
+      content: errorContent,
+    },
+  },
+});
+
+export const loginMethodsRoute = createRoute({
+  method: 'get',
+  path: '/v1/me/login-methods',
+  tags: ['auth'],
+  summary: '列出已关联的登录方式',
+  security: [{ SessionCookie: [] }, { SessionBearer: [] }],
+  responses: {
+    200: {
+      description: '登录方式类型与展示信息',
+      content: {
+        'application/json': { schema: z.object({ items: z.array(LoginMethodDisplaySchema) }) },
+      },
+    },
+    401: { description: '未登录或会话已失效', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    503: { description: '数据库不可用', content: errorContent },
+  },
+});
+
+export const emailLinkRequestRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/email/link/request',
+  tags: ['auth'],
+  summary: '请求关联邮箱验证码',
+  security: [{ SessionCookie: [] }, { SessionBearer: [] }],
+  request: {
+    body: {
+      required: true,
+      content: { 'application/json': { schema: z.object({ email: EmailSchema }) } },
+    },
+  },
+  responses: {
+    200: {
+      description: '验证码已发出',
+      content: { 'application/json': { schema: EmailCodeRequestResponseSchema } },
+    },
+    400: { description: 'validation_error：参数不合法', content: errorContent },
+    401: { description: 'unauthorized：未登录或会话已失效', content: errorContent },
+    429: {
+      description:
+        'email_code_cooldown：同一邮箱 60 秒内已请求过验证码（与登录验证码共享冷却）；email_code_daily_limit：同一邮箱今日验证码次数已达上限（登录与关联合计）；rate_limited：同一 IP 请求过于频繁',
+      content: errorContent,
+    },
+    500: { description: '内部错误', content: errorContent },
+    503: { description: '数据库不可用', content: errorContent },
+  },
+});
+
+export const emailLinkRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/email/link',
+  tags: ['auth'],
+  summary: '用验证码关联邮箱',
+  security: [{ SessionCookie: [] }, { SessionBearer: [] }],
+  request: {
+    body: {
+      required: true,
+      content: {
+        'application/json': {
+          schema: z.object({ email: EmailSchema, code: VerificationCodeSchema }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: '邮箱已关联',
+      content: { 'application/json': { schema: LoginMethodSchema } },
+    },
+    400: {
+      description:
+        'validation_error：参数不合法；verification_code_invalid / verification_code_expired / verification_code_used / verification_code_max_attempts：关联验证码错误、过期、已使用或作废（登录验证码不能用于关联）',
+      content: errorContent,
+    },
+    401: { description: 'unauthorized：未登录或会话已失效', content: errorContent },
+    409: {
+      description:
+        'login_method_conflict：该邮箱已属于有持仓的其他用户；login_method_type_conflict：当前用户已关联其他邮箱',
+      content: errorContent,
+    },
+    429: { description: 'rate_limited：同一 IP 请求过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    503: { description: '数据库不可用', content: errorContent },
+  },
+});
+
+export const loginMethodDeleteRoute = createRoute({
+  method: 'delete',
+  path: '/v1/me/login-methods/{type}',
+  tags: ['auth'],
+  summary: '解绑登录方式',
+  security: [{ SessionCookie: [] }, { SessionBearer: [] }],
+  request: {
+    params: z.object({
+      type: z.enum(['email', 'github', 'wechat']).openapi({ description: '登录方式类型' }),
+    }),
+  },
+  responses: {
+    204: { description: '已解绑' },
+    400: { description: 'validation_error：登录方式类型不合法', content: errorContent },
+    401: { description: 'unauthorized：未登录或会话已失效', content: errorContent },
+    404: {
+      description: 'login_method_not_found：当前用户未关联该类型的登录方式',
+      content: errorContent,
+    },
+    409: { description: 'login_method_last：仅剩一种登录方式时不能解绑', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    503: { description: '数据库不可用', content: errorContent },
   },
 });

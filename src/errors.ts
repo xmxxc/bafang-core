@@ -25,6 +25,10 @@ export const ErrorCodeSchema = z.enum([
   'channel_name_conflict',
   'channel_protected',
   'channel_has_positions',
+  'login_method_conflict',
+  'login_method_type_conflict',
+  'login_method_last',
+  'login_method_not_found',
 ]);
 
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;

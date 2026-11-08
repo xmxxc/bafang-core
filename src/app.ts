@@ -24,6 +24,10 @@ import {
   githubStartRoute,
   githubCallbackRoute,
   wechatLoginRoute,
+  loginMethodsRoute,
+  emailLinkRequestRoute,
+  emailLinkRoute,
+  loginMethodDeleteRoute,
 } from './routes/auth';
 import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
@@ -53,8 +57,10 @@ import {
   createAuthService,
   EMAIL_CODE_COOLDOWN_MS,
   type AuthService,
+  type SessionInfo,
+  type UserPositionsChecker,
 } from './auth/service';
-import { getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
+import { extractSessionToken, getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
 import { ChannelError, createChannelService } from './channels/service';
 import {
   channelCreateRoute,
@@ -68,6 +74,8 @@ export interface AppDeps {
   db?: HealthProbe;
   /** 身份与登录模块使用的数据库；测试连接真实 PostgreSQL 测试库时传入。 */
   database?: Db;
+  /** 持仓判断入口；#16 接入真实持仓表前默认返回 false，测试可替换。 */
+  hasUserPositions?: UserPositionsChecker;
   /** 发信适配器；测试时替换为假发信。 */
   mailer?: Mailer;
   /** GitHub OAuth 适配器与固定的登录后跳转配置。 */
@@ -225,6 +233,7 @@ export function createApp(deps: AppDeps = {}): App {
         db: resolved.database,
         mailer: resolved.mailer,
         clock: resolved.clock,
+        hasPositions: deps.hasUserPositions,
       })
     : null;
   const requireLogin = auth ? requireAuth(auth) : null;
@@ -264,6 +273,8 @@ export function createApp(deps: AppDeps = {}): App {
 
   app.use('/v1/auth/email/request', rateLimit(EMAIL_CODE_REQUEST_RATE_LIMIT, resolved.clock));
   app.use('/v1/auth/email/login', rateLimit(EMAIL_LOGIN_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/email/link/request', rateLimit(EMAIL_CODE_REQUEST_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/email/link', rateLimit(EMAIL_LOGIN_RATE_LIMIT, resolved.clock));
 
   app.openapi(emailCodeRequestRoute, async (c) => {
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
@@ -287,6 +298,23 @@ export function createApp(deps: AppDeps = {}): App {
       },
       200,
     );
+  });
+
+  if (requireLogin) {
+    app.use('/v1/auth/email/link/request', requireLogin);
+    app.use('/v1/auth/email/link', requireLogin);
+  }
+  app.openapi(emailLinkRequestRoute, async (c) => {
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { email } = (await c.req.json()) as { email: string };
+    await auth.requestCode(email, 'link');
+    return c.json({ retryAfterSeconds: EMAIL_CODE_COOLDOWN_MS / 1000 }, 200);
+  });
+  app.openapi(emailLinkRoute, async (c) => {
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { email, code } = (await c.req.json()) as { email: string; code: string };
+    const linked = await auth.associateEmail(getAuth(c).userId, email, code);
+    return c.json({ type: linked.type, externalId: linked.externalId }, 200);
   });
 
   app.use('/v1/auth/wechat/login', async (c, next) => {
@@ -337,8 +365,15 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(githubStartRoute, async (c) => {
     if (!resolved.github)
       return c.json(errorBody('github_not_configured', 'GitHub 登录未配置'), 503);
-    if (!github) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
-    const result = await github.start();
+    if (!github || !auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { intent } = c.req.valid('query');
+    let session: SessionInfo | null = null;
+    if (intent === 'link') {
+      const token = extractSessionToken(c);
+      session = token ? await auth.authenticate(token) : null;
+      if (!session) return c.json(errorBody('unauthorized', '关联登录方式需要先登录'), 401);
+    }
+    const result = await github.start(intent, session ?? undefined);
     setCookie(c, GITHUB_BROWSER_COOKIE, result.browser, {
       httpOnly: true,
       secure: true,
@@ -351,18 +386,22 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(githubCallbackRoute, async (c) => {
     if (!resolved.github)
       return c.json(errorBody('github_not_configured', 'GitHub 登录未配置'), 503);
-    if (!github) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    if (!github || !auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     const { state, code, error } = c.req.valid('query');
     const browser = getCookie(c, GITHUB_BROWSER_COOKIE);
     deleteCookie(c, GITHUB_BROWSER_COOKIE, { path: '/', secure: true });
-    const result = await github.callback(state, browser, code, error);
-    setSessionCookie(c, result.token, result.expiresAt);
+    const token = extractSessionToken(c);
+    const session = token ? await auth.authenticate(token) : null;
+    const result = await github.callback(state, browser, code, error, session);
+    if (result.kind === 'login') setSessionCookie(c, result.token, result.expiresAt);
     return c.redirect(resolved.github.redirectUrl, 302);
   });
 
   if (requireLogin) {
     app.use('/v1/auth/logout', requireLogin);
     app.use('/v1/me', requireLogin);
+    app.use('/v1/me/login-methods', requireLogin);
+    app.use('/v1/me/login-methods/*', requireLogin);
   }
 
   app.openapi(logoutRoute, async (c) => {
@@ -385,6 +424,18 @@ export function createApp(deps: AppDeps = {}): App {
       },
       200,
     );
+  });
+
+  app.openapi(loginMethodsRoute, async (c) => {
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json({ items: await auth.listLoginMethods(getAuth(c).userId) }, 200);
+  });
+
+  app.openapi(loginMethodDeleteRoute, async (c) => {
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const type = c.req.param('type') as 'email' | 'github' | 'wechat';
+    await auth.unlinkLoginMethod(getAuth(c).userId, type);
+    return c.body(null, 204);
   });
 
   app.notFound((c) => c.json(errorBody('not_found', `未找到 ${c.req.path}`), 404));
