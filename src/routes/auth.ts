@@ -58,6 +58,18 @@ const LoginMethodSchema = z
   })
   .openapi('LoginMethod');
 
+const WeChatLoginResponseSchema = z
+  .object({
+    user: UserSummarySchema,
+    session: SessionSchema.extend({ device: z.literal('miniprogram') }),
+    token: z
+      .string()
+      .openapi({ description: '会话令牌；后续请求使用 Authorization: Bearer <token>' }),
+  })
+  .openapi('WeChatLoginResult');
+
+export type WeChatLoginResponse = z.infer<typeof WeChatLoginResponseSchema>;
+
 const MeResponseSchema = z
   .object({
     user: UserSummarySchema,
@@ -70,6 +82,42 @@ export type EmailLoginResponse = z.infer<typeof EmailLoginResponseSchema>;
 export type MeResponse = z.infer<typeof MeResponseSchema>;
 
 const errorContent = { 'application/json': { schema: ErrorResponseSchema } };
+
+export const wechatLoginRoute = createRoute({
+  method: 'post',
+  path: '/v1/auth/wechat/login',
+  tags: ['auth'],
+  summary: '微信小程序登录',
+  description:
+    '提交 wx.login 的一次性 code，使用 openid 识别用户。首次登录自动创建用户并预置三个渠道。返回小程序会话令牌，通过 Authorization: Bearer 请求头携带，不设置 Cookie。失败后应重新调用 wx.login 获取 code。',
+  request: {
+    body: {
+      required: true,
+      content: {
+        'application/json': {
+          schema: z.object({ code: z.string().min(1).max(512).regex(/^\S+$/) }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: '登录成功，建立独立的小程序会话',
+      content: { 'application/json': { schema: WeChatLoginResponseSchema } },
+    },
+    400: {
+      description: 'validation_error：参数不合法；wechat_code_invalid：code 无效或已使用',
+      content: errorContent,
+    },
+    429: { description: 'rate_limited：请求过于频繁', content: errorContent },
+    500: { description: '内部错误', content: errorContent },
+    502: { description: 'wechat_unavailable：微信暂不可用或返回格式异常', content: errorContent },
+    503: {
+      description: 'wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用',
+      content: errorContent,
+    },
+  },
+});
 
 export const emailCodeRequestRoute = createRoute({
   method: 'post',
@@ -157,5 +205,59 @@ export const meRoute = createRoute({
     401: { description: '未登录或会话已失效', content: errorContent },
     500: { description: '内部错误', content: errorContent },
     503: { description: '数据库不可用', content: errorContent },
+  },
+});
+
+const githubErrors = {
+  400: {
+    description:
+      'github_state_invalid：state 缺失、不匹配、过期、已使用；github_authorization_failed：授权被拒绝或缺少 code；validation_error：参数不合法',
+    content: errorContent,
+  },
+  429: { description: 'rate_limited：请求过于频繁', content: errorContent },
+  500: { description: '内部错误', content: errorContent },
+  502: { description: 'github_unavailable：GitHub 暂不可用或返回无效身份', content: errorContent },
+  503: {
+    description: 'github_not_configured：GitHub 登录未配置；database_unavailable：数据库不可用',
+    content: errorContent,
+  },
+};
+
+export const githubStartRoute = createRoute({
+  method: 'get',
+  path: '/v1/auth/github',
+  tags: ['auth'],
+  summary: '发起 GitHub 网页登录',
+  description:
+    '生成有效期 10 分钟、与浏览器 Cookie 绑定的一次性 state，并重定向到 GitHub（S256 PKCE）。不接受请求指定回调或登录后跳转地址。',
+  responses: {
+    302: {
+      description: '前往 GitHub 授权；设置 httpOnly + Secure + SameSite=Lax 的临时 Cookie',
+      headers: { Location: { schema: { type: 'string' } } },
+    },
+    ...githubErrors,
+  },
+});
+
+export const githubCallbackRoute = createRoute({
+  method: 'get',
+  path: '/v1/auth/github/callback',
+  tags: ['auth'],
+  summary: 'GitHub 授权回调',
+  description:
+    '先原子消费 state，再换取 GitHub 数字用户 ID；首次创建用户与三个渠道，建立与邮箱网页登录相同的会话 Cookie，跳回配置的网页地址。失败后需重新发起登录。',
+  request: {
+    query: z.object({
+      state: z.string().max(128).optional(),
+      code: z.string().max(2048).optional(),
+      error: z.string().max(256).optional(),
+    }),
+  },
+  responses: {
+    302: {
+      description: '登录成功；设置网页会话 Cookie，跳转到配置地址',
+      headers: { Location: { schema: { type: 'string' } } },
+    },
+    ...githubErrors,
   },
 });

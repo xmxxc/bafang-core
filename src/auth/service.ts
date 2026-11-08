@@ -18,7 +18,7 @@ export class AuthError extends Error {
   constructor(
     readonly code: ErrorCode,
     message: string,
-    readonly status: 400 | 429,
+    readonly status: 400 | 429 | 502,
   ) {
     super(message);
     this.name = 'AuthError';
@@ -52,6 +52,8 @@ export interface AuthService {
     code: string,
     device: Device,
   ): Promise<{ userId: string; token: string; device: Device; expiresAt: Date }>;
+  loginWithGitHubId(externalId: string): ReturnType<AuthService['loginWithEmail']>;
+  loginWithWeChatOpenId(openid: string): ReturnType<AuthService['loginWithEmail']>;
   logout(sessionId: string): Promise<void>;
   authenticate(token: string): Promise<SessionInfo | null>;
   me(userId: string): Promise<{
@@ -78,6 +80,37 @@ function shanghaiDayStart(date: Date): Date {
 
 export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }): AuthService {
   const { db, mailer, clock } = deps;
+
+  // 三种登录方式共用用户创建、预置渠道与会话写入路径；相同身份的并发首次登录串行化。
+  async function loginWithIdentity(
+    tx: Parameters<Parameters<Db['transaction']>[0]>[0],
+    type: LoginMethodType,
+    externalId: string,
+    device: Device,
+    tokenHash: string,
+    expiresAt: Date,
+  ): Promise<{ userId: string }> {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${type + ':' + externalId}))`);
+    const [method] = await tx
+      .select()
+      .from(loginMethods)
+      .where(and(eq(loginMethods.type, type), eq(loginMethods.externalId, externalId)))
+      .limit(1);
+    let userId = method?.userId;
+    if (!userId) {
+      const [created] = await tx.insert(users).values({}).returning({ id: users.id });
+      if (!created) throw new Error('创建用户失败');
+      userId = created.id;
+      await tx.insert(loginMethods).values({ userId, type, externalId });
+      await tx
+        .insert(channels)
+        .values(
+          PRESET_CHANNELS.map((name, sortOrder) => ({ userId: created.id, name, sortOrder })),
+        );
+    }
+    await tx.insert(sessions).values({ userId, tokenHash, device, expiresAt });
+    return { userId };
+  }
 
   return {
     async requestCode(email) {
@@ -235,35 +268,31 @@ export function createAuthService(deps: { db: Db; mailer: Mailer; clock: Clock }
           return null;
         }
 
-        const [method] = await tx
-          .select()
-          .from(loginMethods)
-          .where(and(eq(loginMethods.type, 'email'), eq(loginMethods.externalId, normalized)))
-          .limit(1);
-
-        let userId = method?.userId;
-        if (!userId) {
-          const [created] = await tx.insert(users).values({}).returning({ id: users.id });
-          if (!created) {
-            throw new Error('创建用户失败');
-          }
-          userId = created.id;
-          await tx.insert(loginMethods).values({ userId, type: 'email', externalId: normalized });
-          await tx
-            .insert(channels)
-            .values(
-              PRESET_CHANNELS.map((name, sortOrder) => ({ userId: created.id, name, sortOrder })),
-            );
-        }
-
-        await tx.insert(sessions).values({ userId, tokenHash, device, expiresAt });
-        return { userId };
+        return loginWithIdentity(tx, 'email', normalized, device, tokenHash, expiresAt);
       });
 
       if (!result) {
         throw new AuthError('verification_code_used', '验证码已使用', 400);
       }
       return { userId: result.userId, token, device, expiresAt };
+    },
+
+    async loginWithGitHubId(externalId) {
+      const token = generateSessionToken();
+      const expiresAt = new Date(clock.now().getTime() + SESSION_TTL_MS);
+      const result = await db.transaction((tx) =>
+        loginWithIdentity(tx, 'github', externalId, 'web', sha256Hex(token), expiresAt),
+      );
+      return { userId: result.userId, token, device: 'web', expiresAt };
+    },
+
+    async loginWithWeChatOpenId(openid) {
+      const token = generateSessionToken();
+      const expiresAt = new Date(clock.now().getTime() + SESSION_TTL_MS);
+      const result = await db.transaction((tx) =>
+        loginWithIdentity(tx, 'wechat', openid, 'miniprogram', sha256Hex(token), expiresAt),
+      );
+      return { userId: result.userId, token, device: 'miniprogram', expiresAt };
     },
 
     async logout(sessionId) {

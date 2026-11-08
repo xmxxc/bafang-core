@@ -33,8 +33,22 @@
     {
       "idx": 4,
       "version": "7",
+      "when": 1794078858244,
+      "tag": "0004_slippery_zaran",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794110394698,
+      "tag": "0005_trading_calendar_market",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
       "when": 1794078855472,
-      "tag": "0004_serious_thunderbird",
+      "tag": "0006_serious_thunderbird",
       "breakpoints": true
     }
   ]

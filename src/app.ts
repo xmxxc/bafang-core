@@ -1,8 +1,13 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
-import { setCookie, deleteCookie } from 'hono/cookie';
+import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 import { HTTPException } from 'hono/http-exception';
 import { SystemClock, type Clock } from './clock';
-import { ChineseTradingCalendar, type TradingCalendar } from './trading-calendar';
+import {
+  ChineseTradingCalendar,
+  HongKongTradingCalendar,
+  type SessionCalendar,
+  type TradingCalendar,
+} from './trading-calendar';
 import { type Db, type HealthProbe } from './db';
 import { errorBody } from './errors';
 import { healthRoute } from './routes/health';
@@ -10,24 +15,43 @@ import { fundDetailRoute, fundSearchRoute } from './routes/funds';
 import { estimateBatchRoute } from './routes/estimates';
 import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
-import { emailCodeRequestRoute, emailLoginRoute, logoutRoute, meRoute } from './routes/auth';
+import { marketIndicesRoute } from './routes/market-indices';
+import {
+  emailCodeRequestRoute,
+  emailLoginRoute,
+  logoutRoute,
+  meRoute,
+  githubStartRoute,
+  githubCallbackRoute,
+  wechatLoginRoute,
+} from './routes/auth';
 import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
 import { createEstimateService } from './market/estimates';
 import { marketStatus } from './market/status';
+import { createIndexService } from './market/indices';
 import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
 import {
   ANONYMOUS_MARKET_RATE_LIMIT,
   EMAIL_CODE_REQUEST_RATE_LIMIT,
   EMAIL_LOGIN_RATE_LIMIT,
+  GITHUB_LOGIN_RATE_LIMIT,
+  WECHAT_LOGIN_RATE_LIMIT,
   rateLimit,
 } from './rate-limit';
+import { setSessionCookie } from './auth/cookie';
+import type { GitHubLogin } from './auth/github';
+import { WeChatCodeInvalidError, type WeChatCode2Session } from './auth/wechat';
+import {
+  createGitHubLoginService,
+  GITHUB_BROWSER_COOKIE,
+  GITHUB_STATE_TTL_MS,
+} from './auth/github-login';
 import { MissingMailer, type Mailer } from './auth/mailer';
 import {
   AuthError,
   createAuthService,
   EMAIL_CODE_COOLDOWN_MS,
-  SESSION_TTL_MS,
   type AuthService,
 } from './auth/service';
 import { getAuth, requireAuth, SESSION_COOKIE } from './auth/middleware';
@@ -46,8 +70,14 @@ export interface AppDeps {
   database?: Db;
   /** 发信适配器；测试时替换为假发信。 */
   mailer?: Mailer;
+  /** GitHub OAuth 适配器与固定的登录后跳转配置。 */
+  github?: GitHubLogin;
+  /** 微信 code2session 适配器；测试时替换为假实现。 */
+  wechat?: WeChatCode2Session;
   clock?: Clock;
   tradingCalendar?: TradingCalendar;
+  /** 港股交易日历（含半日市）；省略时只按周末判定。 */
+  hkTradingCalendar?: SessionCalendar;
   /** 统一上游抓取适配器；测试时整体替换为录制样本。 */
   upstream?: UpstreamFetcher;
 }
@@ -56,8 +86,11 @@ export interface ResolvedDeps {
   db: HealthProbe | undefined;
   database: Db | undefined;
   mailer: Mailer;
+  github: GitHubLogin | undefined;
+  wechat: WeChatCode2Session | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
+  hkTradingCalendar: SessionCalendar;
   upstream: UpstreamFetcher;
 }
 
@@ -65,9 +98,12 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
   return {
     db: deps.db,
     database: deps.database,
+    github: deps.github,
+    wechat: deps.wechat,
     mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
+    hkTradingCalendar: deps.hkTradingCalendar ?? new HongKongTradingCalendar(),
     upstream: deps.upstream ?? new HttpUpstreamFetcher(),
   };
 }
@@ -173,6 +209,17 @@ export function createApp(deps: AppDeps = {}): App {
     );
   });
 
+  const indices = createIndexService({
+    upstream: resolved.upstream,
+    clock: resolved.clock,
+    calendar: resolved.tradingCalendar,
+    hkCalendar: resolved.hkTradingCalendar,
+  });
+  app.openapi(marketIndicesRoute, async (c) => {
+    const items = await indices.list();
+    return c.json({ items, time: resolved.clock.now().toISOString() }, 200);
+  });
+
   const auth: AuthService | null = resolved.database
     ? createAuthService({
         db: resolved.database,
@@ -230,14 +277,7 @@ export function createApp(deps: AppDeps = {}): App {
     const { email, code, device } = c.req.valid('json');
     const result = await auth.loginWithEmail(email, code, device);
     if (device === 'web') {
-      setCookie(c, SESSION_COOKIE, result.token, {
-        httpOnly: true,
-        secure: true,
-        sameSite: 'Lax',
-        path: '/',
-        maxAge: Math.floor(SESSION_TTL_MS / 1000),
-        expires: result.expiresAt,
-      });
+      setSessionCookie(c, result.token, result.expiresAt);
     }
     return c.json(
       {
@@ -247,6 +287,77 @@ export function createApp(deps: AppDeps = {}): App {
       },
       200,
     );
+  });
+
+  app.use('/v1/auth/wechat/login', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    await next();
+  });
+  app.use('/v1/auth/wechat/login', rateLimit(WECHAT_LOGIN_RATE_LIMIT, resolved.clock));
+  app.openapi(wechatLoginRoute, async (c) => {
+    if (!resolved.wechat) return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
+    if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { code } = c.req.valid('json');
+    let openid: string;
+    try {
+      openid = await resolved.wechat.openid(code);
+    } catch (error) {
+      // 不传播微信响应、请求 URL、code、AppSecret 或 session_key。
+      if (error instanceof WeChatCodeInvalidError)
+        throw new AuthError('wechat_code_invalid', '微信登录凭据无效，请重新登录', 400);
+      throw new AuthError('wechat_unavailable', '微信登录暂不可用，请稍后重试', 502);
+    }
+    const result = await auth.loginWithWeChatOpenId(openid);
+    return c.json(
+      {
+        user: { id: result.userId },
+        session: { device: 'miniprogram' as const, expiresAt: result.expiresAt.toISOString() },
+        token: result.token,
+      },
+      200,
+    );
+  });
+
+  const github =
+    resolved.github && resolved.database && auth
+      ? createGitHubLoginService({
+          db: resolved.database,
+          clock: resolved.clock,
+          oauth: resolved.github.oauth,
+          auth,
+        })
+      : null;
+  app.use('/v1/auth/github*', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    c.header('Referrer-Policy', 'no-referrer');
+    await next();
+  });
+  app.use('/v1/auth/github', rateLimit(GITHUB_LOGIN_RATE_LIMIT, resolved.clock));
+  app.use('/v1/auth/github/callback', rateLimit(GITHUB_LOGIN_RATE_LIMIT, resolved.clock));
+  app.openapi(githubStartRoute, async (c) => {
+    if (!resolved.github)
+      return c.json(errorBody('github_not_configured', 'GitHub 登录未配置'), 503);
+    if (!github) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const result = await github.start();
+    setCookie(c, GITHUB_BROWSER_COOKIE, result.browser, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax',
+      path: '/',
+      maxAge: GITHUB_STATE_TTL_MS / 1000,
+    });
+    return c.redirect(result.url, 302);
+  });
+  app.openapi(githubCallbackRoute, async (c) => {
+    if (!resolved.github)
+      return c.json(errorBody('github_not_configured', 'GitHub 登录未配置'), 503);
+    if (!github) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { state, code, error } = c.req.valid('query');
+    const browser = getCookie(c, GITHUB_BROWSER_COOKIE);
+    deleteCookie(c, GITHUB_BROWSER_COOKIE, { path: '/', secure: true });
+    const result = await github.callback(state, browser, code, error);
+    setSessionCookie(c, result.token, result.expiresAt);
+    return c.redirect(resolved.github.redirectUrl, 302);
   });
 
   if (requireLogin) {

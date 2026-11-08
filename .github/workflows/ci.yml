@@ -1,0 +1,79 @@
+# CI：每个 PR 与每次推送到 main 都跑同一套检查（#25）。
+# 单个 job `ci` 产生一个固定名称的检查项，便于在 main 的分支保护里设为必需检查。
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # 只用于初始化：下面的步骤用 docker/initdb 里的脚本建出与本机一致的
+          # test_bafang 角色（NOCREATEDB、NOSUPERUSER）和同名库，测试只用这个角色连接。
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGHOST: localhost
+      PGPORT: 5432
+      PGUSER: test_bafang
+      PGPASSWORD: changeme
+      PGDATABASE: test_bafang
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create test role and database (same as docker/initdb)
+        env:
+          PGUSER: postgres
+          PGPASSWORD: postgres
+          PGDATABASE: postgres
+        run: psql -v ON_ERROR_STOP=1 -f docker/initdb/01-init.sql
+
+      # pnpm 版本取自 package.json 的 packageManager 字段
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Format check
+        run: pnpm format:check
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: OpenAPI contract check
+        run: pnpm openapi:check
