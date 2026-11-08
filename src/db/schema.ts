@@ -12,6 +12,7 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
+import { sql } from 'drizzle-orm';
 
 export const appMeta = pgTable('app_meta', {
   key: text('key').primaryKey(),
@@ -88,13 +89,31 @@ export const bindCodes = pgTable(
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
     codeHash: text('code_hash').notNull(),
+    active: boolean('active').notNull().default(true),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
     usedAt: timestamp('used_at', { withTimezone: true }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex('bind_codes_code_hash_uidx').on(t.codeHash),
+    uniqueIndex('bind_codes_code_hash_active_uidx')
+      .on(t.codeHash)
+      .where(sql`${t.active}`),
     index('bind_codes_user_created_idx').on(t.userId, t.createdAt),
+  ],
+);
+
+/** 绑定码猜测失败预算；按 openid 和全局窗口持久化，跨进程共享。 */
+export const bindCodeFailures = pgTable(
+  'bind_code_failures',
+  {
+    scope: text('scope').notNull(),
+    key: text('key').notNull(),
+    windowStarted: timestamp('window_started', { withTimezone: true }).notNull(),
+    failures: integer('failures').notNull().default(0),
+  },
+  (t) => [
+    primaryKey({ columns: [t.scope, t.key] }),
+    index('bind_code_failures_window_idx').on(t.windowStarted),
   ],
 );
 

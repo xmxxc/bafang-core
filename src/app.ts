@@ -107,6 +107,8 @@ export interface AppDeps {
   wechat?: WeChatCode2Session;
   /** 绑定码 HMAC 密钥；生产环境应显式配置。 */
   bindCodeSecret?: string;
+  /** 测试替换绑定码随机出口。 */
+  bindCodeGenerator?: () => string;
   clock?: Clock;
   tradingCalendar?: TradingCalendar;
   /** 港股交易日历（含半日市）；省略时只按周末判定。 */
@@ -121,23 +123,35 @@ export interface ResolvedDeps {
   mailer: Mailer;
   github: GitHubLogin | undefined;
   wechat: WeChatCode2Session | undefined;
-  bindCodeSecret: string;
+  bindCodeSecret: string | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
   hkTradingCalendar: SessionCalendar;
   upstream: UpstreamFetcher;
 }
 
+let bindCodeWarningLogged = false;
+
 export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
+  const configuredBindCodeSecret =
+    deps.bindCodeSecret?.trim() || process.env.BIND_CODE_SECRET?.trim();
+  const bindCodeSecret =
+    configuredBindCodeSecret ||
+    (process.env.NODE_ENV === 'development' || process.env.NODE_ENV === 'test'
+      ? 'bafang-core-development-bind-code-key'
+      : undefined);
+  if (!bindCodeSecret && !bindCodeWarningLogged) {
+    console.warn(
+      '[bafang-core] BIND_CODE_SECRET 未配置，绑定码能力已禁用（仅 development/test 使用开发默认值）',
+    );
+    bindCodeWarningLogged = true;
+  }
   return {
     db: deps.db,
     database: deps.database,
     github: deps.github,
     wechat: deps.wechat,
-    bindCodeSecret:
-      deps.bindCodeSecret?.trim() ||
-      process.env.BIND_CODE_SECRET?.trim() ||
-      'bafang-core-development-bind-code-key',
+    bindCodeSecret,
     mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
@@ -290,6 +304,7 @@ export function createApp(deps: AppDeps = {}): App {
         clock: resolved.clock,
         hasPositions: deps.hasUserPositions,
         bindCodeSecret: resolved.bindCodeSecret,
+        bindCodeGenerator: deps.bindCodeGenerator,
       })
     : null;
   const requireLogin = auth ? requireAuth(auth) : null;
@@ -474,6 +489,8 @@ export function createApp(deps: AppDeps = {}): App {
   if (requireLogin) app.use('/v1/auth/bind-code', requireLogin);
   app.openapi(bindCodeGenerateRoute, async (c) => {
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    if (!resolved.bindCodeSecret)
+      return c.json(errorBody('bind_code_not_configured', '绑定码功能未配置'), 503);
     if (getAuth(c).device !== 'web') {
       return c.json(errorBody('bind_code_web_required', '生成绑定码需要网页会话'), 403);
     }
@@ -484,6 +501,8 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(wechatBindCodeRoute, async (c) => {
     if (!resolved.wechat) return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
     if (!auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    if (!resolved.bindCodeSecret)
+      return c.json(errorBody('bind_code_not_configured', '绑定码功能未配置'), 503);
     const body = c.req.valid('json');
     let openid: string;
     try {

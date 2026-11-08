@@ -1,5 +1,5 @@
 {
-  "id": "7ba915bf-de60-4d11-bab6-11035d257ca1",
+  "id": "7ba965fe-e208-4761-8c77-a3c96e6f3bc5",
   "prevId": "c6f16270-89e2-4297-9fb8-c162589d07e0",
   "version": "7",
   "dialect": "postgresql",
@@ -36,6 +36,68 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
+    "public.bind_code_failures": {
+      "name": "bind_code_failures",
+      "schema": "",
+      "columns": {
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "window_started": {
+          "name": "window_started",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "failures": {
+          "name": "failures",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        }
+      },
+      "indexes": {
+        "bind_code_failures_window_idx": {
+          "name": "bind_code_failures_window_idx",
+          "columns": [
+            {
+              "expression": "window_started",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "bind_code_failures_scope_key_pk": {
+          "name": "bind_code_failures_scope_key_pk",
+          "columns": [
+            "scope",
+            "key"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.bind_codes": {
       "name": "bind_codes",
       "schema": "",
@@ -59,6 +121,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "active": {
+          "name": "active",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
+        },
         "expires_at": {
           "name": "expires_at",
           "type": "timestamp with time zone",
@@ -80,8 +149,8 @@
         }
       },
       "indexes": {
-        "bind_codes_code_hash_uidx": {
-          "name": "bind_codes_code_hash_uidx",
+        "bind_codes_code_hash_active_uidx": {
+          "name": "bind_codes_code_hash_active_uidx",
           "columns": [
             {
               "expression": "code_hash",
@@ -91,6 +160,7 @@
             }
           ],
           "isUnique": true,
+          "where": "\"bind_codes\".\"active\"",
           "concurrently": false,
           "method": "btree",
           "with": {}

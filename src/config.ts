@@ -24,7 +24,7 @@ const EnvSchema = z.object({
   GITHUB_LOGIN_REDIRECT_URL: z.string().optional(),
   WECHAT_APP_ID: z.string().optional(),
   WECHAT_APP_SECRET: z.string().optional(),
-  /** 用于绑定码 HMAC；未配置时由应用提供开发环境默认值。 */
+  /** 绑定码 HMAC；仅明确 development/test 环境允许开发默认值。 */
   BIND_CODE_SECRET: z.string().optional(),
 });
 
@@ -44,3 +44,13 @@ export function toDbConfig(config: Config): DbConfig {
     schema: config.PGSCHEMA,
   };
 }
+
+/** 绑定码安全策略配置：固定窗口、数据库共享预算。 */
+export const BIND_CODE_POLICY = {
+  openidFailureLimit: 10,
+  openidFailureWindowMs: 24 * 60 * 60 * 1000,
+  globalFailureLimit: 300,
+  globalFailureWindowMs: 60 * 60 * 1000,
+  retentionMs: 24 * 60 * 60 * 1000,
+  generationAttempts: 5,
+} as const;
