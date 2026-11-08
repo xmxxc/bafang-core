@@ -6,19 +6,37 @@ import { loadHongKongTradingCalendar, loadTradingCalendar } from './trading-cale
 import { createMailer } from './auth/mailer';
 import { createGitHubLogin } from './auth/github';
 import { createWeChatLogin } from './auth/wechat';
+import { startSettlementScheduler } from './positions/settlement';
 
 const config = loadConfig();
 const pool = createPool(toDbConfig(config));
+const tradingCalendar = await loadTradingCalendar(pool);
 const app = createApp({
   db: createHealthProbe(pool),
   database: createDb(pool),
   mailer: createMailer(config),
   github: createGitHubLogin(config),
   wechat: createWeChatLogin(config),
-  tradingCalendar: await loadTradingCalendar(pool),
+  tradingCalendar,
   hkTradingCalendar: await loadHongKongTradingCalendar(pool),
 });
 
+const stopSettlementScheduler = app.settlementJob
+  ? startSettlementScheduler(app.settlementJob, {
+      clock: { now: () => new Date() },
+      calendar: tradingCalendar,
+    })
+  : () => undefined;
+
 serve({ fetch: app.fetch, port: config.PORT }, (info) => {
   console.log(`bafang-core listening on http://localhost:${info.port}`);
+});
+
+process.once('SIGTERM', () => {
+  stopSettlementScheduler();
+  void pool.end();
+});
+process.once('SIGINT', () => {
+  stopSettlementScheduler();
+  void pool.end();
 });

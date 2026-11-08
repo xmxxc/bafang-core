@@ -83,6 +83,11 @@ import { summarizePositions, summarizeByFund } from './positions/summary';
 
 import { createTradeService } from './positions/trades';
 import { tradeCreateRoute, tradeListRoute, tradeCancelRoute } from './routes/trades';
+import {
+  createSettlementJob,
+  type SettlementJob,
+  type SettlementSummary,
+} from './positions/settlement';
 
 export interface AppDeps {
   db?: HealthProbe;
@@ -130,7 +135,11 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
   };
 }
 
-export type App = OpenAPIHono;
+export type App = OpenAPIHono & {
+  /** 进程内手动补跑交易确认；测试和 CLI 复用同一入口。 */
+  settlementJob: SettlementJob | null;
+  runSettlement(): Promise<SettlementSummary>;
+};
 
 export function createApp(deps: AppDeps = {}): App {
   const resolved = resolveDeps(deps);
@@ -197,6 +206,9 @@ export function createApp(deps: AppDeps = {}): App {
         clock: resolved.clock,
         calendar: resolved.tradingCalendar,
       })
+    : null;
+  const settlementJob = resolved.database
+    ? createSettlementJob({ db: resolved.database, nav, clock: resolved.clock })
     : null;
   const marketRateLimit = rateLimit(ANONYMOUS_MARKET_RATE_LIMIT, resolved.clock);
   app.use('/v1/funds/*', marketRateLimit);
@@ -556,5 +568,9 @@ export function createApp(deps: AppDeps = {}): App {
     },
   });
 
-  return app;
+  const runtime = app as App;
+  runtime.settlementJob = settlementJob;
+  runtime.runSettlement = () =>
+    settlementJob?.run() ?? Promise.resolve({ confirmed: 0, pending: 0, failed: 0, failures: [] });
+  return runtime;
 }

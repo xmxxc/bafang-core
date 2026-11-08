@@ -16,6 +16,7 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "trading-calendar:import": "tsx src/trading-calendar/import.ts",
+    "trades:settle": "tsx src/positions/settlement-cli.ts",
     "openapi:generate": "tsx scripts/generate-openapi.ts",
     "openapi:check": "tsx scripts/generate-openapi.ts --check",
     "test": "vitest run",
