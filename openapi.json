@@ -55,6 +55,13 @@
                   "upstream_unavailable",
                   "rate_limited",
                   "unauthorized",
+                  "wechat_not_configured",
+                  "wechat_code_invalid",
+                  "wechat_unavailable",
+                  "github_not_configured",
+                  "github_state_invalid",
+                  "github_authorization_failed",
+                  "github_unavailable",
                   "verification_code_expired",
                   "verification_code_invalid",
                   "verification_code_used",
@@ -462,6 +469,41 @@
         "required": [
           "device",
           "expiresAt"
+        ]
+      },
+      "WeChatLoginResult": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/UserSummary"
+          },
+          "session": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Session"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "device": {
+                    "type": "string",
+                    "enum": [
+                      "miniprogram"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          "token": {
+            "type": "string",
+            "description": "会话令牌；后续请求使用 Authorization: Bearer <token>"
+          }
+        },
+        "required": [
+          "user",
+          "session",
+          "token"
         ]
       },
       "Me": {
@@ -1183,6 +1225,269 @@
           },
           "503": {
             "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/wechat/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "微信小程序登录",
+        "description": "提交 wx.login 的一次性 code，使用 openid 识别用户。首次登录自动创建用户并预置三个渠道。返回小程序会话令牌，通过 Authorization: Bearer 请求头携带，不设置 Cookie。失败后应重新调用 wx.login 获取 code。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512,
+                    "pattern": "^\\S+$"
+                  }
+                },
+                "required": [
+                  "code"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "登录成功，建立独立的小程序会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WeChatLoginResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法；wechat_code_invalid：code 无效或已使用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "wechat_unavailable：微信暂不可用或返回格式异常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "wechat_not_configured：微信登录未配置；database_unavailable：数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/github": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "发起 GitHub 网页登录",
+        "description": "生成有效期 10 分钟、与浏览器 Cookie 绑定的一次性 state，并重定向到 GitHub（S256 PKCE）。不接受请求指定回调或登录后跳转地址。",
+        "responses": {
+          "302": {
+            "description": "前往 GitHub 授权；设置 httpOnly + Secure + SameSite=Lax 的临时 Cookie",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "github_state_invalid：state 缺失、不匹配、过期、已使用；github_authorization_failed：授权被拒绝或缺少 code；validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "github_unavailable：GitHub 暂不可用或返回无效身份",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "github_not_configured：GitHub 登录未配置；database_unavailable：数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/auth/github/callback": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "GitHub 授权回调",
+        "description": "先原子消费 state，再换取 GitHub 数字用户 ID；首次创建用户与三个渠道，建立与邮箱网页登录相同的会话 Cookie，跳回配置的网页地址。失败后需重新发起登录。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            },
+            "required": false,
+            "name": "state",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 2048
+            },
+            "required": false,
+            "name": "code",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 256
+            },
+            "required": false,
+            "name": "error",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "302": {
+            "description": "登录成功；设置网页会话 Cookie，跳转到配置地址",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "github_state_invalid：state 缺失、不匹配、过期、已使用；github_authorization_failed：授权被拒绝或缺少 code；validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "rate_limited：请求过于频繁",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "github_unavailable：GitHub 暂不可用或返回无效身份",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "github_not_configured：GitHub 登录未配置；database_unavailable：数据库不可用",
             "content": {
               "application/json": {
                 "schema": {
