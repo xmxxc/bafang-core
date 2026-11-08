@@ -1,7 +1,12 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 import { SystemClock, type Clock } from './clock';
-import { ChineseTradingCalendar, type TradingCalendar } from './trading-calendar';
+import {
+  ChineseTradingCalendar,
+  HongKongTradingCalendar,
+  type SessionCalendar,
+  type TradingCalendar,
+} from './trading-calendar';
 import { type Db, type HealthProbe } from './db';
 import { errorBody } from './errors';
 import { healthRoute } from './routes/health';
@@ -9,6 +14,7 @@ import { fundDetailRoute, fundSearchRoute } from './routes/funds';
 import { estimateBatchRoute } from './routes/estimates';
 import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
+import { marketIndicesRoute } from './routes/market-indices';
 import {
   emailCodeRequestRoute,
   emailLoginRoute,
@@ -22,6 +28,7 @@ import { createFundService } from './market/funds';
 import { createNavService } from './market/nav';
 import { createEstimateService } from './market/estimates';
 import { marketStatus } from './market/status';
+import { createIndexService } from './market/indices';
 import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
 import {
   ANONYMOUS_MARKET_RATE_LIMIT,
@@ -61,6 +68,8 @@ export interface AppDeps {
   wechat?: WeChatCode2Session;
   clock?: Clock;
   tradingCalendar?: TradingCalendar;
+  /** 港股交易日历（含半日市）；省略时只按周末判定。 */
+  hkTradingCalendar?: SessionCalendar;
   /** 统一上游抓取适配器；测试时整体替换为录制样本。 */
   upstream?: UpstreamFetcher;
 }
@@ -73,6 +82,7 @@ export interface ResolvedDeps {
   wechat: WeChatCode2Session | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
+  hkTradingCalendar: SessionCalendar;
   upstream: UpstreamFetcher;
 }
 
@@ -85,6 +95,7 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
     mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
     tradingCalendar: deps.tradingCalendar ?? new ChineseTradingCalendar(),
+    hkTradingCalendar: deps.hkTradingCalendar ?? new HongKongTradingCalendar(),
     upstream: deps.upstream ?? new HttpUpstreamFetcher(),
   };
 }
@@ -178,6 +189,17 @@ export function createApp(deps: AppDeps = {}): App {
       { status: marketStatus(now, resolved.tradingCalendar), time: now.toISOString() },
       200,
     );
+  });
+
+  const indices = createIndexService({
+    upstream: resolved.upstream,
+    clock: resolved.clock,
+    calendar: resolved.tradingCalendar,
+    hkCalendar: resolved.hkTradingCalendar,
+  });
+  app.openapi(marketIndicesRoute, async (c) => {
+    const items = await indices.list();
+    return c.json({ items, time: resolved.clock.now().toISOString() }, 200);
   });
 
   const auth: AuthService | null = resolved.database
