@@ -4,6 +4,7 @@ import { createDb, createHealthProbe, createPool } from './db';
 import { loadConfig, toDbConfig } from './config';
 import { loadTradingCalendar } from './trading-calendar';
 import { createMailer } from './auth/mailer';
+import { createGitHubLogin } from './auth/github';
 
 const config = loadConfig();
 const pool = createPool(toDbConfig(config));
@@ -11,6 +12,7 @@ const app = createApp({
   db: createHealthProbe(pool),
   database: createDb(pool),
   mailer: createMailer(config),
+  github: createGitHubLogin(config),
   tradingCalendar: await loadTradingCalendar(pool),
 });
 

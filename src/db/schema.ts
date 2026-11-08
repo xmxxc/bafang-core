@@ -103,3 +103,15 @@ export const channels = pgTable(
   },
   (t) => [index('channels_user_idx').on(t.userId)],
 );
+
+/** GitHub 一次性授权请求；state 与浏览器标识只存哈希，10 分钟过期。 */
+export const githubOAuthStates = pgTable(
+  'github_oauth_states',
+  {
+    stateHash: text('state_hash').primaryKey(),
+    browserHash: text('browser_hash').notNull(),
+    verifier: text('verifier').notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('github_oauth_states_expires_idx').on(t.expiresAt)],
+);

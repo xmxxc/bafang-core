@@ -165,3 +165,57 @@ export const meRoute = createRoute({
     503: { description: '数据库不可用', content: errorContent },
   },
 });
+
+const githubErrors = {
+  400: {
+    description:
+      'github_state_invalid：state 缺失、不匹配、过期、已使用；github_authorization_failed：授权被拒绝或缺少 code；validation_error：参数不合法',
+    content: errorContent,
+  },
+  429: { description: 'rate_limited：请求过于频繁', content: errorContent },
+  500: { description: '内部错误', content: errorContent },
+  502: { description: 'github_unavailable：GitHub 暂不可用或返回无效身份', content: errorContent },
+  503: {
+    description: 'github_not_configured：GitHub 登录未配置；database_unavailable：数据库不可用',
+    content: errorContent,
+  },
+};
+
+export const githubStartRoute = createRoute({
+  method: 'get',
+  path: '/v1/auth/github',
+  tags: ['auth'],
+  summary: '发起 GitHub 网页登录',
+  description:
+    '生成有效期 10 分钟、与浏览器 Cookie 绑定的一次性 state，并重定向到 GitHub（S256 PKCE）。不接受请求指定回调或登录后跳转地址。',
+  responses: {
+    302: {
+      description: '前往 GitHub 授权；设置 httpOnly + Secure + SameSite=Lax 的临时 Cookie',
+      headers: { Location: { schema: { type: 'string' } } },
+    },
+    ...githubErrors,
+  },
+});
+
+export const githubCallbackRoute = createRoute({
+  method: 'get',
+  path: '/v1/auth/github/callback',
+  tags: ['auth'],
+  summary: 'GitHub 授权回调',
+  description:
+    '先原子消费 state，再换取 GitHub 数字用户 ID；首次创建用户与三个渠道，建立与邮箱网页登录相同的会话 Cookie，跳回配置的网页地址。失败后需重新发起登录。',
+  request: {
+    query: z.object({
+      state: z.string().max(128).optional(),
+      code: z.string().max(2048).optional(),
+      error: z.string().max(256).optional(),
+    }),
+  },
+  responses: {
+    302: {
+      description: '登录成功；设置网页会话 Cookie，跳转到配置地址',
+      headers: { Location: { schema: { type: 'string' } } },
+    },
+    ...githubErrors,
+  },
+});
