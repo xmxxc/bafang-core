@@ -1,22 +1,10 @@
 import { and, eq, max } from 'drizzle-orm';
 import type { Db } from '../db';
 import { channels, users } from '../db/schema';
+import { channelHasAnyPositions, channelHasPositions } from '../positions/service';
 import type { ErrorCode } from '../errors';
 
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
-
-/**
- * #16 接入持仓表后，在当前事务里按 userId + channelId 查询是否存在任何持仓。
- * 当前尚无持仓表，所有渠道均无持仓；后续已清仓持仓的迁移规则由 #19 补全。
- */
-async function channelHasPositions(
-  _tx: Transaction,
-  _userId: string,
-  _channelId: string,
-): Promise<boolean> {
-  void [_tx, _userId, _channelId];
-  return false;
-}
 
 async function editableChannel(tx: Transaction, userId: string, id: string) {
   const [channel] = await tx
@@ -110,6 +98,10 @@ export function createChannelService(db: Db) {
         await editableChannel(tx, userId, id);
         if (await channelHasPositions(tx, userId, id)) {
           throw new ChannelError('channel_has_positions', '渠道下仍有持仓，不能删除', 409);
+        }
+        // 只剩已清仓持仓时应移到“未指定”后再删除（#19）；在那之前也拒绝，避免丢失持仓。
+        if (await channelHasAnyPositions(tx, userId, id)) {
+          throw new ChannelError('channel_has_positions', '渠道下还有已清仓持仓，暂不能删除', 409);
         }
         await tx.delete(channels).where(and(eq(channels.userId, userId), eq(channels.id, id)));
       });

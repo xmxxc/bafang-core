@@ -3,6 +3,7 @@ import { and, count, desc, eq, gt, gte, isNull, lt, sql } from 'drizzle-orm';
 import { shanghaiDate, type Clock } from '../clock';
 import type { Db } from '../db';
 import { channels, emailVerificationCodes, loginMethods, sessions, users } from '../db/schema';
+import { userHasPositions as queryUserHasPositions } from '../positions/service';
 import type { ExtendedErrorCode } from '../errors';
 import type { Mailer } from './mailer';
 import { generateSessionToken, generateVerificationCode, sha256Hex } from './token';
@@ -78,13 +79,8 @@ export interface AuthService {
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
 export type UserPositionsChecker = (tx: Transaction, userId: string) => Promise<boolean>;
 
-/** #16 接入持仓表后，在当前事务里查询用户是否有任何持仓。 */
-export async function userHasPositions(_tx: Transaction, _userId: string): Promise<boolean> {
-  // 当前分支尚无持仓表；渠道、会话和其他登录方式都不算持仓。
-  void _tx;
-  void _userId;
-  return false;
-}
+/** 在当前事务里查询用户是否有任何持仓（含已清仓），用于空用户判定。 */
+export const userHasPositions: UserPositionsChecker = queryUserHasPositions;
 
 function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();

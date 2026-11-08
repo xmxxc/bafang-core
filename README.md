@@ -96,7 +96,23 @@ docker compose up -d
 
 渠道名去除首尾空白后为 1–100 字符，同一用户下精确匹配、不能重名（包括与预置渠道重名）；冲突返回 409 `channel_name_conflict`，数据库唯一约束保证并发请求下仍成立。新用户预置“支付宝”“天天基金”“未指定”，已有用户迁移后保留原顺序。每个用户恰好一个“未指定”，改名或删除返回 409 `channel_protected`，可以调整其顺序。排序列表缺漏或重复返回 400 `validation_error`，不改变原顺序。
 
-删除仅允许没有任何持仓的渠道。当前持仓模块尚未实现，`src/channels/service.ts` 的 `channelHasPositions` 暂返回无持仓；#16 在同一事务中接入真实查询后，有持仓时返回 409 `channel_has_positions`。只剩已清仓持仓时移到“未指定”的规则由 #19 补全。
+删除时在同一事务中查询持仓：有未清仓持仓时返回 409 `channel_has_positions`。只剩已清仓持仓时应移到“未指定”后再删除，这条规则由 #19 补全；在那之前同样返回 409 `channel_has_positions`，持仓不会随渠道被删除（外键不级联）。
+
+### 持仓接口
+
+需要登录（会话 Cookie 或 `Authorization: Bearer <token>`），只能操作自己的持仓，别人的持仓返回 404 `not_found`。持仓的唯一键是用户 × 基金 × 渠道（ADR 0001）。
+
+| 接口                           | 请求体                                                                   | 成功响应                                                  |
+| ------------------------------ | ------------------------------------------------------------------------ | --------------------------------------------------------- |
+| `GET /v1/positions?channelId=` | —                                                                        | 200 `{ items: [Position] }`，按创建先后；`channelId` 可选 |
+| `GET /v1/positions/{id}`       | —                                                                        | 200 `Position`                                            |
+| `POST /v1/positions`           | `{ fundCode, channelId, shares, totalCost \| unitPrice, snapshotDate? }` | 201 `Position`                                            |
+| `PATCH /v1/positions/{id}`     | `{ shares, totalCost \| unitPrice }`                                     | 200 `Position`（校准，不生成交易）                        |
+| `DELETE /v1/positions/{id}`    | —                                                                        | 204，连同交易一起删除                                     |
+
+- 数值一律是十进制字符串（JSON 数字返回 400），计算用 bigint 定点、不经过浮点：份额、单价、净值 4 位，金额 2 位，收益率是比值、4 位。总成本与单价必须且只能填一个；用单价时总成本 = 份额 × 单价，返回的 `unitPrice` 总是总成本 ÷ 份额。降精度一律四舍五入（远离零），与 `src/market/quote.ts` 一致。输入的小数位超过精度时返回 400，不替用户舍入。
+- 新建要求份额大于 0、基金存在（按基金详情校验，不存在返回 404 `fund_not_found`，上游不可用返回 502 `upstream_unavailable`）、渠道是自己的（否则 404 `not_found`）；`snapshotDate` 缺省为当天（上海时间）。同一组合已有持仓返回 409 `position_exists`，由数据库唯一约束保证并发下只成功一个。校准可以把份额改为 0（已清仓）。
+- 市值 = 份额 × 最新净值（与 `GET /v1/funds/{code}/nav` 同一来源）；持有收益 = 市值 − 总成本；收益率 = 持有收益 ÷ 总成本。暂无净值或行情不可用时 `nav`、`navDate`、`marketValue`、`holdingGain`、`holdingGainRate` 为 `null`（不是 0）；总成本为 0 时收益率为 `null`。
 
 ## 测试
 

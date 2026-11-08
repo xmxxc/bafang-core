@@ -31,6 +31,7 @@ export const ErrorCodeSchema = z.enum([
 export type ErrorCode = z.infer<typeof ErrorCodeSchema>;
 export type ExtendedErrorCode =
   | ErrorCode
+  | 'position_exists'
   | 'login_method_conflict'
   | 'login_method_type_conflict'
   | 'login_method_last'

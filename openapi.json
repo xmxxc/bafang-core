@@ -581,6 +581,166 @@
           "name"
         ]
       },
+      "PositionList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Position"
+            }
+          }
+        },
+        "required": [
+          "items"
+        ]
+      },
+      "Position": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fundCode": {
+            "type": "string"
+          },
+          "channelId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "shares": {
+            "type": "string",
+            "example": "1000.0000",
+            "description": "份额，4 位小数"
+          },
+          "totalCost": {
+            "type": "string",
+            "example": "1234.56",
+            "description": "总成本，2 位小数"
+          },
+          "unitPrice": {
+            "type": "string",
+            "nullable": true,
+            "description": "成本单价 = 总成本 ÷ 份额，四舍五入到 4 位；份额为 0 时为 null"
+          },
+          "snapshotDate": {
+            "type": "string",
+            "description": "建仓快照日期 YYYY-MM-DD"
+          },
+          "nav": {
+            "type": "string",
+            "nullable": true,
+            "description": "最新单位净值，4 位小数；暂无净值时为 null"
+          },
+          "navDate": {
+            "type": "string",
+            "nullable": true,
+            "description": "最新净值日期；暂无净值时为 null"
+          },
+          "marketValue": {
+            "type": "string",
+            "nullable": true,
+            "description": "市值 = 份额 × 最新净值，四舍五入到 2 位；暂无净值时为 null（不是 0）"
+          },
+          "holdingGain": {
+            "type": "string",
+            "nullable": true,
+            "description": "持有收益 = 市值 − 总成本，2 位小数；暂无净值时为 null"
+          },
+          "holdingGainRate": {
+            "type": "string",
+            "nullable": true,
+            "example": "0.0123",
+            "description": "持有收益率 = 持有收益 ÷ 总成本（比值，不是百分数），四舍五入到 4 位；暂无净值或总成本为 0 时为 null"
+          }
+        },
+        "required": [
+          "id",
+          "fundCode",
+          "channelId",
+          "shares",
+          "totalCost",
+          "unitPrice",
+          "snapshotDate",
+          "nav",
+          "navDate",
+          "marketValue",
+          "holdingGain",
+          "holdingGainRate"
+        ]
+      },
+      "PositionCreate": {
+        "type": "object",
+        "properties": {
+          "fundCode": {
+            "type": "string",
+            "pattern": "^\\d{6}$",
+            "example": "000001",
+            "description": "基金代码，必须是存在的基金"
+          },
+          "channelId": {
+            "type": "string",
+            "format": "uuid",
+            "description": "自己的渠道 id"
+          },
+          "shares": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,4})?$",
+            "example": "1000.0000",
+            "description": "份额，最多 4 位小数"
+          },
+          "totalCost": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,2})?$",
+            "example": "1234.56",
+            "description": "总成本（元），最多 2 位小数；与 unitPrice 二选一"
+          },
+          "unitPrice": {
+            "type": "string",
+            "pattern": "^\\d{1,12}(\\.\\d{1,4})?$",
+            "example": "1.2346",
+            "description": "单价（元/份），最多 4 位小数；与 totalCost 二选一，总成本 = 份额 × 单价，四舍五入到 2 位"
+          },
+          "snapshotDate": {
+            "type": "string",
+            "format": "date",
+            "example": "2026-11-06",
+            "description": "快照日期 YYYY-MM-DD，缺省为今天（上海时间）"
+          }
+        },
+        "required": [
+          "fundCode",
+          "channelId",
+          "shares"
+        ]
+      },
+      "PositionCalibrate": {
+        "type": "object",
+        "properties": {
+          "shares": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,4})?$",
+            "example": "1000.0000",
+            "description": "份额，最多 4 位小数"
+          },
+          "totalCost": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,2})?$",
+            "example": "1234.56",
+            "description": "总成本（元），最多 2 位小数；与 unitPrice 二选一"
+          },
+          "unitPrice": {
+            "type": "string",
+            "pattern": "^\\d{1,12}(\\.\\d{1,4})?$",
+            "example": "1.2346",
+            "description": "单价（元/份），最多 4 位小数；与 totalCost 二选一，总成本 = 份额 × 单价，四舍五入到 2 位"
+          }
+        },
+        "required": [
+          "shares"
+        ]
+      },
       "EmailCodeRequestResult": {
         "type": "object",
         "properties": {
@@ -1737,6 +1897,470 @@
           },
           "409": {
             "description": "channel_protected：“未指定”不能删除；channel_has_positions：渠道下仍有持仓",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/positions": {
+      "get": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "positions"
+        ],
+        "summary": "查看自己的持仓",
+        "description": "需要登录，按创建先后返回；传 channelId 只返回该渠道的持仓（别人的渠道返回空列表）。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "按渠道筛选"
+            },
+            "required": false,
+            "description": "按渠道筛选",
+            "name": "channelId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "持仓列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PositionList"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "positions"
+        ],
+        "summary": "以建仓快照新建持仓",
+        "description": "需要登录。总成本与单价二选一，另一个由 core 换算；份额必须大于 0。同一用户、基金、渠道只能有一笔持仓。",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PositionCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "已新建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Position"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "fund_not_found：基金不存在；not_found：渠道不存在（包含别人的渠道）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "position_exists：该渠道已有这只基金的持仓",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "upstream_unavailable：校验基金时行情上游不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/positions/{id}": {
+      "get": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "positions"
+        ],
+        "summary": "查看一笔持仓",
+        "description": "需要登录，返回份额、总成本、市值、持有收益与收益率。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "持仓 id"
+            },
+            "required": true,
+            "description": "持仓 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "持仓详情",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Position"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "持仓不存在（包含别人的持仓）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "positions"
+        ],
+        "summary": "校准持仓",
+        "description": "需要登录。用新的份额与成本（总成本或单价二选一）覆盖当前值，不生成交易记录；份额可为 0（已清仓）。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "持仓 id"
+            },
+            "required": true,
+            "description": "持仓 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PositionCalibrate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已校准",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Position"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "持仓不存在（包含别人的持仓）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "positions"
+        ],
+        "summary": "彻底删除一笔持仓",
+        "description": "需要登录，删除持仓连同它的交易（交易由 #17 起以外键级联删除）。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "持仓 id"
+            },
+            "required": true,
+            "description": "持仓 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除"
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "持仓不存在（包含别人的持仓）",
             "content": {
               "application/json": {
                 "schema": {
