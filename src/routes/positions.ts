@@ -230,6 +230,10 @@ export const positionDeleteRoute = createRoute({
 const SummarySchema = z
   .object({
     ...gainFields,
+    previousMarketValue: z.string().nullable().openapi({
+      description:
+        '份额 × 今日之前最近一期已公布净值，金额 2 位小数；汇总计算保留完整精度；仅计入今日收益可用的持仓；缺失为 null',
+    }),
     totalAssets: z.string().nullable().openapi({
       description: '可取得净值的持仓市值合计，2 位小数；有持仓但全部缺失为 null，空持仓为 0.00',
     }),
@@ -241,8 +245,8 @@ const SummarySchema = z
     holdingGainRate: z.string().nullable().openapi({
       description: '持有收益合计 ÷ 可取得净值的持仓成本合计，比值、4 位小数；分母为 0 为 null',
     }),
-    todayGainStatus: z.enum(['estimated', 'confirmed', 'mixed', 'unavailable']).openapi({
-      description: '仅看可计入的持仓：估算 / 确认 / 两者混合 / 无可用收益（含空持仓）',
+    todayGainStatus: z.enum(['estimated', 'confirmed', 'mixed', 'unavailable', 'none']).openapi({
+      description: '仅看可计入的持仓：估算 / 确认 / 两者混合 / 无可用收益 / 没有可计算的持仓',
     }),
     valuationComplete: z.boolean().openapi({
       description:

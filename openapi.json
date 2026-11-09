@@ -774,7 +774,7 @@
           "previousMarketValue": {
             "type": "string",
             "nullable": true,
-            "description": "份额 × 今日之前最近一期已公布净值，8 位小数；汇总仅计入今日收益可用的持仓；缺失为 null"
+            "description": "份额 × 今日之前最近一期已公布净值，金额 2 位小数；汇总计算保留完整精度；仅计入今日收益可用的持仓；缺失为 null"
           },
           "realizedGain": {
             "type": "string",
@@ -810,9 +810,10 @@
               "estimated",
               "confirmed",
               "mixed",
-              "unavailable"
+              "unavailable",
+              "none"
             ],
-            "description": "仅看可计入的持仓：估算 / 确认 / 两者混合 / 无可用收益（含空持仓）"
+            "description": "仅看可计入的持仓：估算 / 确认 / 两者混合 / 无可用收益 / 没有可计算的持仓"
           },
           "valuationComplete": {
             "type": "boolean",

@@ -212,7 +212,7 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       totalGain: '303.00',
       todayGain: '-24.52',
       todayGainRate: '-0.0144',
-      previousMarketValue: '1703.00000000',
+      previousMarketValue: '1703.00',
       todayGainStatus: 'estimated',
       valuationComplete: true,
       todayGainComplete: false,
@@ -271,6 +271,8 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       totalAssets: '0.00',
       todayGain: '0.00',
       todayGainRate: null,
+      previousMarketValue: '0.00',
+      todayGainStatus: 'none',
       isComplete: true,
     });
     const emptyFunds = await app.request(`/v1/positions/by-fund?channelId=${emptyChannel!.id}`, {
@@ -307,7 +309,7 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       holdingGain: '0.00',
       realizedGain: '0.00',
       totalGain: '0.00',
-      todayGainStatus: 'unavailable',
+      todayGainStatus: 'none',
       isComplete: true,
     });
   });
@@ -405,6 +407,10 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       todayGainRate: '0.0000',
       todayGainStatus: 'confirmed',
     });
+    expect(await summary(headers)).toMatchObject({
+      previousMarketValue: '0.00',
+      todayGainRate: '0.0000',
+    });
   });
 
   it('reports mixed estimates and confirmations while recomputing the combined rate', async () => {
@@ -425,7 +431,7 @@ describe('今日收益与持仓汇总（HTTP）', () => {
       holdingGain: '323.00',
       todayGain: '-4.52',
       todayGainRate: '-0.0012',
-      previousMarketValue: '3703.00000000',
+      previousMarketValue: '3703.00',
       todayGainStatus: 'mixed',
       isComplete: true,
     });
