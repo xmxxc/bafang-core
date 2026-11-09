@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp, type App } from '../../src/app';
 import { createDb } from '../../src/db';
 import { ChineseTradingCalendar } from '../../src/trading-calendar';
+import type { PositionView } from '../../src/positions/service';
 import type { TradeView } from '../../src/positions/trades';
 import type { WeChatLoginResponse } from '../../src/routes/auth';
 import {
@@ -533,4 +534,113 @@ describe('同渠道调仓', () => {
       ]);
     },
   );
+  it.each(['before submission', 'after submission', 'after outgoing confirmation'])(
+    'associates an incoming trade with a target created %s throughout its pending lifecycle',
+    async (timing) => {
+      const source = await position();
+      let target =
+        timing === 'before submission'
+          ? await position({ fundCode: '040046', shares: '10', totalCost: '20' })
+          : undefined;
+      const transfer = await createSwitch(source.id, { targetFundCode: '040046' });
+      if (timing === 'after submission')
+        target = await position({ fundCode: '040046', shares: '10', totalCost: '20' });
+      now = new Date('2026-11-09T13:30:00Z');
+      expect(await app.runSettlement()).toMatchObject({ confirmed: 1, pending: 1, failed: 0 });
+      if (!target) target = await position({ fundCode: '040046', shares: '10', totalCost: '20' });
+      const incoming = transfer.items[1]!;
+      expect(await get(`/v1/positions/${target.id}`)).toMatchObject({
+        pendingAmount: '66.88',
+        shares: '10.0000',
+        totalCost: '20.00',
+      });
+      expect(await get(`/v1/positions/${target.id}/trades`)).toMatchObject({
+        items: [
+          {
+            id: incoming.id,
+            positionId: target.id,
+            switchId: transfer.id,
+            amount: '66.88',
+            status: 'pending',
+          },
+        ],
+      });
+      expect((await get<SwitchView>(`/v1/switches/${transfer.id}`)).items[1]).toMatchObject({
+        positionId: target.id,
+      });
+      const calibrated = await send('PATCH', `/v1/positions/${target.id}`, {
+        shares: '0',
+        totalCost: '0',
+      });
+      expect(calibrated.status).toBe(200);
+      expect(await calibrated.json()).toMatchObject({ isCleared: false, pendingAmount: '66.88' });
+      expect(
+        (await get<{ items: PositionView[] }>('/v1/positions')).items.some(
+          (item) => item.id === target.id,
+        ),
+      ).toBe(true);
+      expect((await send('DELETE', `/v1/positions/${target.id}`)).status).toBe(204);
+      expect((await send('GET', `/v1/switches/${transfer.id}`)).status).toBe(404);
+      expect(await get(`/v1/positions/${source.id}/trades`)).toEqual({ items: [] });
+      now = new Date('2026-11-10T13:30:00Z');
+      expect(await app.runSettlement()).toMatchObject({ confirmed: 0, pending: 0, failed: 0 });
+      expect(
+        (await get<{ items: PositionView[] }>('/v1/positions?includeCleared=true')).items.some(
+          (item) => item.fundCode === '040046',
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it('removes a late-created target and its pending switch without resurrecting it on settlement', async () => {
+    const source = await position();
+    const transfer = await createSwitch(source.id, { targetFundCode: '040046' });
+    const target = await position({ fundCode: '040046' });
+    expect((await send('DELETE', `/v1/positions/${target.id}`)).status).toBe(204);
+    now = new Date('2026-11-10T13:30:00Z');
+    expect(await app.runSettlement()).toMatchObject({ confirmed: 0, pending: 0, failed: 0 });
+    expect((await send('GET', `/v1/switches/${transfer.id}`)).status).toBe(404);
+    expect(
+      (await get<{ items: PositionView[] }>('/v1/positions?includeCleared=true')).items.map(
+        (item) => item.id,
+      ),
+    ).toEqual([source.id]);
+  });
+  it('links late-created targets atomically with concurrent switch creation and supports cancellation from their history', async () => {
+    const source = await position();
+    const [transfer, target] = await Promise.all([
+      createSwitch(source.id, { targetFundCode: '040046' }),
+      position({ fundCode: '040046' }),
+    ]);
+    expect(await get(`/v1/positions/${target.id}/trades`)).toMatchObject({
+      items: [{ id: transfer.items[1]!.id, positionId: target.id, switchId: transfer.id }],
+    });
+    expect(
+      (await send('DELETE', `/v1/positions/${target.id}/trades/${transfer.items[1]!.id}`)).status,
+    ).toBe(204);
+    expect((await send('GET', `/v1/switches/${transfer.id}`)).status).toBe(404);
+    expect(await get(`/v1/positions/${source.id}`)).toMatchObject({ availableShares: '100.0000' });
+  });
+  it('links all waiting incoming trades when settlement creates their shared target', async () => {
+    const firstSource = await position();
+    const secondSource = await position({ fundCode: '040046' });
+    const first = await createSwitch(firstSource.id);
+    const second = await createSwitch(secondSource.id);
+    now = new Date('2026-11-09T13:30:00Z');
+    expect(await app.runSettlement()).toMatchObject({ confirmed: 2, pending: 2, failed: 0 });
+    const target = (await get<{ items: PositionView[] }>('/v1/positions')).items.find(
+      (item) => item.fundCode === '000001',
+    )!;
+    const history = await get<{ items: TradeView[] }>(`/v1/positions/${target.id}/trades`);
+    expect(history.items).toHaveLength(2);
+    expect(history.items.find((item) => item.switchId === second.id)).toMatchObject({
+      positionId: target.id,
+      status: 'pending',
+    });
+    expect((await send('DELETE', `/v1/positions/${target.id}`)).status).toBe(204);
+    expect((await send('GET', `/v1/switches/${first.id}`)).status).toBe(404);
+    expect((await send('GET', `/v1/switches/${second.id}`)).status).toBe(404);
+    now = new Date('2026-11-10T13:30:00Z');
+    expect(await app.runSettlement()).toMatchObject({ confirmed: 0, pending: 0, failed: 0 });
+  });
 });

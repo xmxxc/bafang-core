@@ -5,6 +5,7 @@ import { positions, switches, trades, users } from '../db/schema';
 import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { LatestNav, NavPoint, NavService } from '../market/nav';
 import type { TradingCalendar } from '../trading-calendar';
+import { linkPendingSwitchIns } from './switch-targets';
 import {
   add,
   divide,
@@ -173,6 +174,7 @@ export function createSettlementJob(deps: {
               snapshotDate: candidate.applicationDate,
             })
             .returning();
+          await linkPendingSwitchIns(tx, position!);
         }
       } else if (trade.positionId) {
         [position] = await tx

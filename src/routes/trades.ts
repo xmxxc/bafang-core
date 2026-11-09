@@ -58,7 +58,7 @@ export const TradeSchema = z
     positionId: z
       .uuid()
       .nullable()
-      .openapi({ description: '持仓 id；目标尚无持仓的调仓转入在确认前为 null' }),
+      .openapi({ description: '持仓 id；目标尚无持仓的调仓转入为 null，目标建立时立即关联' }),
     type: z
       .enum(['buy', 'sell', 'switch_out', 'switch_in'])
       .openapi({ description: '加仓、减仓、调仓转出、调仓转入' }),

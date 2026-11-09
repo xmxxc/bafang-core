@@ -7,6 +7,7 @@ import type { LatestNav, NavService } from '../market/nav';
 import type { EstimateService } from '../market/estimates';
 import type { TradingCalendar } from '../trading-calendar';
 import { createPositionGains, type PositionGains } from './gains';
+import { linkPendingSwitchIns } from './switch-targets';
 import { shanghaiDate, type Clock } from '../clock';
 import {
   divide,
@@ -358,6 +359,7 @@ export function createPositionService(deps: {
               snapshotDate: input.snapshotDate ?? shanghaiDate(deps.clock.now()),
             })
             .returning();
+          await linkPendingSwitchIns(tx, created!);
           return created!;
         });
       } catch (error) {
