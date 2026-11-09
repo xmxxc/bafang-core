@@ -1,6 +1,7 @@
 import { and, asc, eq, lte, sql } from 'drizzle-orm';
+import { alias } from 'drizzle-orm/pg-core';
 import type { Db } from '../db';
-import { positions, trades, users } from '../db/schema';
+import { positions, switches, trades, users } from '../db/schema';
 import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { LatestNav, NavPoint, NavService } from '../market/nav';
 import type { TradingCalendar } from '../trading-calendar';
@@ -44,11 +45,10 @@ export interface SettlementScheduler {
 
 interface Candidate {
   id: string;
-  positionId: string;
+  channelId: string;
+  switchId: string | null;
   type: 'buy' | 'sell' | 'switch_out' | 'switch_in';
   applicationDate: string;
-  amount: string | null;
-  feeRate: string;
   fundCode: string;
   userId: string;
 }
@@ -102,21 +102,28 @@ export function createSettlementJob(deps: {
   clock: Clock;
 }): SettlementJob {
   async function candidates(today: string): Promise<Candidate[]> {
+    const source = alias(positions, 'switch_source');
     return deps.db
       .select({
         id: trades.id,
-        positionId: trades.positionId,
         type: trades.type,
         applicationDate: trades.applicationDate,
-        amount: trades.amount,
-        feeRate: trades.feeRate,
-        fundCode: positions.fundCode,
-        userId: positions.userId,
+        fundCode: sql<string>`case when ${trades.type} = 'switch_in' then ${switches.targetFundCode} else ${positions.fundCode} end`,
+        userId: sql<string>`coalesce(${positions.userId}, ${source.userId})`,
+        channelId: sql<string>`coalesce(${positions.channelId}, ${source.channelId})`,
+        switchId: trades.switchId,
       })
       .from(trades)
-      .innerJoin(positions, eq(positions.id, trades.positionId))
+      .leftJoin(positions, eq(positions.id, trades.positionId))
+      .leftJoin(switches, eq(switches.id, trades.switchId))
+      .leftJoin(source, eq(source.id, switches.sourcePositionId))
       .where(and(eq(trades.status, 'pending'), lte(trades.settlementDate, today)))
-      .orderBy(asc(trades.applicationDate), asc(trades.createdAt), asc(trades.id));
+      .orderBy(
+        asc(trades.applicationDate),
+        asc(trades.createdAt),
+        sql`case when ${trades.type} = 'switch_in' then 1 else 0 end`,
+        asc(trades.id),
+      );
   }
 
   async function confirm(candidate: Candidate, navPoint: NavPoint): Promise<boolean> {
@@ -129,30 +136,57 @@ export function createSettlementJob(deps: {
         .where(eq(users.id, candidate.userId))
         .for('update');
       const [trade] = await tx
-        .select({
-          id: trades.id,
-          type: trades.type,
-          shares: trades.shares,
-          amount: trades.amount,
-          feeRate: trades.feeRate,
-          positionId: trades.positionId,
-          status: trades.status,
-        })
+        .select()
         .from(trades)
         .where(and(eq(trades.id, candidate.id), eq(trades.status, 'pending')))
         .for('update');
-      if (!trade || trade.positionId !== candidate.positionId) return false;
-      const [position] = await tx
-        .select()
-        .from(positions)
-        .where(and(eq(positions.id, candidate.positionId), eq(positions.userId, candidate.userId)))
-        .for('update');
+      if (!trade) return false;
+      let position;
+      if (trade.type === 'switch_in') {
+        if (!trade.switchId) throw new Error('调仓转入缺少关联 ID');
+        const [out] = await tx
+          .select()
+          .from(trades)
+          .where(and(eq(trades.switchId, trade.switchId), eq(trades.type, 'switch_out')));
+        if (out?.status !== 'confirmed') return false;
+        if (trade.amount === null) throw new Error('调仓转入缺少到账金额');
+        [position] = await tx
+          .select()
+          .from(positions)
+          .where(
+            and(
+              eq(positions.userId, candidate.userId),
+              eq(positions.channelId, candidate.channelId),
+              eq(positions.fundCode, candidate.fundCode),
+            ),
+          )
+          .for('update');
+        if (!position) {
+          [position] = await tx
+            .insert(positions)
+            .values({
+              userId: candidate.userId,
+              channelId: candidate.channelId,
+              fundCode: candidate.fundCode,
+              shares: '0',
+              totalCost: '0',
+              snapshotDate: candidate.applicationDate,
+            })
+            .returning();
+        }
+      } else if (trade.positionId) {
+        [position] = await tx
+          .select()
+          .from(positions)
+          .where(and(eq(positions.id, trade.positionId), eq(positions.userId, candidate.userId)))
+          .for('update');
+      }
       if (!position) throw new Error('交易对应的持仓不存在');
       const currentShares = fixedFromDb(position.shares, 4);
       const currentCost = fixedFromDb(position.totalCost, 2);
       let confirmedShares: Fixed;
       let proceeds: string | null = null;
-      if (trade.type === 'buy') {
+      if (trade.type === 'buy' || trade.type === 'switch_in') {
         if (!trade.amount) throw new Error('加仓交易缺少金额');
         confirmedShares = confirmationShares(trade.amount, trade.feeRate, navPoint.unitNav);
         await tx
@@ -162,8 +196,8 @@ export function createSettlementJob(deps: {
             totalCost: formatFixed(add(currentCost, fixedFromDb(trade.amount, 2))),
             updatedAt: deps.clock.now(),
           })
-          .where(eq(positions.id, candidate.positionId));
-      } else if (trade.type === 'sell') {
+          .where(eq(positions.id, position.id));
+      } else if (trade.type === 'sell' || trade.type === 'switch_out') {
         if (!trade.shares) throw new Error('减仓交易缺少份额');
         confirmedShares = fixedFromDb(trade.shares, 4);
         if (confirmedShares.value <= 0n || confirmedShares.value > currentShares.value) {
@@ -192,7 +226,7 @@ export function createSettlementJob(deps: {
             realizedGainCost: formatFixed(add(fixedFromDb(position.realizedGainCost, 2), cost)),
             updatedAt: deps.clock.now(),
           })
-          .where(eq(positions.id, candidate.positionId));
+          .where(eq(positions.id, position.id));
       } else {
         throw new Error(`暂不支持确认交易类型：${trade.type}`);
       }
@@ -200,12 +234,25 @@ export function createSettlementJob(deps: {
         .update(trades)
         .set({
           status: 'confirmed',
+          positionId: position.id,
           confirmedNav: formatFixed(parseFixed(navPoint.unitNav, 4, { round: true })!),
           confirmedShares: formatFixed(confirmedShares),
           ...(proceeds === null ? {} : { amount: proceeds }),
         })
         .where(and(eq(trades.id, candidate.id), eq(trades.status, 'pending')))
         .returning({ id: trades.id });
+      if (updated && trade.type === 'switch_out' && trade.switchId) {
+        await tx
+          .update(trades)
+          .set({ amount: proceeds })
+          .where(
+            and(
+              eq(trades.switchId, trade.switchId),
+              eq(trades.type, 'switch_in'),
+              eq(trades.status, 'pending'),
+            ),
+          );
+      }
       return Boolean(updated);
     });
   }
@@ -227,18 +274,28 @@ export function createSettlementJob(deps: {
       }
       const blockedPositions = new Set<string>();
       for (const candidate of rows) {
-        if (blockedPositions.has(candidate.positionId)) continue;
+        // Use the fund/channel identity even before a target position exists.
+        const positionKey = `${candidate.userId}:${candidate.channelId}:${candidate.fundCode}`;
+        if (blockedPositions.has(positionKey)) continue;
         try {
-          if (candidate.type !== 'buy' && candidate.type !== 'sell')
-            throw new Error(`暂不支持确认交易类型：${candidate.type}`);
+          if (candidate.type === 'switch_in' && candidate.switchId) {
+            const [out] = await deps.db
+              .select({ status: trades.status })
+              .from(trades)
+              .where(and(eq(trades.switchId, candidate.switchId), eq(trades.type, 'switch_out')));
+            if (out?.status !== 'confirmed') {
+              blockedPositions.add(positionKey);
+              continue;
+            }
+          }
           const navPoint = await findNav(deps.nav, candidate.fundCode, candidate.applicationDate);
           if (!navPoint) {
-            blockedPositions.add(candidate.positionId);
+            blockedPositions.add(positionKey);
             continue;
           }
           if (await confirm(candidate, navPoint)) summary.confirmed++;
         } catch (error) {
-          blockedPositions.add(candidate.positionId);
+          blockedPositions.add(positionKey);
           summary.failed++;
           summary.failures.push({
             tradeId: candidate.id,

@@ -970,6 +970,34 @@
           "shares"
         ]
       },
+      "Switch": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "sourcePositionId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "targetFundCode": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Trade"
+            }
+          }
+        },
+        "required": [
+          "id",
+          "sourcePositionId",
+          "targetFundCode",
+          "items"
+        ]
+      },
       "Trade": {
         "type": "object",
         "properties": {
@@ -979,7 +1007,9 @@
           },
           "positionId": {
             "type": "string",
-            "format": "uuid"
+            "nullable": true,
+            "format": "uuid",
+            "description": "持仓 id；目标尚无持仓的调仓转入在确认前为 null"
           },
           "type": {
             "type": "string",
@@ -1066,6 +1096,52 @@
           "switchId",
           "source"
         ]
+      },
+      "SwitchCreate": {
+        "type": "object",
+        "properties": {
+          "targetFundCode": {
+            "type": "string",
+            "pattern": "^\\d{6}$"
+          },
+          "targetChannelId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "shares": {
+            "type": "string",
+            "pattern": "^\\d{1,16}(\\.\\d{1,4})?$"
+          },
+          "outFeeRate": {
+            "type": "string",
+            "pattern": "^(0(\\.\\d{1,6})?|1(\\.0{1,6})?)$",
+            "example": "0.0015",
+            "description": "买入或卖出费率比值，0–1，最多 6 位小数"
+          },
+          "inFeeRate": {
+            "type": "string",
+            "pattern": "^(0(\\.\\d{1,6})?|1(\\.0{1,6})?)$",
+            "example": "0.0015",
+            "description": "买入或卖出费率比值，0–1，最多 6 位小数"
+          },
+          "submittedDate": {
+            "type": "string",
+            "format": "date",
+            "description": "提交日 YYYY-MM-DD；省略为上海今天，填写时必须同时提供 beforeCutoff"
+          },
+          "beforeCutoff": {
+            "type": "boolean",
+            "description": "是否在 15:00 前；false 含 15:00 整。省略时按当前上海时间判断"
+          }
+        },
+        "required": [
+          "targetFundCode",
+          "targetChannelId",
+          "shares",
+          "outFeeRate",
+          "inFeeRate"
+        ],
+        "additionalProperties": false
       },
       "TradeCreate": {
         "oneOf": [
@@ -3051,6 +3127,319 @@
         }
       }
     },
+    "/v1/positions/{id}/switches": {
+      "post": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "trades"
+        ],
+        "summary": "提交同渠道调仓",
+        "description": "原子创建共用调仓 ID 的转出、转入交易，items 按转出、转入排序。目标渠道必须与源渠道相同，目标基金必须不同。两侧分别按提交日期和各自基金 T+N 推算日期；转入必须等转出确认后才能确认，到账金额作为买入金额。目标无持仓时确认转入才新建。重试可能重复创建。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "持仓 id"
+            },
+            "required": true,
+            "description": "持仓 id",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SwitchCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "成对在途交易",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Switch"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法、跨渠道或同基金调仓",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：未登录或会话失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：源持仓或目标渠道不存在（含别人的）；fund_not_found：基金不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "insufficient_shares：调仓超过可用份额",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "upstream_unavailable：基金规则上游不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/switches/{switchId}": {
+      "get": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "trades"
+        ],
+        "summary": "按调仓 ID 查看两侧交易",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "switchId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "调仓与两侧交易（转出、转入）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Switch"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：未登录或会话失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：持仓或交易不存在（含别人的）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/switches/{switchId}/trades/{tradeId}": {
+      "delete": {
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "tags": [
+          "trades"
+        ],
+        "summary": "从调仓任一侧成对撤销",
+        "description": "支持尚无目标持仓的转入侧。两侧都必须仍在途且上海日期早于各自确认日，否则整体拒绝。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "switchId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "tradeId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "两侧均已删除"
+          },
+          "400": {
+            "description": "validation_error：参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "unauthorized：未登录或会话失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：持仓或交易不存在（含别人的）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "trade_not_cancellable：任一侧已到确认日或已确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/positions/{id}/trades": {
       "post": {
         "security": [
@@ -3277,7 +3666,7 @@
           "trades"
         ],
         "summary": "撤销在途交易",
-        "description": "按上海日期判断：仅确认日前且仍为在途的交易可撤销；撤销即删除。",
+        "description": "按上海日期判断：仅确认日前且仍为在途的交易可撤销；撤销即删除；调仓要求两侧均可撤销并一起删除。",
         "parameters": [
           {
             "schema": {

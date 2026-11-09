@@ -208,3 +208,80 @@ it('upgrades 0000–0010 with 0011 and confirms a sell through HTTP-visible stat
     await rm(prior, { recursive: true, force: true });
   }
 });
+
+it('upgrades 0000–0012 with 0013 and creates a paired switch to a missing target through HTTP', async () => {
+  const prior = await migrationFolderThrough(12);
+  const db = await createTestSchema(prior);
+  try {
+    const app = createApp({
+      database: createDb(db.pool),
+      upstream: new RecordedUpstream(eastmoneySamples),
+      clock: { now: () => new Date('2026-11-06T02:00:00Z') },
+      wechat: { openid: async (code) => code },
+    });
+    const login = await app.request('/v1/auth/wechat/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: 'before-switches' }),
+    });
+    expect(login.status).toBe(200);
+    const headers = {
+      Authorization: `Bearer ${((await login.json()) as WeChatLoginResponse).token}`,
+      'Content-Type': 'application/json',
+    };
+    const channels = (await (await app.request('/v1/channels', { headers })).json()) as {
+      items: { id: string }[];
+    };
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    expect(await (await app.request('/v1/channels', { headers })).json()).toEqual(channels);
+    const response = await app.request('/v1/positions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        fundCode: '110020',
+        channelId: channels.items[0]!.id,
+        shares: '100',
+        totalCost: '150',
+      }),
+    });
+    expect(response.status).toBe(201);
+    const position = (await response.json()) as { id: string };
+    const switched = await app.request(`/v1/positions/${position.id}/switches`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        targetFundCode: '000001',
+        targetChannelId: channels.items[0]!.id,
+        shares: '40',
+        outFeeRate: '0.005',
+        inFeeRate: '0.0015',
+      }),
+    });
+    expect(switched.status).toBe(201);
+    const transfer = (await switched.json()) as { id: string; items: { id: string }[] };
+    expect(transfer).toMatchObject({
+      items: [
+        { type: 'switch_out', positionId: position.id, switchId: transfer.id },
+        { type: 'switch_in', positionId: null, switchId: transfer.id },
+      ],
+    });
+    expect(
+      await (await app.request(`/v1/positions/${position.id}`, { headers })).json(),
+    ).toMatchObject({ availableShares: '60.0000', pendingShares: '40.0000' });
+    expect(
+      (
+        await app.request(`/v1/switches/${transfer.id}/trades/${transfer.items[1]!.id}`, {
+          method: 'DELETE',
+          headers,
+        })
+      ).status,
+    ).toBe(204);
+    expect(
+      await (await app.request(`/v1/positions/${position.id}/trades`, { headers })).json(),
+    ).toEqual({ items: [] });
+  } finally {
+    await dropTestSchema(db);
+    await rm(prior, { recursive: true, force: true });
+  }
+});

@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../db';
-import { positions, trades, users } from '../db/schema';
+import { channels, positions, switches, trades, users } from '../db/schema';
 import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { FundService } from '../market/funds';
 import type { TradingCalendar } from '../trading-calendar';
@@ -19,6 +19,22 @@ interface TradeTiming {
 
 export type TradeInput = TradeTiming &
   ({ type: 'buy'; amount: string } | { type: 'sell'; shares: string });
+
+export interface SwitchInput {
+  targetFundCode: string;
+  targetChannelId: string;
+  shares: string;
+  outFeeRate: string;
+  inFeeRate: string;
+  submittedDate?: string;
+  beforeCutoff?: boolean;
+}
+export interface SwitchView {
+  id: string;
+  sourcePositionId: string;
+  targetFundCode: string;
+  items: TradeView[];
+}
 
 function tradeView(row: TradeRow): TradeView {
   return {
@@ -92,6 +108,58 @@ export function createTradeService(deps: {
     });
   }
 
+  async function requireAvailableShares(
+    tx: Transaction,
+    position: typeof positions.$inferSelect,
+    quantity: bigint,
+  ) {
+    const [reserved] = await tx
+      .select({ shares: sql<string>`coalesce(sum(${trades.shares}), 0)::text` })
+      .from(trades)
+      .where(
+        and(
+          eq(trades.positionId, position.id),
+          eq(trades.status, 'pending'),
+          inArray(trades.type, ['sell', 'switch_out']),
+        ),
+      );
+    const available = subtract(fixedFromDb(position.shares, 4), fixedFromDb(reserved!.shares, 4));
+    if (quantity > available.value)
+      throw new PositionError(
+        'insufficient_shares',
+        '减仓份额超过可用份额（已扣除在途减仓与调仓转出）',
+        409,
+      );
+  }
+
+  async function ownedSwitch(db: Db | Transaction, userId: string, id: string) {
+    const [row] = await db
+      .select({
+        id: switches.id,
+        sourcePositionId: switches.sourcePositionId,
+        targetFundCode: switches.targetFundCode,
+      })
+      .from(switches)
+      .innerJoin(positions, eq(positions.id, switches.sourcePositionId))
+      .where(and(eq(switches.id, id), eq(positions.userId, userId)));
+    if (!row) throw new PositionError('not_found', '调仓不存在', 404);
+    return row;
+  }
+
+  async function cancelPair(tx: Transaction, switchId: string) {
+    const pair = await tx.select().from(trades).where(eq(trades.switchId, switchId)).for('update');
+    if (
+      pair.length !== 2 ||
+      pair.some(
+        (trade) =>
+          trade.status !== 'pending' || shanghaiDate(deps.clock.now()) >= trade.settlementDate,
+      )
+    ) {
+      throw new PositionError('trade_not_cancellable', '仅可在两侧确认日前撤销成对在途交易', 409);
+    }
+    await tx.delete(switches).where(eq(switches.id, switchId));
+  }
+
   return {
     async create(userId: string, positionId: string, input: TradeInput): Promise<TradeView> {
       const quantity = parseFixed(
@@ -108,27 +176,7 @@ export function createTradeService(deps: {
       return mutate(userId, async (tx) => {
         const current = await ownedPosition(tx, userId, positionId);
         if (input.type === 'sell') {
-          const [reserved] = await tx
-            .select({ shares: sql<string>`coalesce(sum(${trades.shares}), 0)::text` })
-            .from(trades)
-            .where(
-              and(
-                eq(trades.positionId, positionId),
-                eq(trades.status, 'pending'),
-                inArray(trades.type, ['sell', 'switch_out']),
-              ),
-            );
-          const available = subtract(
-            fixedFromDb(current.shares, 4),
-            fixedFromDb(reserved!.shares, 4),
-          );
-          if (quantity.value > available.value) {
-            throw new PositionError(
-              'insufficient_shares',
-              '减仓份额超过可用份额（已扣除在途减仓与调仓转出）',
-              409,
-            );
-          }
+          await requireAvailableShares(tx, current, quantity.value);
         }
         const submittedDate = input.submittedDate ?? shanghaiDate(now);
         const beforeCutoff = input.beforeCutoff ?? shanghaiMinutesOfDay(now) < 15 * 60;
@@ -157,6 +205,112 @@ export function createTradeService(deps: {
       });
     },
 
+    async createSwitch(
+      userId: string,
+      positionId: string,
+      input: SwitchInput,
+    ): Promise<SwitchView> {
+      const quantity = parseFixed(input.shares, 4);
+      if (!quantity || quantity.value <= 0n)
+        throw new PositionError('validation_error', '调仓份额必须大于 0', 400);
+      const now = deps.clock.now();
+      const position = await ownedPosition(deps.db, userId, positionId);
+      const [channel] = await deps.db
+        .select({ id: channels.id })
+        .from(channels)
+        .where(and(eq(channels.id, input.targetChannelId), eq(channels.userId, userId)));
+      if (!channel) throw new PositionError('not_found', '渠道不存在', 404);
+      if (position.channelId !== channel.id)
+        throw new PositionError('validation_error', '调仓必须在同一渠道内', 400);
+      if (position.fundCode === input.targetFundCode)
+        throw new PositionError('validation_error', '调仓的转入与转出基金必须不同', 400);
+      const [outFund, inFund] = await Promise.all([
+        deps.funds.get(position.fundCode),
+        deps.funds.get(input.targetFundCode),
+      ]);
+      if (!outFund || !inFund) throw new PositionError('fund_not_found', '基金不存在', 404);
+      const submittedDate = input.submittedDate ?? shanghaiDate(now);
+      const beforeCutoff = input.beforeCutoff ?? shanghaiMinutesOfDay(now) < 15 * 60;
+      const outDates = tradeDates(
+        submittedDate,
+        beforeCutoff,
+        outFund.settlement.tPlusN,
+        deps.calendar,
+      );
+      const inDates = tradeDates(
+        submittedDate,
+        beforeCutoff,
+        inFund.settlement.tPlusN,
+        deps.calendar,
+      );
+      return mutate(userId, async (tx) => {
+        const current = await ownedPosition(tx, userId, positionId);
+        if (current.channelId !== input.targetChannelId)
+          throw new PositionError('validation_error', '调仓必须在同一渠道内', 400);
+        await requireAvailableShares(tx, current, quantity.value);
+        const [target] = await tx
+          .select({ id: positions.id })
+          .from(positions)
+          .where(
+            and(
+              eq(positions.userId, userId),
+              eq(positions.channelId, current.channelId),
+              eq(positions.fundCode, input.targetFundCode),
+            ),
+          );
+        const [transfer] = await tx
+          .insert(switches)
+          .values({ sourcePositionId: positionId, targetFundCode: input.targetFundCode })
+          .returning();
+        const common = { switchId: transfer!.id, submittedDate, beforeCutoff, source: 'web' };
+        const rows = await tx
+          .insert(trades)
+          .values([
+            {
+              ...common,
+              positionId,
+              type: 'switch_out',
+              shares: formatFixed(quantity),
+              feeRate: formatFixed(parseFixed(input.outFeeRate, 6)!),
+              ...outDates,
+            },
+            {
+              ...common,
+              positionId: target?.id ?? null,
+              type: 'switch_in',
+              feeRate: formatFixed(parseFixed(input.inFeeRate, 6)!),
+              ...inDates,
+            },
+          ])
+          .returning();
+        return {
+          ...transfer!,
+          items: rows.sort((a, b) => b.type.localeCompare(a.type)).map(tradeView),
+        };
+      });
+    },
+
+    async getSwitch(userId: string, switchId: string): Promise<SwitchView> {
+      const transfer = await ownedSwitch(deps.db, userId, switchId);
+      const rows = await deps.db.select().from(trades).where(eq(trades.switchId, switchId));
+      return {
+        ...transfer,
+        items: rows.sort((a, b) => b.type.localeCompare(a.type)).map(tradeView),
+      };
+    },
+
+    async cancelSwitch(userId: string, switchId: string, tradeId: string): Promise<void> {
+      await mutate(userId, async (tx) => {
+        await ownedSwitch(tx, userId, switchId);
+        const [trade] = await tx
+          .select({ id: trades.id })
+          .from(trades)
+          .where(and(eq(trades.id, tradeId), eq(trades.switchId, switchId)));
+        if (!trade) throw new PositionError('not_found', '交易不存在', 404);
+        await cancelPair(tx, switchId);
+      });
+    },
+
     async list(userId: string, positionId: string): Promise<TradeView[]> {
       await ownedPosition(deps.db, userId, positionId);
       const rows = await deps.db
@@ -176,6 +330,10 @@ export function createTradeService(deps: {
           .where(and(eq(trades.id, tradeId), eq(trades.positionId, positionId)))
           .for('update');
         if (!trade) throw new PositionError('not_found', '交易不存在', 404);
+        if (trade.switchId) {
+          await cancelPair(tx, trade.switchId);
+          return;
+        }
         if (trade.status !== 'pending' || shanghaiDate(deps.clock.now()) >= trade.settlementDate) {
           throw new PositionError('trade_not_cancellable', '仅可在确认日前撤销在途交易', 409);
         }
