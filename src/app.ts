@@ -84,6 +84,8 @@ import {
 } from './routes/positions';
 import { PositionError, createPositionService } from './positions/service';
 import { summarizePositions, summarizeByFund } from './positions/summary';
+import { overviewRoute } from './routes/overview';
+import { todayOverview } from './positions/overview';
 
 import { createTradeService } from './positions/trades';
 import { tradeCreateRoute, tradeListRoute, tradeCancelRoute } from './routes/trades';
@@ -308,8 +310,26 @@ export function createApp(deps: AppDeps = {}): App {
       })
     : null;
   const requireLogin = auth ? requireAuth(auth) : null;
-
   const channels = resolved.database ? createChannelService(resolved.database) : null;
+
+  app.use('/v1/overview', async (c, next) => {
+    if (!requireLogin) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return requireLogin(c, next);
+  });
+  app.openapi(overviewRoute, async (c) => {
+    if (!positions || !channels)
+      return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { channelId } = c.req.valid('query');
+    return c.json(
+      await todayOverview(
+        { positions, channels, funds, indices, clock: resolved.clock },
+        getAuth(c).userId,
+        channelId,
+      ),
+      200,
+    );
+  });
+
   app.use('/v1/channels/*', async (c, next) => {
     if (!requireLogin) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     return requireLogin(c, next);

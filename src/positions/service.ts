@@ -6,7 +6,7 @@ import type { FundService } from '../market/funds';
 import type { LatestNav, NavService } from '../market/nav';
 import type { EstimateService } from '../market/estimates';
 import type { TradingCalendar } from '../trading-calendar';
-import { createPositionGains, type PositionGains } from './gains';
+import { createPositionGains, type PositionGains, type QuotedPosition } from './gains';
 import { shanghaiDate, type Clock } from '../clock';
 import {
   divide,
@@ -77,6 +77,11 @@ export type PositionView = PositionValuation & PositionGains;
 
 export interface PositionService {
   list(userId: string, channelId?: string, includeCleared?: boolean): Promise<PositionView[]>;
+  listWithQuotes(
+    userId: string,
+    channelId?: string,
+    includeCleared?: boolean,
+  ): Promise<QuotedPosition[]>;
   get(userId: string, id: string): Promise<PositionView>;
   create(userId: string, input: PositionCreateInput): Promise<PositionView>;
   calibrate(userId: string, id: string, input: CostInput): Promise<PositionView>;
@@ -229,7 +234,7 @@ export function createPositionService(deps: {
   }
 
   // 一次聚合所有待展示持仓，避免列表为每个持仓单独查询在途交易。
-  async function views(rows: PositionRow[]): Promise<PositionView[]> {
+  async function views(rows: PositionRow[]): Promise<QuotedPosition[]> {
     if (rows.length === 0) return [];
     const totals = await deps.db
       .select({
@@ -271,7 +276,14 @@ export function createPositionService(deps: {
   }
 
   async function view(row: PositionRow): Promise<PositionView> {
-    return (await views([row]))[0]!;
+    return withoutQuote((await views([row]))[0]!);
+  }
+
+  // 普通持仓接口保留原有响应；概览读取同一轮计算所使用的行情，避免再次抓取后数据不一致。
+  function withoutQuote(item: QuotedPosition): PositionView {
+    const { quote: _quote, ...position } = item;
+    void _quote;
+    return position;
   }
 
   /** 与渠道、登录方式一致：写操作先锁住用户行，串行化同一用户的并发修改。 */
@@ -282,28 +294,37 @@ export function createPositionService(deps: {
     });
   }
 
+  async function listWithQuotes(
+    userId: string,
+    channelId?: string,
+    includeCleared = false,
+  ): Promise<QuotedPosition[]> {
+    if (channelId) {
+      // 与渠道接口一致：不存在或别人的渠道都返回 404，而不是空列表。
+      const [channel] = await deps.db
+        .select({ id: channels.id })
+        .from(channels)
+        .where(and(eq(channels.id, channelId), eq(channels.userId, userId)))
+        .limit(1);
+      if (!channel) throw new PositionError('not_found', '渠道不存在', 404);
+    }
+    const rows = await deps.db
+      .select()
+      .from(positions)
+      .where(
+        channelId
+          ? and(eq(positions.userId, userId), eq(positions.channelId, channelId))
+          : eq(positions.userId, userId),
+      )
+      .orderBy(positions.createdAt, positions.id);
+    const items = await views(rows);
+    return includeCleared ? items : items.filter((item) => !item.isCleared);
+  }
+
   return {
+    listWithQuotes,
     async list(userId, channelId, includeCleared = false) {
-      if (channelId) {
-        // 与渠道接口一致：不存在或别人的渠道都返回 404，而不是空列表。
-        const [channel] = await deps.db
-          .select({ id: channels.id })
-          .from(channels)
-          .where(and(eq(channels.id, channelId), eq(channels.userId, userId)))
-          .limit(1);
-        if (!channel) throw new PositionError('not_found', '渠道不存在', 404);
-      }
-      const rows = await deps.db
-        .select()
-        .from(positions)
-        .where(
-          channelId
-            ? and(eq(positions.userId, userId), eq(positions.channelId, channelId))
-            : eq(positions.userId, userId),
-        )
-        .orderBy(positions.createdAt, positions.id);
-      const items = await views(rows);
-      return includeCleared ? items : items.filter((item) => !item.isCleared);
+      return (await listWithQuotes(userId, channelId, includeCleared)).map(withoutQuote);
     },
 
     async get(userId, id) {
