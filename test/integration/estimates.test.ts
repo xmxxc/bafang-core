@@ -4,7 +4,13 @@ import { createHealthProbe } from '../../src/db';
 import type { ErrorResponse } from '../../src/errors';
 import { UpstreamError } from '../../src/market/upstream';
 import type { EstimateBatchResponse } from '../../src/routes/estimates';
-import { ChineseTradingCalendar } from '../../src/trading-calendar';
+import {
+  ChineseTradingCalendar,
+  loadTradingCalendar,
+  type TradingCalendar,
+} from '../../src/trading-calendar';
+import { importHolidays } from '../../src/trading-calendar/holidays';
+import cn2026 from '../../data/holidays/2026.json';
 import {
   estimateSamples,
   RecordedUpstream,
@@ -47,7 +53,20 @@ function tiantianFrom(code: string, patch: Record<string, unknown>, intraday: bo
     data: Record<string, unknown>[];
   };
   body.data = body.data.map((row) => {
-    const base = intraday && row.FCODE === '110020' ? { ...row, ...INTRADAY_110020 } : row;
+    const base = !intraday
+      ? row
+      : row.FCODE === '110020'
+        ? { ...row, ...INTRADAY_110020 }
+        : row.FCODE === '000001'
+          ? {
+              ...row,
+              PDATE: '2026-11-05',
+              NAV: 1,
+              GSZ: 0.9843,
+              GSZZL: -1.5738,
+              GZTIME: '2026-11-06 16:02',
+            }
+          : row;
     return row.FCODE === code ? { ...base, ...patch } : base;
   });
   return tiantianSamples(JSON.stringify(body));
@@ -68,27 +87,19 @@ const TIANTIAN_110020 = {
   fallback: false,
   referenceOnly: true,
 };
-const SINA_000001 = {
+const TIANTIAN_000001 = {
   changePercent: -1.5738,
   value: '0.9843',
   time: '2026-11-06T08:02:00.000Z',
-  source: 'sina',
-  sourceName: '新浪财经',
-  fallback: true,
-  referenceOnly: true,
-};
-const SINA_110020 = {
-  changePercent: -1.3531,
-  value: '1.6800',
-  time: '2026-11-06T08:03:00.000Z',
-  source: 'sina',
-  sourceName: '新浪财经',
-  fallback: true,
+  source: 'tiantian',
+  sourceName: '天天基金',
+  fallback: false,
   referenceOnly: true,
 };
 
 describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL test database', () => {
   let db: TestSchema;
+  let calendar: TradingCalendar;
   let upstream: RecordedUpstream;
   let clock: ReturnType<typeof movableClock>;
 
@@ -97,7 +108,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       db: createHealthProbe(db.pool),
       upstream,
       clock,
-      tradingCalendar: new ChineseTradingCalendar(),
+      tradingCalendar: calendar,
       ...deps,
     });
   }
@@ -110,6 +121,8 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
 
   beforeEach(async () => {
     db = await createTestSchema();
+    await importHolidays(db.pool, cn2026.year, cn2026.holidays);
+    calendar = await loadTradingCalendar(db.pool);
     upstream = new RecordedUpstream(samples());
     // Friday 2026-11-06 10:00 Asia/Shanghai — trading
     clock = movableClock('2026-11-06T02:00:00.000Z');
@@ -126,7 +139,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       expect(body.time).toBe('2026-11-06T02:00:00.000Z');
       expect(body.items).toEqual([
         { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
-        { code: '000001', status: 'estimated', estimate: SINA_000001 },
+        { code: '000001', status: 'estimated', estimate: TIANTIAN_000001 },
         { code: '040046', status: 'unavailable', estimate: null },
       ]);
     });
@@ -158,7 +171,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
     });
   });
 
-  describe('source fallback', () => {
+  describe('source availability', () => {
     it('uses Tiantian as the primary source when it has an estimate', async () => {
       const body = await get(app(), '110020');
       expect(body.items).toEqual([
@@ -166,10 +179,10 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       ]);
     });
 
-    it('falls back to Sina when Tiantian has no estimate for the fund', async () => {
-      // The recorded Tiantian sample has GSZ/GSZZL null for 000001 (its NAV is already out).
+    it('returns unavailable when only the undated Sina estimate is present', async () => {
+      upstream.use(samples({ tiantian: tiantianWith('000001', { GSZ: null, GSZZL: null }) }));
       const body = await get(app(), '000001');
-      expect(body.items).toEqual([{ code: '000001', status: 'estimated', estimate: SINA_000001 }]);
+      expect(body.items).toEqual([{ code: '000001', status: 'unavailable', estimate: null }]);
     });
 
     it.each<[string, Replay]>([
@@ -181,14 +194,17 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
         () => '{"data":null,"errorCode":61136403,"success":false,"firstError":"网络繁忙"}',
       ],
       ['returns an unexpected shape', () => '{"success":true,"data":"nope"}'],
-    ])('falls back to Sina for every fund when Tiantian %s', async (_name, tiantian) => {
-      upstream.use(samples({ tiantian }));
-      const body = await get(app(), '110020,000001');
-      expect(body.items).toEqual([
-        { code: '110020', status: 'estimated', estimate: SINA_110020 },
-        { code: '000001', status: 'estimated', estimate: SINA_000001 },
-      ]);
-    });
+    ])(
+      'returns unavailable for every fund when Tiantian %s and Sina has no base date',
+      async (_name, tiantian) => {
+        upstream.use(samples({ tiantian }));
+        const body = await get(app(), '110020,000001');
+        expect(body.items).toEqual([
+          { code: '110020', status: 'unavailable', estimate: null },
+          { code: '000001', status: 'unavailable', estimate: null },
+        ]);
+      },
+    );
 
     it.each<[string, Record<string, unknown>]>([
       ['a missing change', { GSZZL: undefined }],
@@ -196,11 +212,14 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       ['a zero estimate value', { GSZ: 0 }],
       ['a missing estimate time', { GZTIME: null }],
       ['an estimate from a previous day', { GZTIME: '2026-11-05 15:00' }],
-    ])('falls back to Sina when the Tiantian row has %s', async (_name, patch) => {
-      upstream.use(samples({ tiantian: tiantianWith('110020', patch) }));
-      const body = await get(app(), '110020');
-      expect(body.items).toEqual([{ code: '110020', status: 'estimated', estimate: SINA_110020 }]);
-    });
+    ])(
+      'rejects the invalid Tiantian row and undated Sina row when Tiantian has %s',
+      async (_name, patch) => {
+        upstream.use(samples({ tiantian: tiantianWith('110020', patch) }));
+        const body = await get(app(), '110020');
+        expect(body.items).toEqual([{ code: '110020', status: 'unavailable', estimate: null }]);
+      },
+    );
 
     it('keeps a genuine 0% estimate from Tiantian', async () => {
       upstream.use(samples({ tiantian: tiantianWith('110020', { GSZZL: 0 }) }));
@@ -254,6 +273,119 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
   });
 
   describe('estimate base check', () => {
+    it('rejects an undated base even when adjacent NAVs have the same value, while accepting a dated base', async () => {
+      const nav: Replay = () =>
+        JSON.stringify({
+          ErrCode: 0,
+          Data: {
+            LSJZList: [
+              { FSRQ: '2026-11-05', DWJZ: '1.0000', LJJZ: '1.0000', JZZZL: '0' },
+              { FSRQ: '2026-11-04', DWJZ: '1.0000', LJJZ: '1.0000', JZZZL: '0' },
+            ],
+          },
+        });
+      upstream.use(samples({ tiantian: upstreamDown(), nav }));
+      expect((await get(app(), '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+      upstream.use(samples({ nav }));
+      expect((await get(app(), '000001')).items).toEqual([
+        { code: '000001', status: 'estimated', estimate: TIANTIAN_000001 },
+      ]);
+      // Equal unit NAV on the wrong explicitly named day still fails the strict date check.
+      upstream.use(samples({ nav, tiantian: tiantianWith('000001', { PDATE: '2026-11-04' }) }));
+      expect((await get(app(), '000001')).items[0]?.status).toBe('unavailable');
+    });
+
+    it.each([null, '', '--', '未知类型'])(
+      'does not infer a calendar from unknown fund type %s',
+      async (type) => {
+        const replay = samples();
+        upstream.use((url) => {
+          if (url.hostname === 'fundmobapi.eastmoney.com') {
+            const body = JSON.parse(sample('eastmoney/base-000001.json')) as {
+              Datas: { FTYPE: string | null };
+            };
+            body.Datas.FTYPE = type;
+            return JSON.stringify(body);
+          }
+          return replay(url);
+        });
+        expect((await get(app(), '000001')).items).toEqual([
+          { code: '000001', status: 'unavailable', estimate: null },
+        ]);
+      },
+    );
+
+    it('does not infer a QDII calendar even when the published base matches', async () => {
+      upstream.use(
+        samples({
+          tiantian: tiantianWith('040046', {
+            GSZ: 7.3714,
+            GSZZL: 0.7583,
+            GZTIME: '2026-11-06 15:31',
+            NAV: 7.3159,
+            PDATE: '2026-11-05',
+          }),
+          sina: () =>
+            'var hq_str_fu_040046="华安纳斯达克100,15:31:00,7.3714,7.3159,7.3159,0,0.7583,2026-11-06,7.3159,0";',
+        }),
+      );
+      expect((await get(app(), '040046')).items).toEqual([
+        { code: '040046', status: 'unavailable', estimate: null },
+      ]);
+    });
+
+    it('returns unavailable when fund metadata cannot establish a calendar', async () => {
+      const replay = samples();
+      upstream.use((url) =>
+        url.hostname === 'fundmobapi.eastmoney.com'
+          ? new UpstreamError('timeout', 'metadata unavailable')
+          : replay(url),
+      );
+      expect((await get(app(), '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+    });
+
+    it('uses the domestic holiday calendar when checking the previous trading day', async () => {
+      clock.set('2026-11-09T02:00:00.000Z');
+      upstream.use(
+        samples({
+          tiantian: tiantianWith('110020', { GZTIME: '2026-11-09 10:00' }),
+          nav: () =>
+            JSON.stringify({
+              Data: {
+                LSJZList: [{ FSRQ: '2026-11-05', DWJZ: '1.7030', LJJZ: '1.7030', JZZZL: '0' }],
+              },
+              ErrCode: 0,
+            }),
+        }),
+      );
+      const body = await get(
+        app({ tradingCalendar: new ChineseTradingCalendar(['2026-11-06'], [2026]) }),
+        '110020',
+      );
+      expect(body.items[0]?.status).toBe('estimated');
+      expect(body.items[0]?.estimate?.time).toBe('2026-11-09T02:00:00.000Z');
+    });
+
+    it('rejects a matching but unsettled intermediate trading day base', async () => {
+      clock.set('2026-11-09T07:35:00.000Z');
+      upstream.use(
+        samples({
+          tiantian: tiantianWith('110020', { GZTIME: '2026-11-09 15:31' }),
+          sina: () =>
+            'var hq_str_fu_040046="华安纳斯达克100,15:31:00,7.3714,7.3159,7.3159,0,0.7583,2026-11-09,7.3159,0";',
+        }),
+      );
+      const body = await get(app(), '110020,040046');
+      expect(body.items).toEqual([
+        { code: '110020', status: 'unavailable', estimate: null },
+        { code: '040046', status: 'unavailable', estimate: null },
+      ]);
+    });
+
     it('marks a QDII estimate unavailable when its base NAV is older than the latest published NAV', async () => {
       // Recorded 2026-11-06: Tiantian has no estimate for 040046; Sina's line estimates on base
       // 7.8140, which is the 11-04 NAV, while the 11-05 NAV 7.3159 is already published.
@@ -261,38 +393,41 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       expect(body.items).toEqual([{ code: '040046', status: 'unavailable', estimate: null }]);
     });
 
-    it("adopts a regular fund's Sina estimate whose base is the latest published NAV", async () => {
-      // 000001: Sina base 1.0000 equals the latest published NAV (2026-11-05).
+    it("adopts a regular fund's dated Tiantian estimate with the previous trading day base", async () => {
+      // Dated Tiantian base 1.0000 equals the latest published NAV (2026-11-05).
       const body = await get(app(), '000001');
-      expect(body.items).toEqual([{ code: '000001', status: 'estimated', estimate: SINA_000001 }]);
+      expect(body.items).toEqual([
+        { code: '000001', status: 'estimated', estimate: TIANTIAN_000001 },
+      ]);
     });
 
     it("checks the base against the previous NAV once the estimate day's NAV is already out", async () => {
-      // 110020's 2026-11-06 NAV is published; Sina's base 1.7030 is the 11-05 NAV, so it still matches.
-      upstream.use(samples({ tiantian: upstreamDown() }));
+      // The latest NAV is already 11-06; the dated Tiantian base still matches 11-05.
       clock.set('2026-11-06T12:30:00.000Z'); // 20:30
       const body = await get(app(), '110020');
-      expect(body.items).toEqual([{ code: '110020', status: 'estimated', estimate: SINA_110020 }]);
+      expect(body.items).toEqual([
+        { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
+      ]);
     });
 
-    it('falls back to Sina when the Tiantian base NAV does not match the latest published NAV', async () => {
+    it('rejects an incorrect Tiantian base NAV and the undated Sina alternative', async () => {
       upstream.use(
         samples({
           tiantian: tiantianWith('110020', { PDATE: '2026-11-05', NAV: 1.6983 }),
         }),
       );
       const body = await get(app(), '110020');
-      expect(body.items).toEqual([{ code: '110020', status: 'estimated', estimate: SINA_110020 }]);
+      expect(body.items).toEqual([{ code: '110020', status: 'unavailable', estimate: null }]);
     });
 
-    it('falls back to Sina when the Tiantian base date is not the latest published NAV date', async () => {
+    it('rejects an incorrect Tiantian base date and the undated Sina alternative', async () => {
       upstream.use(
         samples({
           tiantian: tiantianWith('110020', { PDATE: '2026-11-04', NAV: 1.703 }),
         }),
       );
       const body = await get(app(), '110020');
-      expect(body.items[0]?.estimate?.source).toBe('sina');
+      expect(body.items[0]?.status).toBe('unavailable');
     });
 
     it('adopts the Tiantian estimate when its base matches the latest published NAV', async () => {
@@ -335,7 +470,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       const second = await get(target, '040046,000001,110020');
       expect(second.items).toEqual([
         { code: '040046', status: 'unavailable', estimate: null },
-        { code: '000001', status: 'estimated', estimate: SINA_000001 },
+        { code: '000001', status: 'estimated', estimate: TIANTIAN_000001 },
         { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
       ]);
     });
@@ -350,7 +485,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       clock.set('2026-11-06T02:00:30.000Z');
       const body = await get(target, '000001,110020,040046');
       expect(body.items).toEqual([
-        { code: '000001', status: 'estimated', estimate: SINA_000001 },
+        { code: '000001', status: 'estimated', estimate: TIANTIAN_000001 },
         { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
         { code: '040046', status: 'unavailable', estimate: null },
       ]);
@@ -374,7 +509,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
         clock.set('2026-11-06T08:30:00.000Z'); // 16:30, after the close
         upstream.use(samples({ tiantian: tiantianWith('110020', patch) }));
         expect((await get(target, '110020')).items).toEqual([
-          { code: '110020', status: 'estimated', estimate: SINA_110020 },
+          { code: '110020', status: 'unavailable', estimate: null },
         ]);
 
         // With Sina gone too, the Tiantian row alone is not adopted…
@@ -389,11 +524,11 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       },
     );
 
-    it('falls back to Sina for the recorded post-publication Tiantian row', async () => {
+    it('returns unavailable when the recorded post-publication row and undated alternative cannot prove a base', async () => {
       // The raw recording: PDATE is already the estimate day, so the base cannot be read.
       upstream.use(estimateSamples());
       const body = await get(app(), '110020');
-      expect(body.items).toEqual([{ code: '110020', status: 'estimated', estimate: SINA_110020 }]);
+      expect(body.items).toEqual([{ code: '110020', status: 'unavailable', estimate: null }]);
     });
   });
 
@@ -428,7 +563,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       upstream.use(mustNotFetch);
       clock.set('2026-10-01T02:00:00.000Z'); // National Day, Thursday 10:00
       const body = await get(
-        app({ tradingCalendar: new ChineseTradingCalendar(['2026-10-01']) }),
+        app({ tradingCalendar: new ChineseTradingCalendar(['2026-10-01'], [2026]) }),
         '110020',
       );
       expect(body.items).toEqual([{ code: '110020', status: 'holiday', estimate: null }]);
@@ -447,12 +582,82 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       expect(body.marketStatus).toBe('closed');
       expect(body.items).toEqual([
         { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
-        { code: '000001', status: 'estimated', estimate: SINA_000001 },
+        { code: '000001', status: 'estimated', estimate: TIANTIAN_000001 },
       ]);
     });
   });
 
   describe('caching', () => {
+    it('rejects the old base after crossing into the next trading day, then accepts the updated base', async () => {
+      const target = app();
+      clock.set('2026-11-06T08:30:00.000Z');
+      expect((await get(target, '000001')).items[0]?.estimate).toEqual(TIANTIAN_000001);
+
+      clock.set('2026-11-09T07:35:00.000Z');
+      let base = '1.0000';
+      upstream.use(
+        samples({
+          tiantian: (url) =>
+            tiantianWith('000001', {
+              GSZ: 1.02,
+              NAV: base,
+              PDATE: '2026-11-06',
+              GZTIME: '2026-11-09 15:31',
+            })(url),
+          nav: () => {
+            const body = JSON.parse(sample('eastmoney/nav-000001-latest.json')) as {
+              Data: { LSJZList: { DWJZ: string; FSRQ: string }[] };
+            };
+            Object.assign(body.Data.LSJZList[0]!, { DWJZ: '1.0100', FSRQ: '2026-11-06' });
+            return JSON.stringify(body);
+          },
+        }),
+      );
+      expect((await get(target, '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+      base = '1.0100';
+      clock.set('2026-11-09T07:35:30.000Z');
+      const body = await get(target, '000001');
+      expect(body.items[0]?.status).toBe('estimated');
+      expect(body.items[0]?.estimate?.time).toBe('2026-11-09T07:31:00.000Z');
+    });
+
+    it('does not serve a cached closing estimate when the current NAV can no longer be verified', async () => {
+      const target = app();
+      clock.set('2026-11-06T08:30:00.000Z');
+      expect((await get(target, '000001')).items[0]?.estimate).toEqual(TIANTIAN_000001);
+      upstream.use(upstreamDown());
+      clock.set('2026-11-06T11:05:00.000Z');
+      expect((await get(target, '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+    });
+
+    it('rechecks the published NAV before serving a cached closing estimate', async () => {
+      const target = app();
+      clock.set('2026-11-06T08:30:00.000Z');
+      expect((await get(target, '000001')).items[0]?.estimate).toEqual(TIANTIAN_000001);
+
+      // At 19:00 the NAV cache changes its publication window. A corrected previous NAV
+      // now disagrees with the cached source base, although the closing estimate TTL is valid.
+      clock.set('2026-11-06T11:05:00.000Z');
+      upstream.use(
+        samples({
+          nav: () => {
+            const body = JSON.parse(sample('eastmoney/nav-000001-latest.json')) as {
+              Data: { LSJZList: { DWJZ: string }[] };
+            };
+            body.Data.LSJZList[0]!.DWJZ = '1.0100';
+            return JSON.stringify(body);
+          },
+        }),
+      );
+      expect((await get(target, '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+    });
+
     it('caches estimates for seconds during trading hours', async () => {
       const target = app();
       expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
@@ -472,13 +677,13 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
     it('caches each fund separately so a later batch only fetches the new codes', async () => {
       const target = app();
       await get(target, '110020');
-      // Tiantian now fails, so only a fresh fetch would fall back to Sina.
+      // Tiantian now fails, so only a fresh fetch would become unavailable.
       upstream.use(samples({ tiantian: upstreamDown() }));
       clock.set('2026-11-06T02:00:10.000Z');
       const body = await get(target, '110020,000001');
       expect(body.items).toEqual([
         { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
-        { code: '000001', status: 'estimated', estimate: SINA_000001 },
+        { code: '000001', status: 'unavailable', estimate: null },
       ]);
     });
 
@@ -487,7 +692,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       clock.set('2026-11-06T08:30:00.000Z'); // Friday 16:30
       expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
 
-      upstream.use(upstreamDown());
+      upstream.use(samples({ tiantian: upstreamDown(), sina: upstreamDown() }));
       clock.set('2026-11-06T15:59:59.000Z'); // Friday 23:59:59 — hours later, still cached
       expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
 
@@ -503,7 +708,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
 
     it('keeps the closing estimate until the open after a holiday', async () => {
       // Monday 2026-11-09 is a market holiday; the next open is Tuesday 09:30.
-      const target = app({ tradingCalendar: new ChineseTradingCalendar(['2026-11-09']) });
+      const target = app({ tradingCalendar: new ChineseTradingCalendar(['2026-11-09'], [2026]) });
       clock.set('2026-11-06T08:30:00.000Z'); // Friday 16:30
       expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
 

@@ -1,7 +1,7 @@
-import { and, eq, gte, lt } from 'drizzle-orm';
+import { and, eq, gte, lt, sql } from 'drizzle-orm';
 import type { Pool } from 'pg';
 import { createDb } from '../db';
-import { tradingHolidays } from '../db/schema';
+import { calendarCoverage, tradingHolidays } from '../db/schema';
 
 /** 交易日历所属的市场：cn A 股、hk 港股。 */
 export type CalendarMarket = 'cn' | 'hk';
@@ -44,10 +44,36 @@ export async function loadCalendarDays(
   }));
 }
 
+/** 同一数据库快照加载特殊日期及显式年度覆盖，避免与并发导入交错。 */
+export async function loadCoveredCalendar(pool: Pool, market: CalendarMarket) {
+  return createDb(pool).transaction(
+    async (tx) => {
+      const days = await tx
+        .select()
+        .from(tradingHolidays)
+        .where(eq(tradingHolidays.market, market));
+      const coverage = await tx
+        .select()
+        .from(calendarCoverage)
+        .where(eq(calendarCoverage.market, market));
+      return {
+        days: days.map((row) => ({
+          date: row.date,
+          name: row.name,
+          ...(row.earlyClose ? { earlyClose: row.earlyClose } : {}),
+        })),
+        years: coverage.map((row) => row.year),
+      };
+    },
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  );
+}
+
 /**
  * 按年导入某个市场的休市日（默认 A 股）：先删除该市场该年已有的日期再插入，重复执行结果不变（幂等），
  * 不影响其他市场的数据。只应导入落在工作日的日期；周末由交易日历自行判定。
  * 删除与插入在同一个事务里完成，任一失败整体回滚，原年数据保持不变；
+ * 调用方须提供该市场该年的完整清单（允许空清单）；成功导入才记录覆盖。同市场同年用事务锁串行化。
  * 写入前校验数据（日期格式合法、属于目标年份、无重复、半日市时刻合法），不合法直接拒绝。
  */
 export async function importHolidays(
@@ -61,6 +87,7 @@ export async function importHolidays(
   const start = `${year}-01-01`;
   const end = `${year + 1}-01-01`;
   await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`calendar:${market}:${year}`}))`);
     await tx
       .delete(tradingHolidays)
       .where(
@@ -80,6 +107,7 @@ export async function importHolidays(
         })),
       );
     }
+    await tx.insert(calendarCoverage).values({ market, year }).onConflictDoNothing();
   });
 }
 
@@ -88,6 +116,8 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /** 校验休市日：日期格式合法、属于目标年份、日期无重复；半日市只用于港股且时刻为 HH:MM。 */
 function validateHolidays(year: number, holidays: HolidayEntry[], market: CalendarMarket): void {
+  if (!Number.isInteger(year) || year < 1 || year > 9999)
+    throw new Error('年份必须是 1–9999 的整数');
   const seen = new Set<string>();
   for (const entry of holidays) {
     if (!DATE_RE.test(entry.date)) {

@@ -99,6 +99,13 @@
       "when": 1794230494074,
       "tag": "0013_glorious_lady_ursula",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1794285821036,
+      "tag": "0014_calendar_coverage",
+      "breakpoints": true
     }
   ]
 }
