@@ -39,7 +39,7 @@ export interface Estimate {
 /**
  * 单只基金的估值状态，均为显式枚举：
  * - estimated   有估值（交易时段，或当天收盘后的收盘估值）
- * - unavailable 所有来源都失败或都没有当天估值
+ * - unavailable 来源、基准日期或适用日历覆盖无法核实
  * - pre_market  交易日开盘前，不提供估值
  * - holiday     休市（周末或休市日），不提供估值
  */
@@ -91,7 +91,7 @@ interface CacheEntry {
  * 基准（见 estimate-sources），或者净值模块给不出期望的基准（净值上游失败且没有缓存、基金没有
  * 净值数据）。净值模块自己的缓存仍可用，所以此前已取到的净值在净值上游故障期间照常用于核对。
  * 基准日期还必须是适用日历的上一个交易日；中间交易日净值尚未公布时不提供估值。
- * QDII 缺少境外市场日历映射时不提供估值。缓存命中也重新核对基准，防止净值更新后沿用旧估值。
+ * 日历年度覆盖未知、来源缺少基准日期（新浪）、QDII 缺少境外市场日历映射时不提供估值。缓存命中也重新核对基准，防止净值更新后沿用旧估值。
  *
  * 缓存先放在进程内，按基金代码作键、带到期时间，以后换成 Redis 时用同样的键与 TTL 即可。
  */
@@ -134,6 +134,13 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
       const now = deps.clock.now();
       const status = marketStatus(now, deps.calendar);
       const time = now.toISOString();
+      if (deps.calendar.hasCoverage?.(now) !== true) {
+        return {
+          marketStatus: status,
+          time,
+          items: codes.map((code) => ({ code, status: 'unavailable', estimate: null })),
+        };
+      }
       if (status === 'pre_market' || status === 'holiday') {
         return { marketStatus: status, time, items: codes.map((code) => offHours(code, status)) };
       }
@@ -256,7 +263,7 @@ function baseVerifier(
           expected !== null &&
           expected.date === previousDate &&
           formatNav(expected.unitNav) === source.base.unitNav &&
-          (source.base.date === null || source.base.date === expected.date);
+          source.base.date === expected.date;
         return [code, matches ? source : null] as const;
       }),
     );
@@ -268,9 +275,12 @@ function baseVerifier(
 
 /** 只在有可靠日历且能找到前一个交易日时接受估值。 */
 function previousTradingDate(date: string, calendar: TradingCalendar): string | null {
-  const noon = new Date(`${date}T12:00:00+08:00`).getTime();
+  const start = new Date(`${date}T12:00:00+08:00`);
+  if (calendar.hasCoverage?.(start) !== true) return null;
+  const noon = start.getTime();
   for (let offset = 1; offset <= 366; offset++) {
     const day = new Date(noon - offset * 24 * 3600_000);
+    if (calendar.hasCoverage?.(day) !== true) return null;
     if (calendar.isTradingDay(day)) return shanghaiDate(day);
   }
   return null;
@@ -301,6 +311,7 @@ function nextMarketOpen(now: Date, calendar: TradingCalendar): Date {
   const noon = new Date(`${today}T12:00:00+08:00`).getTime();
   for (let offset = 1; offset <= 366; offset++) {
     const day = new Date(noon + offset * 24 * 3600_000);
+    if (calendar.hasCoverage?.(day) !== true) return new Date(now.getTime() + TRADING_TTL_MS);
     if (calendar.isTradingDay(day)) {
       return new Date(`${shanghaiDate(day)}T${MARKET_OPEN}:00+08:00`);
     }

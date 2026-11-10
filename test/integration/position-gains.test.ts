@@ -5,7 +5,13 @@ import { createDb } from '../../src/db';
 import type { PositionView } from '../../src/positions/service';
 import type { PositionSummary } from '../../src/positions/summary';
 import { UpstreamError } from '../../src/market/upstream';
-import { ChineseTradingCalendar } from '../../src/trading-calendar';
+import {
+  ChineseTradingCalendar,
+  loadTradingCalendar,
+  type TradingCalendar,
+} from '../../src/trading-calendar';
+import { importHolidays } from '../../src/trading-calendar/holidays';
+import cn2026 from '../../data/holidays/2026.json';
 import type { EmailLoginResponse } from '../../src/routes/auth';
 import {
   eastmoneySamples,
@@ -18,6 +24,7 @@ import { createTestSchema, dropTestSchema, type TestSchema } from '../support/te
 
 describe('今日收益与持仓汇总（HTTP）', () => {
   let db: TestSchema;
+  let calendar: TradingCalendar;
   let app: App;
   let now: Date;
   let code: string;
@@ -52,6 +59,7 @@ describe('今日收益与持仓汇总（HTTP）', () => {
   function makeApp(source: Replay = replay, extra: AppDeps = {}) {
     return createApp({
       database: createDb(db.pool),
+      tradingCalendar: calendar,
       clock: { now: () => now },
       upstream: new RecordedUpstream(source),
       mailer: {
@@ -65,6 +73,8 @@ describe('今日收益与持仓汇总（HTTP）', () => {
 
   beforeEach(async () => {
     db = await createTestSchema();
+    await importHolidays(db.pool, cn2026.year, cn2026.holidays);
+    calendar = await loadTradingCalendar(db.pool);
     now = new Date('2026-11-06T02:00:00Z');
     code = '';
     published = false;
@@ -350,7 +360,9 @@ describe('今日收益与持仓汇总（HTTP）', () => {
     const [channel] = await channels(headers);
     const position = await create(headers, channel!.id);
     now = new Date(time as string);
-    app = makeApp(replay, { tradingCalendar: new ChineseTradingCalendar(holidays as string[]) });
+    app = makeApp(replay, {
+      tradingCalendar: new ChineseTradingCalendar(holidays as string[], [2026]),
+    });
     const detail = await app.request(`/v1/positions/${position.id}`, { headers });
     expect(detail.status).toBe(200);
     expect(await detail.json()).toMatchObject({

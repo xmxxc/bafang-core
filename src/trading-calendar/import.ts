@@ -14,6 +14,7 @@ import { importHolidays, type CalendarMarket, type HolidayEntry } from './holida
  *   pnpm trading-calendar:import 2026 --market hk
  *
  * 默认读取仓库内 `data/holidays/<year>.json`（A 股）或 `data/holidays/hk-<year>.json`（港股）。
+ * 输入必须是该市场该年的完整清单（允许合法空清单）；成功导入才记录年度覆盖。
  * 重复执行幂等（先删该市场该年再插入），不影响其他市场。港股条目可带 `earlyClose`（半日市收市时刻）。
  */
 
