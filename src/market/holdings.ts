@@ -52,6 +52,7 @@ export function createHoldingsService(deps: {
               url: `${EM}?type=jjcc&code=${code}&topline=10&year=&month=&rt=1`,
               referer: 'https://fundf10.eastmoney.com/',
             }),
+            day,
           );
           // Only a recognized, successful empty report proves absence of a report.
           if (!parsed) return null;
@@ -65,6 +66,7 @@ export function createHoldingsService(deps: {
                 referer: 'https://finance.sina.com.cn/',
                 encoding: 'utf-8',
               }),
+              day,
             );
           } catch (backupError) {
             if (!(backupError instanceof UpstreamError)) throw backupError;
@@ -199,7 +201,7 @@ function report(reportDate: string, items: Report['items']): Report {
     bad('holdings rows empty or duplicated');
   return { reportDate, items: items.slice(0, 10) };
 }
-function parseEastmoney(text: string): Report | null {
+function parseEastmoney(text: string, asOfDay: string): Report | null {
   // Decode the string without executing upstream JavaScript. Arbitrary HTML is not this protocol.
   const match =
     /^\s*var\s+apidata\s*=\s*\{\s*content\s*:\s*("(?:\\.|[^"\\])*")\s*,\s*arryear\s*:\s*\[([\d,\s]*)\]\s*,\s*curyear\s*:\s*\d+\s*\}\s*;?\s*$/.exec(
@@ -220,7 +222,9 @@ function parseEastmoney(text: string): Report | null {
   ];
   if (!blocks.length) bad('eastmoney holdings quarter missing');
   const dated = blocks.map((block) => ({ date: validDate(block[1]!.trim()), html: block[2]! }));
-  const latest = dated.sort((a, b) => b.date.localeCompare(a.date))[0]!;
+  const eligible = dated.filter((block) => block.date <= asOfDay);
+  if (!eligible.length) bad('holdings report date is in the future');
+  const latest = eligible.sort((a, b) => b.date.localeCompare(a.date))[0]!;
   if (!/股票代码/.test(latest.html) || !/股票名称/.test(latest.html) || !/占净值/.test(latest.html))
     bad('eastmoney holdings columns invalid');
   const items: Report['items'] = [];
@@ -232,12 +236,13 @@ function parseEastmoney(text: string): Report | null {
   }
   return report(latest.date, items);
 }
-function parseSina(text: string): Report {
+function parseSina(text: string, asOfDay: string): Report {
   const section = /<div\b[^>]*\bid=["']sdzc_blk["'][^>]*>([\s\S]*?<\/table>)/i.exec(text)?.[1];
   if (!section) bad('sina holdings section missing');
   const date = validDate(
     /数据日期：\s*<span[^>]*>([^<]+)<\/span>/i.exec(section)?.[1]?.trim() ?? '',
   );
+  if (date > asOfDay) bad('holdings report date is in the future');
   const table =
     /<table\b[^>]*\bid=["']fund_sdzc_table["'][^>]*\bcodelist=["']([^"']*)["'][^>]*>([\s\S]*?)<\/table>/i.exec(
       section,

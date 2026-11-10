@@ -190,6 +190,43 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       });
     },
   );
+  it('ignores future EM quarters and selects the latest report no later than asOf', async () => {
+    replay.em = script(
+      block('2026-09-30', row('600519', '旧季股票')) +
+        block('2027-03-31', row('300308', '未来股票')),
+    );
+    const body = await get();
+    expect(body.reportDate).toBe('2026-09-30');
+    expect(body.items[0]).toMatchObject({ code: '600519', name: '旧季股票' });
+  });
+  it('falls back when EM contains only a future report and does not cache it', async () => {
+    replay.em = script(block('2027-03-31', row('300308', '未来股票')));
+    replay.sinaDown = true;
+    const failed = await app().request(endpoint);
+    expect(failed.status).toBe(502);
+    replay.em = script(block('2026-09-30', row('600519', '恢复股票')));
+    expect((await get()).items[0]).toMatchObject({ code: '600519', name: '恢复股票' });
+  });
+  it('rejects a future Sina page and accepts the restored same-day report', async () => {
+    replay.emDown = true;
+    replay.sinaDown = false;
+    replay.sina = sina.replaceAll('2026-09-30', '2027-03-31');
+    const failed = await app().request(endpoint);
+    expect(failed.status).toBe(502);
+    replay.sina = sina;
+    expect((await get()).items[0]).toMatchObject({ code: '300308', reportDate: '2026-09-30' });
+  });
+  it('does not retain a future report in the same-day report cache after recovery', async () => {
+    replay.em = script(block('2027-03-31', row('300308', '未来股票')));
+    replay.sinaDown = true;
+    const target = app();
+    expect((await target.request(endpoint)).status).toBe(502);
+    replay.em = script(block('2026-09-30', row('600519', '恢复股票')));
+    expect((await get(target)).items[0]).toMatchObject({
+      code: '600519',
+      reportDate: '2026-09-30',
+    });
+  });
   it.each(['PEP', 'PEPX'])(
     'retains %s in the real 040046 report with unavailable quotes',
     async (code) => {
