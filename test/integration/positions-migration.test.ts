@@ -5,8 +5,12 @@ import { expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { WeChatLoginResponse } from '../../src/routes/auth';
-import { eastmoneySamples, RecordedUpstream } from '../support/recorded-upstream';
+import { eastmoneySamples, estimateSamples, RecordedUpstream } from '../support/recorded-upstream';
 import { createTestSchema, dropTestSchema } from '../support/test-db';
+import { loadTradingCalendar } from '../../src/trading-calendar';
+import { importHolidays } from '../../src/trading-calendar/holidays';
+import { tradingHolidays } from '../../src/db/schema';
+import cn2026 from '../../data/holidays/2026.json';
 
 async function migrationFolderThrough(maxIdx: number): Promise<string> {
   const folder = await mkdtemp(join(tmpdir(), `positions-migrations-${maxIdx}-`));
@@ -280,6 +284,107 @@ it('upgrades 0000–0012 with 0013 and creates a paired switch to a missing targ
     expect(
       await (await app.request(`/v1/positions/${position.id}/trades`, { headers })).json(),
     ).toEqual({ items: [] });
+  } finally {
+    await dropTestSchema(db);
+    await rm(prior, { recursive: true, force: true });
+  }
+});
+
+it('upgrades deployed 0013 with legacy holidays to 0014 without guessing coverage, then restores estimates by explicit import', async () => {
+  const prior = await migrationFolderThrough(13);
+  const db = await createTestSchema(prior);
+  try {
+    // Deployed 0013 fixture: yearly holiday rows exist but no annual coverage metadata exists.
+    await createDb(db.pool)
+      .insert(tradingHolidays)
+      .values(cn2026.holidays.map((day) => ({ ...day, market: 'cn' })));
+    const upstream = new RecordedUpstream(
+      estimateSamples({
+        tiantian: () =>
+          JSON.stringify({
+            success: true,
+            data: [
+              {
+                FCODE: '000001',
+                GSZ: '1.0100',
+                GSZZL: 1,
+                GZTIME: '2026-11-06 15:00',
+                PDATE: '2026-11-05',
+                NAV: '1.0000',
+              },
+            ],
+          }),
+      }),
+    );
+    let now = new Date('2026-11-06T02:00:00Z');
+    const deps = {
+      database: createDb(db.pool),
+      upstream,
+      clock: { now: () => now },
+      wechat: { openid: async (code: string) => code },
+    };
+    const old = createApp(deps);
+    const login = await old.request('/v1/auth/wechat/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: 'before-coverage' }),
+    });
+    expect(login.status).toBe(200);
+    const headers = {
+      Authorization: `Bearer ${((await login.json()) as WeChatLoginResponse).token}`,
+      'Content-Type': 'application/json',
+    };
+    const channels = (await (await old.request('/v1/channels', { headers })).json()) as {
+      items: { id: string }[];
+    };
+
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    const target = createApp({ ...deps, tradingCalendar: await loadTradingCalendar(db.pool) });
+    expect(await (await target.request('/v1/channels', { headers })).json()).toEqual(channels);
+    const estimates = await target.request('/v1/funds/estimates?codes=000001');
+    expect(estimates.status).toBe(200);
+    expect(await estimates.json()).toMatchObject({
+      items: [{ status: 'unavailable', estimate: null }],
+    });
+    now = new Date('2026-10-01T02:00:00Z');
+    expect(await (await target.request('/v1/market/status')).json()).toMatchObject({
+      status: 'holiday',
+    });
+    now = new Date('2026-11-06T02:00:00Z');
+    const created = await target.request('/v1/positions', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        fundCode: '000001',
+        channelId: channels.items[0]!.id,
+        shares: '1000',
+        totalCost: '1000',
+      }),
+    });
+    expect(created.status).toBe(201);
+    const position = (await created.json()) as { id: string };
+    expect(position).toMatchObject({ todayGain: null, todayGainStatus: 'unavailable' });
+
+    await importHolidays(db.pool, cn2026.year, cn2026.holidays);
+    const restored = createApp({ ...deps, tradingCalendar: await loadTradingCalendar(db.pool) });
+    expect(await (await restored.request('/v1/funds/estimates?codes=000001')).json()).toMatchObject(
+      {
+        items: [
+          {
+            status: 'estimated',
+            estimate: { source: 'tiantian', time: '2026-11-06T07:00:00.000Z' },
+          },
+        ],
+      },
+    );
+    expect(
+      await (await restored.request(`/v1/positions/${position.id}`, { headers })).json(),
+    ).toMatchObject({ todayGain: '10.00', todayGainStatus: 'estimated' });
+    await migrateSchema(db.pool, MIGRATIONS_FOLDER, db.schema);
+    expect(await (await restored.request('/v1/funds/estimates?codes=000001')).json()).toMatchObject(
+      { items: [{ status: 'estimated' }] },
+    );
   } finally {
     await dropTestSchema(db);
     await rm(prior, { recursive: true, force: true });

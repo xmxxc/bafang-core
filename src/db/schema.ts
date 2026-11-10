@@ -37,6 +37,16 @@ export const tradingHolidays = pgTable(
   (table) => [primaryKey({ columns: [table.market, table.date] })],
 );
 
+/** 成功导入的完整市场年度；旧逐日数据不自动获得覆盖证明。 */
+export const calendarCoverage = pgTable(
+  'calendar_coverage',
+  {
+    market: text('market').notNull(),
+    year: integer('year').notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.market, table.year] })],
+);
+
 /** 使用八方来财的一个人；持仓、自选和设置都归属于用户。 */
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),

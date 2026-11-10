@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp, type App } from '../../src/app';
+import { ChineseTradingCalendar } from '../../src/trading-calendar';
 import { createDb } from '../../src/db';
 import { UpstreamError } from '../../src/market/upstream';
 import type { WeChatLoginResponse } from '../../src/routes/auth';
@@ -10,7 +11,6 @@ import {
   quoteSamples,
   RecordedUpstream,
   sample,
-  sinaSamples,
   tiantianSamples,
   type Replay,
 } from '../support/recorded-upstream';
@@ -58,6 +58,7 @@ describe('今日概览（HTTP）', () => {
   function makeApp(source: Replay = replay) {
     return createApp({
       database: createDb(database.pool),
+      tradingCalendar: new ChineseTradingCalendar([], [2026]),
       clock: { now: () => clockReads.shift() ?? now },
       upstream: new RecordedUpstream(source),
       wechat: {
@@ -413,27 +414,26 @@ describe('今日概览（HTTP）', () => {
     expect(body.positions.map((item) => item.quote.type)).toEqual(['estimate', 'nav']);
   });
 
-  it('reports the fallback estimate source actually used for the gain', async () => {
+  it('rejects a fallback source without a verifiable base date', async () => {
     const headers = await login();
     const [channel] = await channels(headers);
     await create(headers, channel!.id);
     app = makeApp((url) => {
       if (url.hostname === 'fundcomapi.tiantianfunds.com')
         return new UpstreamError('timeout', 'recorded timeout');
-      if (url.hostname === 'hq.sinajs.cn') return sinaSamples()(url);
+      if (url.hostname === 'hq.sinajs.cn')
+        return 'var hq_str_fu_110020="110020,2026-11-06 16:03,1.6800,1.7030,1.7030,, -1.3531,2026-11-06";';
       return replay(url);
     });
     const body = await overview(headers);
     expect(body.positions[0]).toMatchObject({
-      todayGain: '-23.04',
-      todayGainStatus: 'estimated',
+      todayGain: null,
+      todayGainStatus: 'unavailable',
       quote: {
-        type: 'estimate',
-        source: 'sina',
-        sourceName: '新浪财经',
-        fallback: true,
-        changePercent: -1.3531,
-        time: '2026-11-06T08:03:00.000Z',
+        type: 'unavailable',
+        source: null,
+        sourceName: null,
+        time: null,
       },
     });
   });
@@ -567,7 +567,8 @@ describe('今日概览（HTTP）', () => {
     expect(body.positions[0]).toMatchObject({
       fundName: null,
       fundCode: '110020',
-      todayGain: '-24.52',
+      todayGain: null,
+      todayGainStatus: 'unavailable',
     });
     expect(body.indices.items).toHaveLength(4);
     expect(body.indices.items.every((item) => !item.available && item.point === null)).toBe(true);

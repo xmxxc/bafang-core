@@ -61,6 +61,7 @@ describe('同渠道调仓', () => {
     const estimates = estimateSamples({ nav: replay });
     return createApp({
       database: createDb(db.pool),
+      tradingCalendar: new ChineseTradingCalendar([], [2026]),
       upstream: new RecordedUpstream((url) =>
         ['api.fund.eastmoney.com', 'fundcomapi.tiantianfunds.com', 'hq.sinajs.cn'].includes(
           url.hostname,
@@ -69,7 +70,6 @@ describe('同渠道调仓', () => {
           : replay(url),
       ),
       clock: { now: () => now },
-      tradingCalendar: new ChineseTradingCalendar([]),
       wechat: { openid: async (code) => code },
     });
   }

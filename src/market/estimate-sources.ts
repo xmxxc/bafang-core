@@ -16,7 +16,7 @@ export interface SourceEstimate {
   time: Date;
   /**
    * 来源给出的估值基准：估值是在这一期单位净值上推算的涨跌。没有可核对基准的估值不会出现在
-   * 结果里。date 为 null 表示来源只给了基准净值、没给日期（新浪）。
+   * 结果里。date 为 null 表示来源只给了基准净值、没给日期（新浪），估值服务会因无法核实日期而拒绝。
    */
   base: { unitNav: string; date: string | null };
 }

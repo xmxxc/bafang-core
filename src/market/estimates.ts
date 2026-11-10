@@ -7,6 +7,8 @@ import {
 } from './estimate-sources';
 import { formatNav } from './estimate-sources';
 import type { NavService } from './nav';
+import type { FundService } from './funds';
+import { DailyCache } from './daily-cache';
 import { marketStatus, type MarketStatus } from './status';
 import { UpstreamError, type UpstreamFetcher } from './upstream';
 
@@ -37,7 +39,7 @@ export interface Estimate {
 /**
  * 单只基金的估值状态，均为显式枚举：
  * - estimated   有估值（交易时段，或当天收盘后的收盘估值）
- * - unavailable 所有来源都失败或都没有当天估值
+ * - unavailable 来源、基准日期或适用日历覆盖无法核实
  * - pre_market  交易日开盘前，不提供估值
  * - holiday     休市（周末或休市日），不提供估值
  */
@@ -66,11 +68,13 @@ export interface EstimateServiceDeps {
   calendar: TradingCalendar;
   /** 用来核对估值基准的净值模块；与净值接口共用同一个实例与缓存。 */
   nav: NavService;
+  funds: FundService;
 }
 
 interface CacheEntry {
   estimate: Estimate | null;
   expiresAt: number;
+  source: SourceEstimate | null;
 }
 
 /**
@@ -86,12 +90,35 @@ interface CacheEntry {
  * 一级过期就回退二级，二级也过期就是 unavailable。核对不了的估值同样不采纳：来源没给出可核对的
  * 基准（见 estimate-sources），或者净值模块给不出期望的基准（净值上游失败且没有缓存、基金没有
  * 净值数据）。净值模块自己的缓存仍可用，所以此前已取到的净值在净值上游故障期间照常用于核对。
- * 因此被采纳的估值一定核对过基准，收盘估值可以放心长缓存。
+ * 基准日期还必须是适用日历的上一个交易日；中间交易日净值尚未公布时不提供估值。
+ * 日历年度覆盖未知、来源缺少基准日期（新浪）、QDII 缺少境外市场日历映射时不提供估值。缓存命中也重新核对基准，防止净值更新后沿用旧估值。
  *
  * 缓存先放在进程内，按基金代码作键、带到期时间，以后换成 Redis 时用同样的键与 TTL 即可。
  */
 export function createEstimateService(deps: EstimateServiceDeps): EstimateService {
   const cache = new Map<string, CacheEntry>();
+  const calendarKnown = new DailyCache<boolean>();
+
+  async function fundCalendar(code: string, asOf: Date): Promise<TradingCalendar | null> {
+    const today = shanghaiDate(asOf);
+    let known = calendarKnown.get(today, code);
+    if (known === undefined) {
+      try {
+        const fund = await deps.funds.get(code);
+        if (!fund) return null;
+        // 现有元数据没有 QDII 的境外市场映射，不能用 A 股日历推断其估值基准。
+        known =
+          fund.category !== 'qdii' &&
+          /^(股票型|混合型|债券型|指数型|货币型|FOF)(?:-|$)/i.test(fund.type?.trim() ?? '');
+        calendarKnown.set(today, code, known);
+      } catch (error) {
+        if (!(error instanceof UpstreamError)) throw error;
+        console.warn('[bafang-core] estimate calendar unavailable', code, error.kind);
+        return null;
+      }
+    }
+    return known ? deps.calendar : null;
+  }
 
   function remember(code: string, entry: CacheEntry): void {
     cache.delete(code);
@@ -107,21 +134,39 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
       const now = asOf ?? deps.clock.now();
       const status = marketStatus(now, deps.calendar);
       const time = now.toISOString();
+      if (deps.calendar.hasCoverage?.(now) !== true) {
+        return {
+          marketStatus: status,
+          time,
+          items: codes.map((code) => ({ code, status: 'unavailable', estimate: null })),
+        };
+      }
       if (status === 'pre_market' || status === 'holiday') {
         return { marketStatus: status, time, items: codes.map((code) => offHours(code, status)) };
       }
 
       const nowMs = now.getTime();
       const resolved = new Map<string, Estimate | null>();
+      const verify = baseVerifier(deps.nav, fundCalendar, now);
+      const cachedSources = new Map<string, SourceEstimate>();
       for (const code of codes) {
         const entry = cache.get(code);
-        if (entry && entry.expiresAt > nowMs) resolved.set(code, entry.estimate);
+        if (entry && entry.expiresAt > nowMs && entry.source) {
+          cachedSources.set(code, entry.source);
+        }
+      }
+      const checkedCache = await verify(cachedSources);
+      for (const code of codes) {
+        const entry = cache.get(code);
+        if (entry && entry.expiresAt > nowMs) {
+          if (entry.estimate === null || checkedCache.has(code)) resolved.set(code, entry.estimate);
+          else cache.delete(code);
+        }
       }
 
       const missing = codes.filter((code) => !resolved.has(code));
       if (missing.length > 0) {
         const today = shanghaiDate(now);
-        const verify = baseVerifier(deps.nav, now);
         const primary = await verify(
           await trySource('tiantian', () => fetchTiantianEstimates(deps.upstream, missing, today)),
         );
@@ -147,6 +192,7 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
             status === 'closed' && estimate !== null && Date.parse(estimate.time) >= closeAt;
           remember(code, {
             estimate,
+            source: fromPrimary ?? fromSecondary ?? null,
             expiresAt: closingEstimate ? nextOpenMs : nowMs + TRADING_TTL_MS,
           });
           resolved.set(code, estimate);
@@ -186,7 +232,11 @@ function toEstimate(source: SourceEstimate, name: EstimateSource, fallback: bool
  * 过期的、以及期望基准查不到（净值上游失败或没有净值数据）的估值都去掉。
  * 同一批次里对同一只基金的净值查询只做一次。
  */
-function baseVerifier(nav: NavService, asOf?: Date) {
+function baseVerifier(
+  nav: NavService,
+  fundCalendar: (code: string, asOf: Date) => Promise<TradingCalendar | null>,
+  asOf: Date,
+) {
   const lookups = new Map<string, Promise<{ date: string; unitNav: string } | null>>();
 
   function expectedBase(code: string, date: string) {
@@ -206,11 +256,15 @@ function baseVerifier(nav: NavService, asOf?: Date) {
   return async (candidates: Map<string, SourceEstimate>): Promise<Map<string, SourceEstimate>> => {
     const checked = await Promise.all(
       [...candidates].map(async ([code, source]) => {
-        const expected = await expectedBase(code, shanghaiDate(source.time));
+        const date = shanghaiDate(source.time);
+        const calendar = await fundCalendar(code, asOf);
+        const previousDate = calendar ? previousTradingDate(date, calendar) : null;
+        const expected = previousDate ? await expectedBase(code, date) : null;
         const matches =
           expected !== null &&
+          expected.date === previousDate &&
           formatNav(expected.unitNav) === source.base.unitNav &&
-          (source.base.date === null || source.base.date === expected.date);
+          source.base.date === expected.date;
         return [code, matches ? source : null] as const;
       }),
     );
@@ -218,6 +272,19 @@ function baseVerifier(nav: NavService, asOf?: Date) {
     for (const [code, source] of checked) if (source) accepted.set(code, source);
     return accepted;
   };
+}
+
+/** 只在有可靠日历且能找到前一个交易日时接受估值。 */
+function previousTradingDate(date: string, calendar: TradingCalendar): string | null {
+  const start = new Date(`${date}T12:00:00+08:00`);
+  if (calendar.hasCoverage?.(start) !== true) return null;
+  const noon = start.getTime();
+  for (let offset = 1; offset <= 366; offset++) {
+    const day = new Date(noon - offset * 24 * 3600_000);
+    if (calendar.hasCoverage?.(day) !== true) return null;
+    if (calendar.isTradingDay(day)) return shanghaiDate(day);
+  }
+  return null;
 }
 
 /** 单个来源整体失败时记一条日志并视为「这个来源没有估值」，交给下一级。 */
@@ -245,6 +312,7 @@ function nextMarketOpen(now: Date, calendar: TradingCalendar): Date {
   const noon = new Date(`${today}T12:00:00+08:00`).getTime();
   for (let offset = 1; offset <= 366; offset++) {
     const day = new Date(noon + offset * 24 * 3600_000);
+    if (calendar.hasCoverage?.(day) !== true) return new Date(now.getTime() + TRADING_TTL_MS);
     if (calendar.isTradingDay(day)) {
       return new Date(`${shanghaiDate(day)}T${MARKET_OPEN}:00+08:00`);
     }
