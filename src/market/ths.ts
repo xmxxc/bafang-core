@@ -104,6 +104,7 @@ export async function fetchThsIntraday(
     throw new UpstreamError('bad_response', 'ths time response has an impossible date');
   if (time.data === '') return [];
   const points = new Map<number, ThsIntradayPoint>();
+  const rawPrices = new Map<number, bigint>();
   for (const raw of time.data.split(';')) {
     const [hhmm, price] = raw.split(',');
     if (!hhmm || !/^\d{4}$/.test(hhmm) || !price)
@@ -113,23 +114,22 @@ export async function fetchThsIntraday(
     const label = hour * 60 + minute;
     if (minute > 59 || hour > 23)
       throw new UpstreamError('bad_response', 'ths time response contains an invalid clock label');
-    const parsed = buildQuote(
-      price,
-      time.pre,
-      date,
-      shanghaiTime(year!, month!, day!, hhmm.slice(0, 2), hhmm.slice(2)),
-    );
-    if (!parsed)
+    const rawPrice = parseDecimal(price);
+    if (rawPrice === null || rawPrice <= 0n)
       throw new UpstreamError('bad_response', 'ths time response contains an invalid price');
-    // Valid after-session or other non-trading labels are filtered, never erase the day.
+    // Validate attached rows too, then filter non-trading labels without erasing the day.
     if (!((label >= 570 && label <= 690) || (label >= 780 && label <= 900))) continue;
-    const at = parsed.time.getTime();
-    const previous = points.get(at);
-    if (previous && previous.changePercent !== parsed.changePercent)
+    const at = shanghaiTime(year!, month!, day!, hhmm.slice(0, 2), hhmm.slice(2)).getTime();
+    const previousPrice = rawPrices.get(at);
+    if (previousPrice !== undefined && previousPrice !== rawPrice)
       throw new UpstreamError(
         'bad_response',
         'ths time response contains conflicting duplicate labels',
       );
+    rawPrices.set(at, rawPrice);
+    const parsed = buildQuote(price, time.pre, date, new Date(at));
+    if (!parsed)
+      throw new UpstreamError('bad_response', 'ths time response contains an invalid price');
     points.set(at, { time: parsed.time, changePercent: parsed.changePercent });
   }
   const sorted = [...points.values()].sort((a, b) => a.time.getTime() - b.time.getTime());

@@ -152,11 +152,12 @@ The r3 identity extension preserves official relation pages for 001051→510050,
 110021→510130, and 110019→159901 under `eastmoney/fund-*.txt`. The Shanghai
 01-class responses are `sse/fund-510050.json` and `sse/fund-510130.json`;
 the Shenzhen fund list `szse/fund-159901.json` proves ETF identity using
-`jjlb=ETF`, `tzlb=股票基金`, `ssrq=2006-04-24`, and the exact requested code.
+`jjlb=ETF`, `ssrq=2006-04-24`, and the exact requested code. Investment
+classification (`tzlb`) is not used as an ETF identity filter.
 The raw listing notice `szse/notice-159901.html` is supporting evidence only;
 production uses the parameterised official fund-list endpoint for any candidate
-Shenzhen code. Shanghai accepts the official domestic stock ETF subclasses
-01/03/08/09/31 documented in `sse/fund-type-protocol.txt`. A real query with
+Shenzhen code. Shanghai accepts all documented domestic ETF subclasses
+01/02/03/06/08/09/31/32/36/37/38 documented in `sse/fund-type-protocol.txt`. A real query with
 an empty subclass parameter is preserved in `sse/fund-510050-all.json`.
 The request fund must still pass the domestic fund calendar checks; QDII and
 unproven identities remain unavailable. URL, capture window and byte hashes
@@ -167,3 +168,22 @@ are in `estimate-r3-evidence.json`; the THS pair has separate metadata and a
 mother-ETF pair used for the 242 valid session labels plus 15:05–15:30
 attached labels. The parser retains the session points and filters the
 post-session labels instead of treating the valid response as malformed.
+
+### #7 r4: non-equity ETF identity and raw-price conflicts
+
+`eastmoney/fund-000216.txt`, `eastmoney/base-000216.json`, and
+`sse/fund-518880.json` preserve the independent review's original official
+gold-feeder relation, non-QDII type and exchange class06 identity.
+`szse/fund-159972.json` and `szse/fund-159934.json` are live official fund-list
+responses for bond and gold ETFs. The gold row uses `tzlb=其它基金`, while the
+bond row uses `tzlb=债券基金`; both explicitly have `jjlb=ETF`. Production
+requests leave `selectTzlb` empty and validate ETF identity separately from
+asset classification. The preserved SSE `typeConversion` script documents
+equity, bond, gold and commodity ETF classes; explicitly cross-border classes
+and non-ETF monetary classes remain outside the verified domestic mapping.
+
+Request URLs, capture metadata and hashes are in `estimate-r4-evidence.json`.
+Tests distinguish the real 000216→518880 mapping from synthetic relation/class
+controls using real exchange rows. Duplicate-price mutations use raw fixed-point
+values; same-valued decimal spellings deduplicate, while tick/sub-tick differences
+produce502 before percentage/price display rounding.

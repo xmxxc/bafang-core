@@ -123,12 +123,27 @@ export async function fetchVerifiedEtfCode(
     .safeParse(raw);
   if (!parsed.success || parsed.data.actionErrors.length)
     throw new UpstreamError('bad_response', 'SSE FUND_LIST protocol invalid');
-  const domesticStockEtfClasses = new Set(['01', '03', '08', '09', '31']);
+  // Official typeConversion / getFundType: 00 is ETF except monetary funds 05/07.
+  // Include every documented domestic ETF class (equity, bonds, gold, commodity).
+  // 04/33/34/35 explicitly denote cross-border ETFs: no overseas calendar mapping yet.
+  const domesticEtfClasses = new Set([
+    '01',
+    '02',
+    '03',
+    '06',
+    '08',
+    '09',
+    '31',
+    '32',
+    '36',
+    '37',
+    '38',
+  ]);
   return (
     parsed.data.result.length === 1 &&
     parsed.data.result[0]!.fundCode === code &&
     parsed.data.result[0]!.fundType === '00' &&
-    domesticStockEtfClasses.has(parsed.data.result[0]!.subClass) &&
+    domesticEtfClasses.has(parsed.data.result[0]!.subClass) &&
     validListingDate(parsed.data.result[0]!.listingDate, asOf)
   );
 }
@@ -147,7 +162,7 @@ async function verifyShenzhenEtf(
     PAGENO: '1',
     txtkey1: code,
     selectJjlb: 'ETF',
-    selectTzlb: '股票基金',
+    selectTzlb: '',
   }))
     url.searchParams.set(key, value);
   const text = await upstream.fetchText({ url: url.href, referer: 'https://www.szse.cn/' });
@@ -181,7 +196,6 @@ async function verifyShenzhenEtf(
     identity?.[1] === code &&
     identity[2] === code &&
     row.jjlb === 'ETF' &&
-    row.tzlb === '股票基金' &&
     /^\d{4}-\d{2}-\d{2}$/.test(row.ssrq) &&
     validListingDate(row.ssrq.replaceAll('-', ''), asOf)
   );

@@ -48,12 +48,15 @@ class ReplayControls {
   pre = '100';
   snapshotPre = '100';
   fault = '';
+  baseInfo: string | null = null;
+  snapshotPrice = '101';
   thsFault = false;
   replay: Replay = (url) => {
     if (url.hostname === this.fault) return new UpstreamError('timeout', 'synthetic failure');
     if (['fundcomapi.tiantianfunds.com', 'hq.sinajs.cn'].includes(url.hostname))
       return new UpstreamError('timeout', 'force tertiary fallback');
     if (url.hostname === 'fundmobapi.eastmoney.com') {
+      if (this.baseInfo) return this.baseInfo;
       const body = JSON.parse(
         sample(
           `eastmoney/base-${this.fund === 'etf' ? '110020' : this.fund === 'qdii' ? '040046' : '000001'}.json`,
@@ -89,7 +92,7 @@ class ReplayControls {
       if (!symbol || this.missing === symbol.replace('hs_', 'sh').replace('sz_', 'sz'))
         return new UpstreamError('timeout', 'missing stock');
       if (kind === 'realhead')
-        return `cb(${JSON.stringify({ items: { '6': this.snapshotPre, '10': '101' } })})`;
+        return `cb(${JSON.stringify({ items: { '6': this.snapshotPre, '10': this.snapshotPrice } })})`;
       return `cb(${JSON.stringify({ [symbol]: { date: this.seriesDate, pre: this.pre, data: this.series[symbol] ?? '0930,101,0,0,0;1000,101,0,0,0;1001,101,0,0,0' } })})`;
     }
     throw new Error(`unexpected upstream ${url.href}`);
@@ -429,4 +432,88 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
     expect(response.status).toBe(200);
     expect(await response.json()).not.toHaveProperty('parentEtfCode');
   });
+  it('uses the real non-QDII gold feeder mapping and exchange identity for current and history', async () => {
+    control.baseInfo = sample('eastmoney/base-000216.json');
+    control.mapping = sample('eastmoney/fund-000216.txt');
+    control.identity = sample('sse/fund-518880.json');
+    const target = app();
+    expect(await current(target, '000216')).toMatchObject({
+      status: 'estimated',
+      estimate: { source: 'calculated', calculation: { parentEtfCode: '518880' } },
+    });
+    expect((await history(target, '000216')).status).toBe('estimated');
+  });
+  // Protocol-shaped class controls: the class meanings come from the preserved official script.
+  it.each(['01', '02', '03', '06', '08', '09', '31', '32', '36', '37', '38'])(
+    'accepts documented mainland SSE ETF class %s',
+    async (subClass) => {
+      control.fund = 'etf';
+      const identity = JSON.parse(control.identity);
+      identity.result[0].subClass = subClass;
+      control.identity = JSON.stringify(identity);
+      expect((await current(app(), '110020')).status).toBe('estimated');
+    },
+  );
+  it.each(['04', '05', '07', '11', '33', '34', '35', '99'])(
+    'rejects non-ETF or unproven overseas SSE class %s',
+    async (subClass) => {
+      control.fund = 'etf';
+      const identity = JSON.parse(control.identity);
+      identity.result[0].subClass = subClass;
+      control.identity = JSON.stringify(identity);
+      expect((await current(app(), '110020')).status).toBe('unavailable');
+    },
+  );
+  it.each(['股票基金', '混合基金', '债券基金', '货币市场基金'])(
+    'accepts SZSE ETF identity independently of investment class %s',
+    async (tzlb) => {
+      control.fund = 'etf';
+      control.mapping = sample('eastmoney/fund-110019.txt');
+      const identity = JSON.parse(control.szseIdentity);
+      identity[0].data[0].tzlb = tzlb;
+      control.szseIdentity = JSON.stringify(identity);
+      expect((await current(app(), '110019')).status).toBe('estimated');
+    },
+  );
+  it.each([
+    ['1010.0', 200],
+    ['1010.00', 200],
+    ['1010.01', 502],
+    ['1010.001', 502],
+    ['1010.0001', 502],
+    ['1020.00', 502],
+  ])('compares duplicate raw price %s before rounding (%s)', async (second, expected) => {
+    control.report = report();
+    control.pre = '1000';
+    control.snapshotPre = '1000';
+    control.snapshotPrice = '1010.00';
+    control.series.hs_600519 = `0930,1010.00,0,0,0;0930,${second},0,0,0;1000,1010.00,0,0,0`;
+    control.series.sz_300308 = '0930,1010.00,0,0,0;1000,1010.00,0,0,0';
+    const response = await app().request('/v1/funds/000001/estimates/intraday');
+    expect(response.status).toBe(Number(expected));
+    if (expected === 200)
+      expect(((await response.json()) as IntradayEstimate).points).toHaveLength(2);
+  });
+  it.each(['159972', '159934'])('uses real SZSE non-equity ETF identity %s', async (parent) => {
+    // Synthetic feeder relation to isolate the real exchange identity, not a claimed official mapping.
+    control.fund = 'etf';
+    control.mapping = sample('eastmoney/fund-110019.txt').replaceAll('159901', parent);
+    control.szseIdentity = sample(`szse/fund-${parent}.json`);
+    const target = app();
+    expect((await current(target, '110019')).status).toBe('estimated');
+    expect((await history(target, '110019')).status).toBe('estimated');
+  });
+  it.each(['wrong-code', 'non-etf', 'future-listing', 'unknown-class'])(
+    'rejects SSE %s identity despite valid quotes',
+    async (kind) => {
+      control.fund = 'etf';
+      const identity = JSON.parse(control.identity);
+      if (kind === 'wrong-code') identity.result[0].fundCode = '510999';
+      if (kind === 'non-etf') identity.result[0].fundType = '10';
+      if (kind === 'future-listing') identity.result[0].listingDate = '20271110';
+      if (kind === 'unknown-class') identity.result[0].subClass = '99';
+      control.identity = JSON.stringify(identity);
+      expect((await current(app(), '110020')).status).toBe('unavailable');
+    },
+  );
 });
