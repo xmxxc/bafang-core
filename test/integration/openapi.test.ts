@@ -200,6 +200,27 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     }
   });
 
+  it('documents authenticated switch creation, association lookup and paired cancellation', async () => {
+    const doc = (await (await createApp().request('/v1/openapi')).json()) as OpenApiDoc;
+    const operations = [
+      [
+        doc.paths['/v1/positions/{id}/switches']?.post,
+        ['201', '400', '401', '404', '409', '500', '502', '503'],
+      ],
+      [doc.paths['/v1/switches/{switchId}']?.get, ['200', '400', '401', '404', '500', '503']],
+      [
+        doc.paths['/v1/switches/{switchId}/trades/{tradeId}']?.delete,
+        ['204', '400', '401', '404', '409', '500', '503'],
+      ],
+    ] as const;
+    for (const [operation, statuses] of operations) {
+      expect(operation?.security).toEqual([{ SessionCookie: [] }, { SessionBearer: [] }]);
+      expect(Object.keys(operation?.responses ?? {}).sort()).toEqual([...statuses].sort());
+    }
+    expect(doc.components.schemas.SwitchCreate).toBeDefined();
+    expect(doc.components.schemas.Switch).toBeDefined();
+  });
+
   it('documents the fund search and basic info routes with their error responses', async () => {
     const app = createApp({ db: createHealthProbe(db.pool) });
     const res = await app.request('/v1/openapi');

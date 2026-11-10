@@ -55,7 +55,10 @@ const TradeBody = z
 export const TradeSchema = z
   .object({
     id: z.uuid(),
-    positionId: z.uuid(),
+    positionId: z
+      .uuid()
+      .nullable()
+      .openapi({ description: '持仓 id；目标尚无持仓的调仓转入为 null，目标建立时立即关联' }),
     type: z
       .enum(['buy', 'sell', 'switch_out', 'switch_in'])
       .openapi({ description: '加仓、减仓、调仓转出、调仓转入' }),
@@ -135,7 +138,8 @@ export const tradeCancelRoute = createRoute({
   path: '/v1/positions/{id}/trades/{tradeId}',
   tags: ['trades'],
   summary: '撤销在途交易',
-  description: '按上海日期判断：仅确认日前且仍为在途的交易可撤销；撤销即删除。',
+  description:
+    '按上海日期判断：仅确认日前且仍为在途的交易可撤销；撤销即删除；调仓要求两侧均可撤销并一起删除。',
   request: { params: PositionParam.extend({ tradeId: z.uuid().toLowerCase() }) },
   responses: {
     ...commonErrors,
@@ -144,5 +148,83 @@ export const tradeCancelRoute = createRoute({
       description: 'trade_not_cancellable：已到确认日或已确认，不能撤销',
       content: errorContent,
     },
+  },
+});
+
+const SwitchBody = z
+  .object({
+    targetFundCode: z.string().regex(/^\d{6}$/),
+    targetChannelId: z.uuid().toLowerCase(),
+    shares: z.string().regex(/^\d{1,16}(\.\d{1,4})?$/),
+    outFeeRate: timingFields.feeRate,
+    inFeeRate: timingFields.feeRate,
+    submittedDate: timingFields.submittedDate,
+    beforeCutoff: timingFields.beforeCutoff,
+  })
+  .strict()
+  .refine((value) => value.submittedDate === undefined || value.beforeCutoff !== undefined, {
+    message: '填写提交日时必须同时填写 beforeCutoff',
+  })
+  .openapi('SwitchCreate');
+const SwitchSchema = z
+  .object({
+    id: z.uuid(),
+    sourcePositionId: z.uuid(),
+    targetFundCode: z.string(),
+    items: z.array(TradeSchema),
+  })
+  .openapi('Switch');
+const SwitchParam = z.object({ switchId: z.uuid().toLowerCase() });
+export const switchCreateRoute = createRoute({
+  security,
+  method: 'post',
+  path: '/v1/positions/{id}/switches',
+  tags: ['trades'],
+  summary: '提交同渠道调仓',
+  description:
+    '原子创建共用调仓 ID 的转出、转入交易，items 按转出、转入排序。目标渠道必须与源渠道相同，目标基金必须不同。两侧分别按提交日期和各自基金 T+N 推算日期；转入必须等转出确认后才能确认，到账金额作为买入金额。目标无持仓时确认转入才新建。重试可能重复创建。',
+  request: {
+    params: PositionParam,
+    body: { required: true, content: { 'application/json': { schema: SwitchBody } } },
+  },
+  responses: {
+    ...commonErrors,
+    201: { description: '成对在途交易', content: { 'application/json': { schema: SwitchSchema } } },
+    400: { description: 'validation_error：参数不合法、跨渠道或同基金调仓', content: errorContent },
+    404: {
+      description: 'not_found：源持仓或目标渠道不存在（含别人的）；fund_not_found：基金不存在',
+      content: errorContent,
+    },
+    409: { description: 'insufficient_shares：调仓超过可用份额', content: errorContent },
+    502: { description: 'upstream_unavailable：基金规则上游不可用', content: errorContent },
+  },
+});
+export const switchDetailRoute = createRoute({
+  security,
+  method: 'get',
+  path: '/v1/switches/{switchId}',
+  tags: ['trades'],
+  summary: '按调仓 ID 查看两侧交易',
+  request: { params: SwitchParam },
+  responses: {
+    ...commonErrors,
+    200: {
+      description: '调仓与两侧交易（转出、转入）',
+      content: { 'application/json': { schema: SwitchSchema } },
+    },
+  },
+});
+export const switchCancelRoute = createRoute({
+  security,
+  method: 'delete',
+  path: '/v1/switches/{switchId}/trades/{tradeId}',
+  tags: ['trades'],
+  summary: '从调仓任一侧成对撤销',
+  description: '支持尚无目标持仓的转入侧。两侧都必须仍在途且上海日期早于各自确认日，否则整体拒绝。',
+  request: { params: SwitchParam.extend({ tradeId: z.uuid().toLowerCase() }) },
+  responses: {
+    ...commonErrors,
+    204: { description: '两侧均已删除' },
+    409: { description: 'trade_not_cancellable：任一侧已到确认日或已确认', content: errorContent },
   },
 });

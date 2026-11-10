@@ -99,7 +99,14 @@ import { PositionError, createPositionService } from './positions/service';
 import { summarizePositions, summarizeByFund } from './positions/summary';
 
 import { createTradeService } from './positions/trades';
-import { tradeCreateRoute, tradeListRoute, tradeCancelRoute } from './routes/trades';
+import {
+  tradeCreateRoute,
+  tradeListRoute,
+  tradeCancelRoute,
+  switchCreateRoute,
+  switchDetailRoute,
+  switchCancelRoute,
+} from './routes/trades';
 import {
   createSettlementJob,
   type SettlementJob,
@@ -411,6 +418,28 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(positionDeleteRoute, async (c) => {
     if (!positions) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     await positions.delete(getAuth(c).userId, c.req.valid('param').id);
+    return c.body(null, 204);
+  });
+
+  app.use('/v1/switches/*', async (c, next) => {
+    if (!requireLogin) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return requireLogin(c, next);
+  });
+  app.openapi(switchCreateRoute, async (c) => {
+    if (!trades) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(
+      await trades.createSwitch(getAuth(c).userId, c.req.valid('param').id, c.req.valid('json')),
+      201,
+    );
+  });
+  app.openapi(switchDetailRoute, async (c) => {
+    if (!trades) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return c.json(await trades.getSwitch(getAuth(c).userId, c.req.valid('param').switchId), 200);
+  });
+  app.openapi(switchCancelRoute, async (c) => {
+    if (!trades) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const { switchId, tradeId } = c.req.valid('param');
+    await trades.cancelSwitch(getAuth(c).userId, switchId, tradeId);
     return c.body(null, 204);
   });
 
