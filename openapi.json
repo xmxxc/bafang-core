@@ -294,6 +294,106 @@
         ],
         "description": "状态为 estimated 时给出；unavailable、pre_market、holiday 时为 null"
       },
+      "FundHoldings": {
+        "type": "object",
+        "properties": {
+          "reportDate": {
+            "type": "string"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FundTopHolding"
+            }
+          }
+        },
+        "required": [
+          "reportDate",
+          "items"
+        ]
+      },
+      "FundTopHolding": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^\\d{6}$"
+          },
+          "weight": {
+            "type": "number",
+            "nullable": true
+          },
+          "reportDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "quote": {
+            "type": "object",
+            "nullable": true,
+            "properties": {
+              "price": {
+                "type": "string",
+                "nullable": true,
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "prevClose": {
+                "type": "string",
+                "nullable": true,
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "change": {
+                "type": "string",
+                "nullable": true,
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "changePercent": {
+                "type": "number",
+                "nullable": true
+              },
+              "tradeDate": {
+                "type": "string",
+                "nullable": true
+              },
+              "quoteTime": {
+                "type": "string",
+                "nullable": true
+              }
+            },
+            "required": [
+              "price",
+              "prevClose",
+              "change",
+              "changePercent",
+              "tradeDate",
+              "quoteTime"
+            ]
+          },
+          "quoteSource": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "tencent",
+              "ths",
+              null
+            ]
+          },
+          "quoteFallback": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "code",
+          "weight",
+          "reportDate",
+          "quote",
+          "quoteSource",
+          "quoteFallback"
+        ]
+      },
       "FundDetail": {
         "allOf": [
           {
@@ -1617,6 +1717,70 @@
           },
           "500": {
             "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/{code}/holdings": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "基金前十大重仓股",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}$",
+              "example": "000001",
+              "description": "6 位基金代码"
+            },
+            "required": true,
+            "description": "6 位基金代码",
+            "name": "code",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "最新季报前十大重仓股",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundHoldings"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "无有效季报",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "限流",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游不可用",
             "content": {
               "application/json": {
                 "schema": {

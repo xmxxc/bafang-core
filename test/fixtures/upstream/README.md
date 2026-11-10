@@ -54,3 +54,11 @@
 | `ths/time-hk_HSI-stale-pre.jsonp` | 同花顺分时 `hk_HSI`                                                          | 实录的陈旧 CDN 响应：分时点是当天的，`pre` 却是几个月前的 26361.07；用来验证交叉校验会拒绝它，不给出假的涨跌 |
 
 腾讯请求的 Referer 是 `https://gu.qq.com/`，同花顺是 `https://stockpage.10jqka.com.cn/`（同花顺还要求浏览器 User-Agent）。同花顺对同一地址偶尔返回空响应体或陈旧数据，录制时需要多取几次并核对昨收。
+
+## #6 基金重仓股真实样本（2026-11-09 采集，Asia/Shanghai）
+
+| 文件                             | 请求                                                                                                                                                    | 说明                                                                                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eastmoney/holdings-000001.json` | `https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=000001&topline=10&year=&month=&rt=1`，Referer `https://fundf10.eastmoney.com/`     | 东方财富 F10 原始脚本响应；`content` 内 HTML 表格，截止日 `2026-09-30`，表格列含股票代码、股票名称、占净值比例                                                         |
+| `tencent/holdings-000001.txt`    | `https://qt.gtimg.cn/q=sz300308,sz002371,sh600519`，Referer `https://gu.qq.com/`                                                                        | 腾讯原始报价响应；`v_<symbol>` 行，价格/昨收/时间字段沿用 `src/market/tencent.ts`                                                                                      |
+| `sina/holdings-000001.json`      | `https://stock.finance.sina.com.cn/fundInfo/api/openapi.php/FdFundService.getTopHold?format=json&symbol=000001`，Referer `https://finance.sina.com.cn/` | 采集时返回 `result.status.code=0` 且 `result.data=[]`（部分请求超时）；该文件保留为真实空响应证据。未取得可证明的股票行字段，core 不将资产配置或合成边界数据当作重仓股 |
