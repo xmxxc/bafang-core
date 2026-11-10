@@ -1,9 +1,11 @@
 import { shanghaiDate } from './clock';
-import { loadCalendarDays, loadHolidays } from './trading-calendar/holidays';
+import { loadCoveredCalendar } from './trading-calendar/holidays';
 import type { Pool } from 'pg';
 
 export interface TradingCalendar {
   isTradingDay(date: Date): boolean;
+  /** 该日期所在市场年度是否已完整导入；未实现此方法表示覆盖未知。 */
+  hasCoverage?(date: Date): boolean;
 }
 
 /** 带半日市的交易日历（港股）。 */
@@ -29,9 +31,16 @@ function isWeekend(date: Date): boolean {
  */
 export class ChineseTradingCalendar implements TradingCalendar {
   private readonly holidays: ReadonlySet<string>;
+  private readonly coveredYears: ReadonlySet<number>;
 
-  constructor(holidays: Iterable<string> = []) {
+  /** coveredYears 只能来自成功完整年度导入的证明；不得根据 holidays 推断。 */
+  constructor(holidays: Iterable<string> = [], coveredYears: Iterable<number> = []) {
     this.holidays = new Set(holidays);
+    this.coveredYears = new Set(coveredYears);
+  }
+
+  hasCoverage(date: Date): boolean {
+    return this.coveredYears.has(Number(shanghaiDate(date).slice(0, 4)));
   }
 
   isTradingDay(date: Date): boolean {
@@ -47,9 +56,15 @@ export class ChineseTradingCalendar implements TradingCalendar {
 export class HongKongTradingCalendar implements SessionCalendar {
   private readonly holidays: ReadonlySet<string>;
   private readonly earlyCloses: ReadonlyMap<string, number>;
+  private readonly coveredYears: ReadonlySet<number>;
 
   /** @param earlyCloses 半日市日期（YYYY-MM-DD）到收市时刻（HH:MM）。 */
-  constructor(holidays: Iterable<string> = [], earlyCloses: Iterable<[string, string]> = []) {
+  constructor(
+    holidays: Iterable<string> = [],
+    earlyCloses: Iterable<[string, string]> = [],
+    coveredYears: Iterable<number> = [],
+  ) {
+    this.coveredYears = new Set(coveredYears);
     this.holidays = new Set(holidays);
     this.earlyCloses = new Map(
       [...earlyCloses].map(([date, time]) => {
@@ -64,6 +79,10 @@ export class HongKongTradingCalendar implements SessionCalendar {
     return !this.holidays.has(shanghaiDate(date));
   }
 
+  hasCoverage(date: Date): boolean {
+    return this.coveredYears.has(Number(shanghaiDate(date).slice(0, 4)));
+  }
+
   earlyCloseMinutes(date: Date): number | null {
     return this.isTradingDay(date) ? (this.earlyCloses.get(shanghaiDate(date)) ?? null) : null;
   }
@@ -71,14 +90,19 @@ export class HongKongTradingCalendar implements SessionCalendar {
 
 /** 按启动流程从数据库加载 A 股休市日，构建交易日历。 */
 export async function loadTradingCalendar(pool: Pool): Promise<TradingCalendar> {
-  return new ChineseTradingCalendar(await loadHolidays(pool));
+  const { days, years } = await loadCoveredCalendar(pool, 'cn');
+  return new ChineseTradingCalendar(
+    days.filter((day) => day.earlyClose === undefined).map((day) => day.date),
+    years,
+  );
 }
 
 /** 按启动流程从数据库加载港股休市日与半日市，构建港股交易日历。 */
 export async function loadHongKongTradingCalendar(pool: Pool): Promise<HongKongTradingCalendar> {
-  const days = await loadCalendarDays(pool, 'hk');
+  const { days, years } = await loadCoveredCalendar(pool, 'hk');
   return new HongKongTradingCalendar(
     days.filter((day) => day.earlyClose === undefined).map((day) => day.date),
     days.flatMap((day) => (day.earlyClose ? [[day.date, day.earlyClose] as [string, string]] : [])),
+    years,
   );
 }

@@ -255,6 +255,7 @@ export function createApp(deps: AppDeps = {}): App {
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
     nav,
+    funds,
   });
   const positions = resolved.database
     ? createPositionService({

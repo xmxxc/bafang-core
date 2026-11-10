@@ -39,8 +39,8 @@ export interface SettlementJob {
 }
 
 export interface SettlementScheduler {
-  (): void;
-  stop(): void;
+  (): Promise<void>;
+  stop(): Promise<void>;
   tick(): Promise<void>;
 }
 
@@ -343,7 +343,8 @@ export function startSettlementScheduler(
   let currentDate: string | null = null;
   const handledRounds = new Set<string>();
   let stopped = false;
-  const tick = async (): Promise<void> => {
+  const active = new Set<Promise<void>>();
+  const runTick = async (): Promise<void> => {
     if (stopped) return;
     const now = deps.clock.now();
     const date = shanghaiDate(now);
@@ -375,10 +376,20 @@ export function startSettlementScheduler(
       }
     }
   };
+  const tick = (): Promise<void> => {
+    const work = runTick();
+    active.add(work);
+    void work.then(
+      () => active.delete(work),
+      () => active.delete(work),
+    );
+    return work;
+  };
   const timer = setInterval(() => void tick(), intervalMs);
   const stop = () => {
     stopped = true;
     clearInterval(timer);
+    return Promise.all([...active]).then(() => undefined);
   };
   const scheduler = Object.assign(stop, { stop, tick }) as SettlementScheduler;
   if (options.autoStart !== false) void tick();

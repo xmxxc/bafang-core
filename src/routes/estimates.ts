@@ -40,7 +40,7 @@ const EstimateItemSchema = z
     code: FundCodeSchema,
     status: z.enum(['estimated', 'unavailable', 'pre_market', 'holiday']).openapi({
       description:
-        'estimated 有估值；unavailable 所有来源都失败或没有当天估值（估值暂不可用）；pre_market 盘前；holiday 休市。均为显式枚举，不以 0 表示',
+        'estimated 有已核实基准的估值；unavailable 来源、基准日期或交易日历覆盖无法核实（估值暂不可用）；pre_market 覆盖已知时的盘前；holiday 覆盖已知时的休市。均为显式枚举，不以 0 表示',
     }),
     estimate: EstimateSchema.nullable().openapi({
       description: '状态为 estimated 时给出；unavailable、pre_market、holiday 时为 null',
@@ -68,9 +68,9 @@ export const estimateBatchRoute = createRoute({
   description: [
     '一次返回多只基金的估值涨跌、估值时间、来源与是否回退。',
     '来源按天天基金 → 新浪财经的顺序回退；全部失败时该基金为 unavailable，不返回 0%。',
-    '估值的基准净值必须是最近一期已公布净值，否则视为过期估值、按无估值处理（例如 QDII 净值晚到时）；基准无法核对（来源没给出可核对的基准、净值暂时取不到）时同样按无估值处理，不返回无法确认的估值。',
-    '盘前与休市不提供估值，逐只返回 pre_market / holiday；交易日收盘后返回当天的收盘估值。',
-    '交易时段结果缓存 30 秒；收盘估值缓存到下一个交易日开盘。匿名可用并限流。',
+    '估值基准的日期与单位净值必须匹配估值日期之前最近一期已公布净值，且日期必须是适用日历的上一个交易日。估值日或向前检索经过的年度覆盖未知、基金适用日历无法确定、基准日期缺失或净值无法核对时均为 unavailable。新浪当前没有基准日期，不采纳；QDII 尚无可靠境外日历映射，不采纳。',
+    '估值日覆盖已知时，盘前与休市逐只返回 pre_market / holiday；交易日收盘后返回当天的收盘估值。',
+    '交易时段结果缓存 30 秒；收盘估值缓存到下一个已覆盖交易日开盘，缓存命中仍重新核对基准。marketStatus 保持市场状态接口的兼容判断，覆盖未知时可能为 trading 而基金为 unavailable。匿名可用并限流。',
   ].join(''),
   request: {
     query: z.object({

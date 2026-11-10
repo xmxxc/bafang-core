@@ -61,6 +61,12 @@ docker compose up -d
 
 名单按上海日期缓存；旧日请求晚到不会回退新日缓存。报价沿用市场接口的时长：盘中（含午休）10 秒、盘前 30 秒、收盘及休市 5 分钟，不可用结果 10 秒；开盘、午休开始/结束、收盘、上海午夜均截断缓存。并发报价写入优先保留时间更新的市场快照，同快照时间或不可用结果按请求时刻及请求顺序判定，避免同毫秒完成次序造成回滚。每次业务请求固定一个时刻，按 A 股交易日历校验报价：盘中最多落后 5 分钟且不能来自未来；午休可沿用 11:25 以后快照（腾讯也会在午休刷新快照时间）；收盘、盘前及休市要求对应最近交易日且快照时间不早于 15:00。盘中缓存不会越过五分钟新鲜度上限。五分钟是服务的容差预算，非上游实时性保证；无法确认的报价继续回退，最终以 `quote: null` 表示。
 
+### 基金估值的基准验证
+
+`GET /v1/funds/estimates` 只采纳同时有基准日期和单位净值、且与估值日期之前最近一期已公布净值相符的来源。该日期还必须是适用日历的上一个交易日；估值日或向前检索经过的年度缺少完整导入证明时，逐只返回 `unavailable`。缓存命中也重新核对，来源时间保持原值。可识别的境内基金使用 A 股日历；QDII 尚无可靠境外日历映射，返回 `unavailable`。新浪当前只提供基准净值、不提供基准日期，即使相邻日期的净值相等也无法核实，因此不采纳；有明确上一交易日基准日期的天天基金估值仍可用。今日收益相应保持 `unavailable` 和 `null`，当天官方净值已公布后的确认收益保持现有规则。
+
+覆盖未知不改变市场状态接口的兼容判断，因此同一响应可能出现 `marketStatus: trading`、基金 `status: unavailable`。仅在估值日覆盖已知后，盘前/休市才返回 `pre_market` / `holiday`。
+
 ### GitHub 网页登录
 
 - 配置 `.env.example` 中的 `GITHUB_CLIENT_ID`、`GITHUB_CLIENT_SECRET`、`GITHUB_CALLBACK_URL`、`GITHUB_LOGIN_REDIRECT_URL`；四项都非空才启用，缺失时服务仍可启动，两个接口返回 503 `github_not_configured`。回调 URL 必须与 GitHub OAuth App 登记的地址一致；成功后的网页地址仅来自配置，请求参数不能覆盖。两个地址使用 HTTP(S) 绝对 URL，生产环境用 HTTPS。
@@ -265,7 +271,10 @@ A 股与港股的交易日历都由 core 自己维护：特殊日期按市场、
   pnpm trading-calendar:import 2026 --file /path/to/holidays.json
   ```
 
-- 启动服务时 `src/index.ts` 会从 `trading_holidays` 表分别加载两个市场的数据，注入给 `ChineseTradingCalendar` 与 `HongKongTradingCalendar`，供市场状态、大盘指数等接口使用。市场状态依据已加载的交易日历和周末判断；缺少某年数据时，未知的工作日假日可能显示为 `trading`，此时若没有当日可信行情，指数会显示为不可用、数值为 `null`。
+- `0014_calendar_coverage` 新增 `calendar_coverage`，以市场和年份为联合主键。每次成功的**完整年度**导入都在替换休市日的同一事务里写入覆盖；合法空年度也显式记录。同市场同年导入用事务级 advisory lock 串行化，失败整体回滚。导入工具将输入视为操作者确认的完整清单，不会自行补全遗漏日期。旧逐日数据和仓库中的文件都不会自动产生覆盖证明。
+- 部署先执行 `pnpm db:migrate`，再重新执行 `pnpm trading-calendar:import 2026` 与 `pnpm trading-calendar:import 2026 --market hk`，并对其他需要的年度分别导入完整文件；跨年检索可能还需要上一年度。随后重启 core 加载新日历。**仅执行迁移、未重新导入时，估值不可用**。完整步骤见 [年度覆盖部署交接](docs/deployment-calendar-coverage.md)。
+- `TradingCalendar.hasCoverage(date)` 为可选方法；缺少此方法按覆盖未知处理。构造器的覆盖年份参数只用于已确认完整导入的数据，不能从任意一个假日推断。`isTradingDay` 及市场状态、指数、净值和交易确认等原有调用方保持兼容判断，本次只对估值要求可靠覆盖。
+- 启动服务时 `src/index.ts` 会在一致的数据库快照内从 `trading_holidays` 与 `calendar_coverage` 分别加载两个市场的数据和覆盖证明，注入给 `ChineseTradingCalendar` 与 `HongKongTradingCalendar`，供市场状态、大盘指数等接口使用。市场状态依据已加载的交易日历和周末判断；缺少某年数据时，未知的工作日假日可能显示为 `trading`，此时若没有当日可信行情，指数会显示为不可用、数值为 `null`。
 
 ## 错误结构
 
