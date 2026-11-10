@@ -8,6 +8,7 @@ const SEARCH_URL = 'https://fundsuggest.eastmoney.com/FundSearch/api/FundSearchA
 const BASE_INFO_URL = 'https://fundmobapi.eastmoney.com/FundMApi/FundBaseTypeInformation.ashx';
 const NAV_REFERER = 'https://fundf10.eastmoney.com/';
 const NAV_URL = 'https://api.fund.eastmoney.com/f10/lsjz';
+const FUND_PAGE_HOST = 'fund.eastmoney.com';
 
 /** 搜索接口里基金条目的 CATEGORY；其余是股票、指数等。 */
 const FUND_CATEGORY = 700;
@@ -50,6 +51,95 @@ export interface UpstreamFundBaseInfo {
   type: string | null;
   /** 上游给出的买入确认 T+N 天数；缺失或无法解析时为 null。 */
   confirmDays: number | null;
+}
+
+/** 官方基金页“查看相关ETF”关系；页面时间仅是抓取时间，不是报价时间。 */
+export async function fetchLinkedEtfCode(
+  upstream: UpstreamFetcher,
+  code: string,
+): Promise<string | null> {
+  const text = await upstream.fetchText({
+    url: `https://${FUND_PAGE_HOST}/${code}.html`,
+    referer: 'https://fund.eastmoney.com/',
+  });
+  const header =
+    /<div class=["']fundDetail-tit["']>([\s\S]*?)<div class=["']fundDetail-tools["']>/.exec(
+      text,
+    )?.[1];
+  if (!header) return null;
+  const codes = [...header.matchAll(/<span class=["']ui-num["']>(\d{6})<\/span>/g)].map(
+    (m) => m[1],
+  );
+  if (codes.length !== 1 || codes[0] !== code) return null;
+  const links = [
+    ...header.matchAll(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi),
+  ].filter((m) => /^查看\s*相关ETF[>＞]?$/i.test(m[2]!.replace(/<[^>]+>/g, '').trim()));
+  if (links.length !== 1) return null;
+  // The official page still emits http links; only the code is read, and all requests
+  // use the fixed HTTPS host. Never navigate to an upstream-provided URL.
+  const target = /^https?:\/\/fund\.eastmoney\.com\/(\d{6})\.html$/.exec(links[0]![1]!);
+  return target && target[1] !== code ? target[1]! : null;
+}
+
+/** 上交所官网 FUND_LIST 明确提供基金类型、细分类型和上市日期。 */
+export async function fetchVerifiedEtfCode(
+  upstream: UpstreamFetcher,
+  code: string,
+  asOf: Date,
+): Promise<boolean> {
+  if (!/^5\d{5}$/.test(code)) return false;
+  const url = new URL('https://query.sse.com.cn/commonSoaQuery.do');
+  for (const [key, value] of Object.entries({
+    sqlId: 'FUND_LIST',
+    fundType: '00',
+    fundCode: code,
+    isPagination: 'true',
+    'pageHelp.pageSize': '100',
+    'pageHelp.pageNo': '1',
+    subClass: '03',
+  }))
+    url.searchParams.set(key, value);
+  const body = await upstream.fetchText({ url: url.href, referer: 'https://www.sse.com.cn/' });
+  let raw: unknown;
+  try {
+    raw = JSON.parse(body);
+  } catch {
+    throw new UpstreamError('bad_response', 'SSE FUND_LIST is not JSON');
+  }
+  const parsed = z
+    .object({
+      actionErrors: z.array(z.unknown()),
+      result: z.array(
+        z.object({
+          fundCode: z.string(),
+          fundType: z.string(),
+          subClass: z.string(),
+          listingDate: z.string(),
+        }),
+      ),
+    })
+    .safeParse(raw);
+  if (!parsed.success || parsed.data.actionErrors.length)
+    throw new UpstreamError('bad_response', 'SSE FUND_LIST protocol invalid');
+  // 03 = cross-market mainland equity ETF. Other markets/types require their own calendars.
+  return (
+    parsed.data.result.length === 1 &&
+    parsed.data.result[0]!.fundCode === code &&
+    parsed.data.result[0]!.fundType === '00' &&
+    parsed.data.result[0]!.subClass === '03' &&
+    validListingDate(parsed.data.result[0]!.listingDate, asOf)
+  );
+}
+
+function validListingDate(raw: string, asOf: Date) {
+  if (!/^\d{8}$/.test(raw)) return false;
+  const date = `${raw.slice(0, 4)}-${raw.slice(4, 6)}-${raw.slice(6)}`;
+  const parsed = new Date(`${date}T00:00:00+08:00`);
+  return (
+    Number.isFinite(parsed.getTime()) &&
+    parsed <= asOf &&
+    new Date(`${date}T00:00:00Z`).toISOString().slice(0, 10) === date
+  );
 }
 
 export async function searchFunds(

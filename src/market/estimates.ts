@@ -8,9 +8,15 @@ import {
 import { formatNav } from './estimate-sources';
 import type { NavService } from './nav';
 import type { FundService } from './funds';
+import type { HoldingsService } from './holdings';
 import { DailyCache } from './daily-cache';
 import { marketStatus, type MarketStatus } from './status';
 import { UpstreamError, type UpstreamFetcher } from './upstream';
+import {
+  createCalculatedEstimates,
+  type Calculation,
+  type IntradayEstimate,
+} from './calculated-estimates';
 
 /** 交易时段内估值的缓存时长（秒级）。 */
 const TRADING_TTL_MS = 30_000;
@@ -18,11 +24,12 @@ const TRADING_TTL_MS = 30_000;
 const MAX_CACHE_ENTRIES = 5000;
 const MARKET_OPEN = '09:30';
 
-export type EstimateSource = 'tiantian' | 'sina';
+export type EstimateSource = 'tiantian' | 'sina' | 'calculated';
 
 export const ESTIMATE_SOURCE_NAMES: Record<EstimateSource, string> = {
   tiantian: '天天基金',
   sina: '新浪财经',
+  calculated: '自算',
 };
 
 export interface Estimate {
@@ -34,6 +41,7 @@ export interface Estimate {
   /** 一级来源（天天基金）没有给出估值，改用了后面的来源。 */
   fallback: boolean;
   referenceOnly: true;
+  calculation?: Calculation;
 }
 
 /**
@@ -56,10 +64,10 @@ export interface EstimateBatch {
   time: string;
   items: EstimateItem[];
 }
-
 export interface EstimateService {
   /** 批量估值；codes 已去重，顺序即返回顺序。 */
-  batch(codes: readonly string[]): Promise<EstimateBatch>;
+  batch(codes: readonly string[], asOf?: Date): Promise<EstimateBatch>;
+  intraday(code: string, asOf?: Date): Promise<IntradayEstimate>;
 }
 
 export interface EstimateServiceDeps {
@@ -69,6 +77,7 @@ export interface EstimateServiceDeps {
   /** 用来核对估值基准的净值模块；与净值接口共用同一个实例与缓存。 */
   nav: NavService;
   funds: FundService;
+  holdings: HoldingsService;
 }
 
 interface CacheEntry {
@@ -78,7 +87,7 @@ interface CacheEntry {
 }
 
 /**
- * 估值服务：天天基金 → 新浪两级回退。
+ * 估值服务：天天基金 → 新浪 → 可信自算三级回退。
  *
  * - 盘前、休市不访问上游，直接返回对应状态。
  * - 交易时段（含午休）每只基金的结果缓存 `TRADING_TTL_MS`。
@@ -97,10 +106,11 @@ interface CacheEntry {
  */
 export function createEstimateService(deps: EstimateServiceDeps): EstimateService {
   const cache = new Map<string, CacheEntry>();
+  const calculatedService = createCalculatedEstimates(deps);
   const calendarKnown = new DailyCache<boolean>();
 
-  async function fundCalendar(code: string): Promise<TradingCalendar | null> {
-    const today = shanghaiDate(deps.clock.now());
+  async function fundCalendar(code: string, asOf: Date): Promise<TradingCalendar | null> {
+    const today = shanghaiDate(asOf);
     let known = calendarKnown.get(today, code);
     if (known === undefined) {
       try {
@@ -130,8 +140,7 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
   }
 
   return {
-    async batch(codes) {
-      const now = deps.clock.now();
+    async batch(codes, now = deps.clock.now()) {
       const status = marketStatus(now, deps.calendar);
       const time = now.toISOString();
       if (deps.calendar.hasCoverage?.(now) !== true) {
@@ -147,7 +156,7 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
 
       const nowMs = now.getTime();
       const resolved = new Map<string, Estimate | null>();
-      const verify = baseVerifier(deps.nav, fundCalendar);
+      const verify = baseVerifier(deps.nav, (code) => fundCalendar(code, now), now);
       const cachedSources = new Map<string, SourceEstimate>();
       for (const code of codes) {
         const entry = cache.get(code);
@@ -178,6 +187,24 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
               )
             : new Map<string, SourceEstimate>();
 
+        const calculated = new Map<string, SourceEstimate>();
+        for (const code of missing) {
+          if (primary.has(code) || secondary.has(code)) continue;
+          try {
+            const candidate = await calculatedService.current(code, now);
+            if (candidate && (await verify(new Map([[code, candidate]]))).has(code))
+              calculated.set(code, candidate);
+          } catch (error) {
+            // A missing report or quote is an unavailable estimate. Upstream adapters normally
+            // expose UpstreamError; defensive handling keeps a broken optional fallback isolated.
+            if (error instanceof UpstreamError) {
+              console.warn('[bafang-core] calculated estimate unavailable', code, error.kind);
+            } else {
+              console.warn('[bafang-core] calculated estimate unavailable', code, String(error));
+            }
+          }
+        }
+
         const closeAt = new Date(`${today}T15:00:00+08:00`).getTime();
         const nextOpenMs = nextMarketOpen(now, deps.calendar).getTime();
         for (const code of missing) {
@@ -187,13 +214,20 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
             ? toEstimate(fromPrimary, 'tiantian', false)
             : fromSecondary
               ? toEstimate(fromSecondary, 'sina', true)
-              : null;
+              : calculated.has(code)
+                ? toEstimate(calculated.get(code)!, 'calculated', true)
+                : null;
           const closingEstimate =
             status === 'closed' && estimate !== null && Date.parse(estimate.time) >= closeAt;
           remember(code, {
             estimate,
             source: fromPrimary ?? fromSecondary ?? null,
-            expiresAt: closingEstimate ? nextOpenMs : nowMs + TRADING_TTL_MS,
+            expiresAt:
+              estimate?.source === 'calculated'
+                ? nowMs
+                : closingEstimate
+                  ? nextOpenMs
+                  : nowMs + TRADING_TTL_MS,
           });
           resolved.set(code, estimate);
         }
@@ -207,6 +241,32 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
           return { code, status: estimate ? 'estimated' : 'unavailable', estimate };
         }),
       };
+    },
+    async intraday(code, asOf = deps.clock.now()) {
+      const status = marketStatus(asOf, deps.calendar);
+      const empty: IntradayEstimate = {
+        code,
+        tradeDate: shanghaiDate(asOf),
+        status: 'unavailable',
+        source: 'calculated',
+        fallback: true,
+        referenceOnly: true,
+        calculation: null,
+        points: [],
+        coverage: { returnedPoints: 0, omittedPoints: 0 },
+      };
+      if (deps.calendar.hasCoverage?.(asOf) !== true) return empty;
+      if (status === 'pre_market' || status === 'holiday') return { ...empty, status };
+      const calendar = await fundCalendar(code, asOf);
+      if (!calendar) return empty;
+      const base = await deps.nav.latestBefore(code, empty.tradeDate, asOf);
+      if (
+        !base ||
+        base.date !== previousTradingDate(empty.tradeDate, calendar) ||
+        !formatNav(base.unitNav)
+      )
+        return empty;
+      return calculatedService.intraday(code, asOf);
     },
   };
 }
@@ -224,6 +284,7 @@ function toEstimate(source: SourceEstimate, name: EstimateSource, fallback: bool
     sourceName: ESTIMATE_SOURCE_NAMES[name],
     fallback,
     referenceOnly: true,
+    ...('calculation' in source ? { calculation: source.calculation as Calculation } : {}),
   };
 }
 
@@ -235,6 +296,7 @@ function toEstimate(source: SourceEstimate, name: EstimateSource, fallback: bool
 function baseVerifier(
   nav: NavService,
   fundCalendar: (code: string) => Promise<TradingCalendar | null>,
+  asOf: Date,
 ) {
   const lookups = new Map<string, Promise<{ date: string; unitNav: string } | null>>();
 
@@ -242,7 +304,7 @@ function baseVerifier(
     const key = `${code}:${date}`;
     let lookup = lookups.get(key);
     if (!lookup) {
-      lookup = nav.latestBefore(code, date).catch((error: unknown) => {
+      lookup = nav.latestBefore(code, date, asOf).catch((error: unknown) => {
         if (!(error instanceof UpstreamError)) throw error;
         console.warn('[bafang-core] estimate base unavailable', code, error.kind, error.message);
         return null;

@@ -20,7 +20,7 @@ import { errorBody } from './errors';
 import { healthRoute } from './routes/health';
 import { fundDetailRoute, fundSearchRoute } from './routes/funds';
 import { fundHoldingsRoute } from './routes/holdings';
-import { estimateBatchRoute } from './routes/estimates';
+import { estimateBatchRoute, estimateIntradayRoute } from './routes/estimates';
 import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
 import { marketIndicesRoute } from './routes/market-indices';
@@ -256,6 +256,7 @@ export function createApp(deps: AppDeps = {}): App {
     calendar: resolved.tradingCalendar,
     nav,
     funds,
+    holdings,
   });
   const positions = resolved.database
     ? createPositionService({
@@ -291,6 +292,16 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(estimateBatchRoute, async (c) => {
     const { codes } = c.req.valid('query');
     return c.json(await estimates.batch([...new Set(codes.split(','))]), 200);
+  });
+  app.openapi(estimateIntradayRoute, async (c) => {
+    const { code } = c.req.valid('param');
+    try {
+      return c.json(await estimates.intraday(code), 200);
+    } catch (error) {
+      if (!(error instanceof UpstreamError)) throw error;
+      console.warn('[bafang-core] estimate intraday failed', code, error.kind, error.message);
+      return c.json(errorBody('upstream_unavailable', '行情上游暂不可用'), 502);
+    }
   });
 
   app.openapi(fundHoldingsRoute, async (c) => {
@@ -330,7 +341,16 @@ export function createApp(deps: AppDeps = {}): App {
     if (!fund) {
       return c.json(errorBody('fund_not_found', `没有代码为 ${code} 的基金`), 404);
     }
-    return c.json(fund, 200);
+    return c.json(
+      {
+        code: fund.code,
+        name: fund.name,
+        category: fund.category,
+        type: fund.type,
+        settlement: fund.settlement,
+      },
+      200,
+    );
   });
 
   app.openapi(latestNavRoute, async (c) => {

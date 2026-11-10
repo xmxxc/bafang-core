@@ -124,3 +124,26 @@ Replacing PEP with PEPX is explicitly a synthetic length control. Additional
 single-letter / punctuation-bearing identifiers and concurrent cache reports or
 quotes are synthetic boundary controls, not first-party market authenticity
 claims. Identifier syntax does not establish an exchange or supported quote.
+
+### #7 calculated estimate identity evidence (2026-11-10 UTC)
+
+`eastmoney/fund-110020.txt` is the verbatim official fund page capture for
+`https://fund.eastmoney.com/110020.html`; its page header names request code
+110020 and contains the explicit `查看相关ETF` relation to 510310. SHA256:
+`d264b1bf3d6ef1f7afe63098568569cf1f876c74ba4942c25f8843dd12ef6278`.
+`eastmoney/base-510310.json` is the official Eastmoney base response used as
+secondary metadata evidence (SHA256
+`2f89813fe06d702905de1dc0c11ce67d3db03a345d090306442541aa6f2afaae`).
+
+`sse/fund-510310.txt` is the verbatim Shanghai Stock Exchange `FUND_LIST`
+response for `commonSoaQuery.do` with `fundCode=510310`, `fundType=00`,
+`subClass=03`, and listing date 20130325. This is the identity proof used by
+core: the official script `sse/fund-type-protocol.txt` maps subClass `03` to
+cross-market mainland equity ETF; it is preserved as raw evidence and is not
+executed. SHA256 values are respectively
+`07ad33267a570ea8c1751020eb1811885ed94262b5ab8621cda5debc5bbdbcf9` and
+`ee70d82951b241476dfeceaae265adaccc0a3e059b65459c72c911f15117559c`.
+The page capture is fetched evidence only; no page timestamp is used as a
+quote timestamp. Synthetic mutations in `estimates-calculated.test.ts` cover
+wrong pages, missing/duplicate/external/self links, non-ETF identity, upstream
+failure and recovery.

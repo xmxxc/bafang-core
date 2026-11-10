@@ -71,6 +71,61 @@ export async function fetchThsQuote(
   return buildQuote(last.price, time.pre, `${year}-${month}-${day}`, at);
 }
 
+export interface ThsIntradayPoint {
+  time: Date;
+  changePercent: number;
+}
+
+/** 读取同花顺当日真实分时点；不插值、不前向填充。 */
+export async function fetchThsIntraday(
+  upstream: UpstreamFetcher,
+  symbol: string,
+): Promise<ThsIntradayPoint[]> {
+  const [text, snapshotText] = await Promise.all([
+    upstream.fetchText({ url: `${BASE_URL}/time/${symbol}/last.js`, referer: REFERER }),
+    upstream.fetchText({ url: `${BASE_URL}/realhead/${symbol}/last.js`, referer: REFERER }),
+  ]);
+  const time = parseJsonp(TimeSchema, text)[symbol];
+  const snapshot = parseJsonp(RealheadSchema, snapshotText).items;
+  if (!time?.date || !time.data) return [];
+  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(time.date);
+  const pre = parseDecimal(time.pre);
+  if (!match || pre === null || pre <= 0n || parseDecimal(snapshot['6']) !== pre) return [];
+  const [, year, month, day] = match;
+  const date = `${year}-${month}-${day}`;
+  const check = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(check.getTime()) || check.toISOString().slice(0, 10) !== date) return [];
+  const points = new Map<number, ThsIntradayPoint>();
+  for (const raw of time.data.split(';')) {
+    const [hhmm, price] = raw.split(',');
+    if (!hhmm || !/^\d{4}$/.test(hhmm) || !price) return [];
+    const hour = Number(hhmm.slice(0, 2)),
+      minute = Number(hhmm.slice(2));
+    const label = hour * 60 + minute;
+    if (minute > 59 || !((label >= 570 && label <= 690) || (label >= 780 && label <= 900)))
+      return [];
+    const parsed = buildQuote(
+      price,
+      time.pre,
+      date,
+      shanghaiTime(year!, month!, day!, hhmm.slice(0, 2), hhmm.slice(2)),
+    );
+    if (!parsed) return [];
+    const at = parsed.time.getTime();
+    const previous = points.get(at);
+    if (previous && previous.changePercent !== parsed.changePercent) return [];
+    points.set(at, { time: parsed.time, changePercent: parsed.changePercent });
+  }
+  const sorted = [...points.values()].sort((a, b) => a.time.getTime() - b.time.getTime());
+  const last = lastMinute(time.data);
+  const price = last ? parseDecimal(last.price) : null;
+  const current = parseDecimal(snapshot['10']);
+  if (price === null || current === null || current <= 0n) return [];
+  const drift = price > current ? price - current : current - price;
+  if (drift * PRICE_TOLERANCE_DIVISOR > pre) return [];
+  return sorted;
+}
+
 /** 分时数据是 `HHMM,价格,成交额,均价,成交量;…`，取最后一个点。 */
 function lastMinute(data: string | null | undefined): { hhmm: string; price: string } | null {
   const points = (data ?? '').split(';').filter((point) => point.trim() !== '');
