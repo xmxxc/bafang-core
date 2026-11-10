@@ -319,12 +319,14 @@ export function createApp(deps: AppDeps = {}): App {
   app.openapi(overviewRoute, async (c) => {
     if (!positions || !channels)
       return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const asOf = resolved.clock.now();
     const { channelId } = c.req.valid('query');
     return c.json(
       await todayOverview(
         { positions, channels, funds, indices, clock: resolved.clock },
         getAuth(c).userId,
         channelId,
+        asOf,
       ),
       200,
     );

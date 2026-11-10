@@ -17,9 +17,10 @@ export async function todayOverview(
   },
   userId: string,
   channelId?: string,
+  asOf = deps.clock.now(),
 ) {
   // 先校验渠道归属；失败请求不再请求无关的行情。
-  const all = await deps.positions.listWithQuotes(userId, channelId, true);
+  const all = await deps.positions.listWithQuotes(userId, channelId, true, asOf);
   const visible = all.filter((item) => !item.isCleared);
   const [channels, funds, indices] = await Promise.all([
     deps.channels.list(userId),
@@ -29,7 +30,7 @@ export async function todayOverview(
         return [code, fund?.name ?? null] as const;
       }),
     ),
-    deps.indices.list(),
+    deps.indices.list(asOf),
   ]);
   const channelNames = new Map(channels.map((channel) => [channel.id, channel.name]));
   const fundNames = new Map(funds);
@@ -39,10 +40,9 @@ export async function todayOverview(
       .map((item) => [item.fundCode, item.quote.direction]),
   );
   const changes = [...heldFunds.values()];
-  const time = deps.clock.now();
   return {
     summary: {
-      ...summarizePositions(all, all[0]?.todayGainDate ?? shanghaiDate(time)),
+      ...summarizePositions(all, shanghaiDate(asOf)),
       risingCount: changes.filter((change) => change === 'up').length,
       fallingCount: changes.filter((change) => change === 'down').length,
     },
@@ -51,8 +51,8 @@ export async function todayOverview(
       fundName: fundNames.get(item.fundCode) ?? null,
       channelName: channelNames.get(item.channelId) ?? null,
     })),
-    indices: { items: indices, time: time.toISOString() },
-    time: time.toISOString(),
+    indices: { items: indices, time: asOf.toISOString() },
+    time: asOf.toISOString(),
     referenceOnly: true as const,
   };
 }

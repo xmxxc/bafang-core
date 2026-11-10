@@ -81,6 +81,7 @@ export interface PositionService {
     userId: string,
     channelId?: string,
     includeCleared?: boolean,
+    asOf?: Date,
   ): Promise<QuotedPosition[]>;
   get(userId: string, id: string): Promise<PositionView>;
   create(userId: string, input: PositionCreateInput): Promise<PositionView>;
@@ -224,9 +225,9 @@ export function createPositionService(deps: {
   calendar: TradingCalendar;
 }): PositionService {
   const withGains = createPositionGains(deps);
-  async function latestNav(code: string): Promise<LatestNav | null> {
+  async function latestNav(code: string, asOf?: Date): Promise<LatestNav | null> {
     try {
-      return await deps.nav.latest(code);
+      return await deps.nav.latest(code, asOf);
     } catch {
       // 行情暂不可用时仍返回持仓本身，市值与收益明确为 null。
       return null;
@@ -234,7 +235,7 @@ export function createPositionService(deps: {
   }
 
   // 一次聚合所有待展示持仓，避免列表为每个持仓单独查询在途交易。
-  async function views(rows: PositionRow[]): Promise<QuotedPosition[]> {
+  async function views(rows: PositionRow[], asOf?: Date): Promise<QuotedPosition[]> {
     if (rows.length === 0) return [];
     const totals = await deps.db
       .select({
@@ -257,7 +258,7 @@ export function createPositionService(deps: {
     const navs = new Map(
       await Promise.all(
         [...new Set(rows.map((row) => row.fundCode))].map(
-          async (code) => [code, await latestNav(code)] as const,
+          async (code) => [code, await latestNav(code, asOf)] as const,
         ),
       ),
     );
@@ -272,6 +273,7 @@ export function createPositionService(deps: {
           Boolean(total),
         );
       }),
+      asOf,
     );
   }
 
@@ -298,6 +300,7 @@ export function createPositionService(deps: {
     userId: string,
     channelId?: string,
     includeCleared = false,
+    asOf?: Date,
   ): Promise<QuotedPosition[]> {
     if (channelId) {
       // 与渠道接口一致：不存在或别人的渠道都返回 404，而不是空列表。
@@ -317,7 +320,7 @@ export function createPositionService(deps: {
           : eq(positions.userId, userId),
       )
       .orderBy(positions.createdAt, positions.id);
-    const items = await views(rows);
+    const items = await views(rows, asOf);
     return includeCleared ? items : items.filter((item) => !item.isCleared);
   }
 

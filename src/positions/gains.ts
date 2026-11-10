@@ -46,8 +46,8 @@ export function createPositionGains(deps: {
   clock: Clock;
   calendar: TradingCalendar;
 }) {
-  return async (items: PositionValuation[]): Promise<QuotedPosition[]> => {
-    const now = deps.clock.now();
+  return async (items: PositionValuation[], asOf?: Date): Promise<QuotedPosition[]> => {
+    const now = asOf ?? deps.clock.now();
     const today = shanghaiDate(now);
     const tradingDay = deps.calendar.isTradingDay(now);
     const codes = [...new Set(items.map((item) => item.fundCode))];
@@ -57,7 +57,7 @@ export function createPositionGains(deps: {
           async (code) =>
             [
               code,
-              tradingDay ? await deps.nav.latestBefore(code, today).catch(() => null) : null,
+              tradingDay ? await deps.nav.latestBefore(code, today, now).catch(() => null) : null,
             ] as const,
         ),
       ),
@@ -70,7 +70,7 @@ export function createPositionGains(deps: {
       ),
     ];
     const batch =
-      tradingDay && unconfirmed.length > 0 ? await deps.estimates.batch(unconfirmed) : null;
+      tradingDay && unconfirmed.length > 0 ? await deps.estimates.batch(unconfirmed, now) : null;
     const estimates = new Map(batch?.items.map((item) => [item.code, item.estimate]));
     return items.map((item) => {
       const baseNav = previous.get(item.fundCode);

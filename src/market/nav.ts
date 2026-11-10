@@ -33,14 +33,14 @@ export interface NavPoint {
 
 export interface NavService {
   /** 最新一期净值；基金无净值数据时返回 null。 */
-  latest(code: string): Promise<LatestNav | null>;
+  latest(code: string, asOf?: Date): Promise<LatestNav | null>;
   /** 按区间返回历史净值序列（最新在前）；基金无净值数据时返回 null。 */
-  history(code: string, range: NavRange): Promise<NavPoint[] | null>;
+  history(code: string, range: NavRange, asOf?: Date): Promise<NavPoint[] | null>;
   /**
    * 净值日期早于 date 的最近一期已公布净值（date 为 YYYY-MM-DD）；查不到时返回 null。
    * 先看最新一期，最新一期已经是 date 当天或之后时再从近 1 月走势里找；两者都走同一套缓存。
    */
-  latestBefore(code: string, date: string): Promise<NavPoint | null>;
+  latestBefore(code: string, date: string, asOf?: Date): Promise<NavPoint | null>;
 }
 
 export interface NavServiceDeps {
@@ -66,8 +66,8 @@ export function createNavService(deps: NavServiceDeps): NavService {
   const historyPoll = new PollCache<NavPoint[]>(NAV_PUBLISH_POLL_MS);
 
   const service: NavService = {
-    async latest(code) {
-      const now = deps.clock.now();
+    async latest(code, asOf) {
+      const now = asOf ?? deps.clock.now();
       const expectedDate = expectedPublishDate(now, deps.calendar);
       const cached = latestCache.get(expectedDate, code) ?? latestPoll.get(code, now.getTime());
       if (cached) return cached;
@@ -88,8 +88,8 @@ export function createNavService(deps: NavServiceDeps): NavService {
       return latest;
     },
 
-    async history(code, range) {
-      const now = deps.clock.now();
+    async history(code, range, asOf) {
+      const now = asOf ?? deps.clock.now();
       const expectedDate = expectedPublishDate(now, deps.calendar);
       const startDate = addMonths(shanghaiDate(now), -RANGE_MONTHS[range]);
       const cacheKey = `${code}:${range}:${startDate}`;
@@ -113,11 +113,11 @@ export function createNavService(deps: NavServiceDeps): NavService {
       return points;
     },
 
-    async latestBefore(code, date) {
-      const latest = await service.latest(code);
+    async latestBefore(code, date, asOf) {
+      const latest = await service.latest(code, asOf);
       if (!latest) return null;
       if (latest.navDate < date) return { date: latest.navDate, ...pick(latest) };
-      const points = await service.history(code, '1m');
+      const points = await service.history(code, '1m', asOf);
       return points?.find((point) => point.date < date) ?? null;
     },
   };

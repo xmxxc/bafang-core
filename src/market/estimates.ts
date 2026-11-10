@@ -57,7 +57,7 @@ export interface EstimateBatch {
 
 export interface EstimateService {
   /** 批量估值；codes 已去重，顺序即返回顺序。 */
-  batch(codes: readonly string[]): Promise<EstimateBatch>;
+  batch(codes: readonly string[], asOf?: Date): Promise<EstimateBatch>;
 }
 
 export interface EstimateServiceDeps {
@@ -103,8 +103,8 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
   }
 
   return {
-    async batch(codes) {
-      const now = deps.clock.now();
+    async batch(codes, asOf) {
+      const now = asOf ?? deps.clock.now();
       const status = marketStatus(now, deps.calendar);
       const time = now.toISOString();
       if (status === 'pre_market' || status === 'holiday') {
@@ -121,7 +121,7 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
       const missing = codes.filter((code) => !resolved.has(code));
       if (missing.length > 0) {
         const today = shanghaiDate(now);
-        const verify = baseVerifier(deps.nav);
+        const verify = baseVerifier(deps.nav, now);
         const primary = await verify(
           await trySource('tiantian', () => fetchTiantianEstimates(deps.upstream, missing, today)),
         );
@@ -186,14 +186,14 @@ function toEstimate(source: SourceEstimate, name: EstimateSource, fallback: bool
  * 过期的、以及期望基准查不到（净值上游失败或没有净值数据）的估值都去掉。
  * 同一批次里对同一只基金的净值查询只做一次。
  */
-function baseVerifier(nav: NavService) {
+function baseVerifier(nav: NavService, asOf?: Date) {
   const lookups = new Map<string, Promise<{ date: string; unitNav: string } | null>>();
 
   function expectedBase(code: string, date: string) {
     const key = `${code}:${date}`;
     let lookup = lookups.get(key);
     if (!lookup) {
-      lookup = nav.latestBefore(code, date).catch((error: unknown) => {
+      lookup = nav.latestBefore(code, date, asOf).catch((error: unknown) => {
         if (!(error instanceof UpstreamError)) throw error;
         console.warn('[bafang-core] estimate base unavailable', code, error.kind, error.message);
         return null;

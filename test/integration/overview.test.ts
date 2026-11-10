@@ -20,6 +20,7 @@ describe('今日概览（HTTP）', () => {
   let database: TestSchema;
   let app: App;
   let now: Date;
+  let clockReads: Date[];
   let published: boolean;
   let changePercent: number;
   let verificationCode: string;
@@ -57,7 +58,7 @@ describe('今日概览（HTTP）', () => {
   function makeApp(source: Replay = replay) {
     return createApp({
       database: createDb(database.pool),
-      clock: { now: () => now },
+      clock: { now: () => clockReads.shift() ?? now },
       upstream: new RecordedUpstream(source),
       wechat: {
         async openid(code) {
@@ -75,6 +76,7 @@ describe('今日概览（HTTP）', () => {
   beforeEach(async () => {
     database = await createTestSchema();
     now = new Date('2026-11-06T02:00:00Z');
+    clockReads = [];
     published = false;
     changePercent = -1.44;
     app = makeApp();
@@ -169,6 +171,80 @@ describe('今日概览（HTTP）', () => {
       'HSI.HK',
     ]);
     expect(body.indices.items.every((item) => item.available)).toBe(true);
+  });
+
+  // 时钟读取序列：认证会话读一次，概览入口固定请求时刻读一次，之后的读取都已越过边界。
+  // 修复前收益、指数和 envelope 各自再读时钟，会落在边界两侧。
+  function crossingClock(requestTime: Date, ...later: string[]) {
+    now = requestTime;
+    clockReads = [requestTime, requestTime, ...later.map((iso) => new Date(iso))];
+  }
+
+  it('uses one request instant when the injected clock crosses Shanghai midnight during reads', async () => {
+    const headers = await login();
+    const [channel] = await channels(headers);
+    await create(headers, channel!.id);
+
+    const requestTime = new Date('2026-11-06T15:59:59.999Z');
+    crossingClock(
+      requestTime,
+      '2026-11-06T16:00:00.001Z',
+      '2026-11-06T16:00:00.002Z',
+      '2026-11-06T16:00:00.003Z',
+    );
+    now = new Date('2026-11-06T16:00:00.004Z');
+    const body = await overview(headers);
+
+    expect(body.time).toBe(requestTime.toISOString());
+    expect(body.indices.time).toBe(requestTime.toISOString());
+    expect(body.summary.todayGainDate).toBe('2026-11-06');
+    expect(body.positions[0]!.todayGainDate).toBe('2026-11-06');
+    expect(body.indices.items.every((item) => item.marketStatus === 'closed')).toBe(true);
+  });
+
+  it('uses one request instant for an empty overview when the clock crosses Shanghai midnight', async () => {
+    const headers = await login();
+
+    const requestTime = new Date('2026-11-06T15:59:59.999Z');
+    crossingClock(
+      requestTime,
+      '2026-11-06T16:00:00.001Z',
+      '2026-11-06T16:00:00.002Z',
+      '2026-11-06T16:00:00.003Z',
+    );
+    now = new Date('2026-11-06T16:00:00.004Z');
+    const body = await overview(headers);
+
+    expect(body.positions).toEqual([]);
+    expect(body.time).toBe(requestTime.toISOString());
+    expect(body.indices.time).toBe(requestTime.toISOString());
+    expect(body.summary.todayGainDate).toBe('2026-11-06');
+    expect(body.indices.items.every((item) => item.marketStatus === 'closed')).toBe(true);
+  });
+
+  it('matches the fixed-clock overview when later reads cross the A-share close', async () => {
+    const headers = await login();
+    const [channel] = await channels(headers);
+    await create(headers, channel!.id);
+
+    const requestTime = new Date('2026-11-06T06:59:59.999Z');
+    now = requestTime;
+    const fixed = await overview(headers);
+
+    crossingClock(
+      requestTime,
+      '2026-11-06T07:00:00.001Z',
+      '2026-11-06T07:00:00.002Z',
+      '2026-11-06T07:00:00.003Z',
+    );
+    now = new Date('2026-11-06T07:00:00.004Z');
+    const body = await overview(headers);
+
+    expect(body).toEqual(fixed);
+    expect(body.time).toBe(requestTime.toISOString());
+    expect(
+      body.indices.items.filter((item) => item.market === 'cn').map((item) => item.marketStatus),
+    ).toEqual(['trading', 'trading', 'trading']);
   });
 
   it('switches from estimated to confirmed gain with the same NAV quote and date', async () => {
