@@ -181,7 +181,7 @@ docker compose up -d
 - N 直接读取现有基金详情的 `settlement.tPlusN`：上游有值则采用；缺失时沿用基金信息的类别默认值，普通/ETF 联接 T+1、QDII T+2。理由：父 spec 明确要求基金规则及类别回退，现有基金信息接口已经提供这一入口。本票不另设一套固定规则。基金不存在返回 404 `fund_not_found`，获取规则失败返回 502 `upstream_unavailable`；日期推算结果随交易保存。
 - `Trade` 包含 `type`（`buy/sell/switch_out/switch_in`）、`status`（`pending/confirmed`）、`submittedDate`、`beforeCutoff`、`applicationDate`、`settlementDate`、`amount`（2 位）/`shares`（4 位）、`feeRate`、`confirmedNav`、`confirmedShares`、`switchId`、`source`。支持提交 `buy` 与 `sell`；减仓在途 `amount` 为 `null`，确认后写入到账金额；在途时确认净值与确认份额为 `null`，来源强制为 `web`。来源使用 text，为后续访问令牌名保留空间。
 - 持仓详情、列表、新建和校准响应提供 `pendingAmount`（加仓在途金额合计，2 位，缺省 `"0.00"`）；在途不影响份额、成本或持有收益。校准不改变在途交易；删除持仓通过外键级联删除所有交易。
-- 仅在上海日期早于确认日、且状态仍为 `pending` 时可撤销，否则返回 409 `trade_not_cancellable`。确认日已到而净值未出时仍为在途，但也不可撤销。减仓沿用同样撤销规则。调仓由 #21 实现，交易表已预留对应类型与调仓关联字段。
+- 仅在上海日期早于确认日、且状态仍为 `pending` 时可撤销，否则返回 409 `trade_not_cancellable`。确认日已到而净值未出时仍为在途，但也不可撤销。减仓沿用同样撤销规则。调仓从任一侧撤销时要求两侧均符合撤销条件，两笔一起删除。
 
 ### 减仓与已清仓
 
@@ -190,11 +190,40 @@ docker compose up -d
 - `isCleared` 派生为份额为 0 且没有任何在途交易，不单独存储。`GET /v1/positions` 默认隐藏已清仓，传 `includeCleared=true` 可查看，`false` 与缺省相同；详情始终可访问。汇总与按基金汇总始终包含历史已实现收益，列表开关不影响它们。
 - 已清仓持仓提交加仓后因有在途交易而暂不算已清仓；确认后份额增加，恢复持有中，并保留此前已实现收益及其成本基数。任何持仓（含已清仓）都算有数据，不可作为空用户自动合并。
 
+### 调仓
+
+| 接口                                              | 说明                                                                                                 |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `POST /v1/positions/{id}/switches`                | 源持仓发起调仓，返回 201 `{ id, sourcePositionId, targetFundCode, items: [转出 Trade, 转入 Trade] }` |
+| `GET /v1/switches/{switchId}`                     | 按调仓 ID 关联查看两侧交易，顺序为转出、转入                                                         |
+| `DELETE /v1/switches/{switchId}/trades/{tradeId}` | 从任一侧成对撤销，适用于目标尚无持仓时的转入侧                                                       |
+
+三个接口均要求登录。提交示例：
+
+```json
+{
+  "targetFundCode": "000001",
+  "targetChannelId": "与源持仓相同的渠道 UUID",
+  "shares": "40",
+  "outFeeRate": "0.005",
+  "inFeeRate": "0.0015",
+  "submittedDate": "2026-11-06",
+  "beforeCutoff": true
+}
+```
+
+- 目标渠道须属于当前用户且与源渠道相同；跨渠道或同基金返回 400 `validation_error`，转出超过可用份额返回 409 `insufficient_shares`。两侧共用服务端生成的 `switchId`，原子创建，预留份额与减仓共用用户行锁。重复提交可能重复记录。
+- 费率、份额和可选提交日期的格式及 15:00 截止点规则与加减仓一致。两侧按各自基金的 T+N 返回预计确认日；转入即使已到自己的确认日，也必须等转出确认。两侧申请交易日均由这次提交的日期及截止点推算。
+- 转出沿用减仓的到账金额、平均成本与已实现收益公式；确认转出时将到账金额写入转入 `amount`，转入沿用买入费率和申请交易日净值计算份额及成本。任一侧所需净值缺失时该侧保持在途；转出尚未确认时转入也保持在途。费率为 1 或金额舍入为 0 时，转入以 0 金额、0 份额完成确认。
+- 目标持仓不存在时，转入 `positionId` 暂为 `null`；确认转入时才自动新建（快照日为申请交易日），并回填 `positionId`。在确认前手动建立了同基金同渠道持仓时，新建事务会立即关联该目标的全部在途转入；确认任务新建目标时也使用相同关联规则。目标一旦存在，在途转入即出现在其交易历史中，到账后的金额计入 `pendingAmount`，并参与清仓判断及删除时的成对清理。
+- 从现有持仓的交易撤销接口撤销任一侧也会成对撤销。任一侧已到确认日或已确认，整对拒绝撤销并返回 409 `trade_not_cancellable`。删除任一关联持仓会删除整对交易；已全部转出但转入仍在途时，源持仓仍视为未清仓，渠道不可删除。
+- 迁移 `0013` 保存调仓意图，并允许未创建目标持仓的转入交易暂时没有持仓 ID；原有加减仓记录及持仓不变。
+
 ### 交易确认任务
 
 - `app.runSettlement()` 是进程内确认入口，返回 `{ confirmed, pending, failed, failures }` 摘要；任务只用申请交易日的已公布净值，净值缺失时保持在途，单笔行情或数据错误会记录在 `failures` 中并继续处理其他交易。
 - 服务入口按 `SETTLEMENT_ROUNDS` 在每个交易日上海时间分轮补跑，默认 21:30、22:30、23:30；每个“日期 + 轮次”只触发一次，非交易日不运行。进程在某轮次之后启动不会补跑已错过的轮次，但会在当天下一轮运行；次日第一轮会继续处理前一天仍在途且已到确认日的交易。需要手动补跑时执行 `pnpm trades:settle`。
-- 所有到期交易按申请交易日、创建时间、交易 ID 顺序确认；同日加仓与减仓按创建顺序逐笔使用当前平均成本。某笔缺净值或失败时，同持仓后续交易留在途，其他持仓继续处理。校准保留在途交易；若校准后份额不足以确认减仓，该交易记录失败并保持在途，待修正份额后重跑。
+- 所有到期交易按申请交易日、创建时间、交易 ID 顺序确认（同一调仓优先转出）；同日加仓与减仓按创建顺序逐笔使用当前平均成本。某笔缺净值或失败时，同持仓后续交易留在途，其他持仓继续处理。校准保留在途交易；若校准后份额不足以确认减仓，该交易记录失败并保持在途，待修正份额后重跑。
 - 减仓到账金额 = 份额 × 申请交易日净值 ×（1 − 费率）；结转成本 = 当前总成本 × 卖出份额 ÷ 卖出前份额。乘积保留全部定点小数，仅在最终到账金额、结转成本分别舍入到 2 位；已实现收益增加到账金额减结转成本，其成本基数增加结转成本，份额与总成本相应减少。卖光时结转全部剩余成本，总成本严格归零。交易写入到账金额、确认净值及确认份额，与持仓在同一事务中更新，重复运行不重复入账。
 - 加仓份额使用 `(amount - amount × feeRate / (1 + feeRate)) ÷ applicationDateNav`，中间计算保留 18 位定点小数，最后一次舍入到 4 位份额；成本按原始金额舍入到 2 位累加。
 
@@ -239,7 +268,7 @@ A 股与港股的交易日历都由 core 自己维护：特殊日期按市场、
   pnpm trading-calendar:import 2026 --file /path/to/holidays.json
   ```
 
-- 启动服务时 `src/index.ts` 会从 `trading_holidays` 表分别加载两个市场的数据，注入给 `ChineseTradingCalendar` 与 `HongKongTradingCalendar`，供市场状态、大盘指数等接口使用。没有导入港股某年的数据时，港股只按周末判断；遇到港股假日，指数会因为缺当日行情显示为不可用，而不会给出错误的状态。
+- 启动服务时 `src/index.ts` 会从 `trading_holidays` 表分别加载两个市场的数据，注入给 `ChineseTradingCalendar` 与 `HongKongTradingCalendar`，供市场状态、大盘指数等接口使用。市场状态依据已加载的交易日历和周末判断；缺少某年数据时，未知的工作日假日可能显示为 `trading`，此时若没有当日可信行情，指数会显示为不可用、数值为 `null`。
 
 ## 错误结构
 
@@ -264,3 +293,13 @@ A 股与港股的交易日历都由 core 自己维护：特殊日期按市场、
 | `pnpm openapi:generate`             | 重新生成 `openapi.json`    |
 | `pnpm openapi:check`                | 检查 `openapi.json` 未漂移 |
 | `docker compose up -d`              | 起本地开发数据库           |
+
+### 扫码登录
+
+- 与小程序登录共用 `WECHAT_APP_ID` / `WECHAT_APP_SECRET`；缺失时三个扫码接口均返回 503 `wechat_not_configured`。`WECHAT_QR_TTL_SECONDS` 配置票据有效期（60–600 秒，默认 300 秒）。先执行 `pnpm db:migrate` 应用 `0012`。
+- 网页匿名 `POST /v1/auth/wechat/qr`，返回 `{ ticketId, expiresAt, image: { contentType, base64 } }`，图片可用 `data:<contentType>;base64,<base64>` 展示。票据是密码学随机的 192 位值，以 32 个 base64url 字符直接作为小程序码 `scene`，符合微信的长度/字符限制；数据库只存票据和浏览器凭据的 SHA-256。小程序码默认打开 glance 首页，glance 从 `scene` 取票据，展示确认登录按钮。
+- 申请时下发 `__Host-bafang_qr` 临时 Cookie（httpOnly、Secure、SameSite=Lax、Path=/，在票据到期后继续保留 5 分钟，供网页读取已过期状态，不能延长票据有效期）。浏览器轮询必须保留并携带它；每次新申请会替换浏览器的临时 Cookie，旧票据需重新申请。Cookie 缺失、错误或票据不存在时返回 403 `qr_browser_invalid`，票据 id 单独泄露不能领取会话。本地联调使用 HTTPS/受信 localhost。
+- glance 以自己的有效小程序会话 `Authorization: Bearer <token>` 调用 `POST /v1/auth/wechat/qr/{ticketId}/confirm`，成功返回 `{ status: "confirmed" }`。未登录、失效会话或仅携带 Cookie 返回 401 `unauthorized`，网页 Bearer 会话返回 403 `qr_miniprogram_required`；不存在/过期/已确认/已消费分别返回 `qr_ticket_invalid` (404)、`qr_ticket_expired` (400)、`qr_ticket_confirmed` (409)、`qr_ticket_used` (409)。确认者决定网页会话的用户归属，并发确认仅一个成功。
+- 网页 `GET /v1/auth/wechat/qr/{ticketId}` 轮询：`pending` 待确认；`expired` 已过期；`consumed` 已领取；确认后的第一次有效轮询返回 `{ status: "confirmed", user: { id }, session: { device: "web", expiresAt }, token: null }`，同时设置与邮箱/GitHub 相同的 30 天 `bafang_session` Cookie。票据消费与会话创建在同一事务内，跨实例并发轮询仅一个获取会话。已交付的响应丢失时需重新申请，不能重放领取。glance 会话和网页会话独立，任意一端退出不影响另一端。
+- 到期后不能确认或领取，已确认未领取也会到期。过期记录保留 24 小时供错误识别，在后续申请时清理；清理后视为不存在。接口均返回 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`。申请按 IP 每分钟 5 次，轮询按 IP 每分钟 120 次且按票据每分钟 60 次，确认按 IP 每分钟 10 次；成功/失败均计数，沿用进程内限流。
+- `WeChatQrCode` 为可注入适配器（`createApp({ wechatQr })`）。真实实现使用固定 HTTPS `/cgi-bin/token` 获取 `access_token` 并在内存缓存，过期前 10%（最多 60 秒）刷新，并发请求共用获取中的凭据；调用 `/wxa/getwxacodeunlimit` 传入 `scene`。每次请求 5 秒超时、禁止重定向、不自动重试；只接受 PNG/JPEG 图片字节，微信 JSON 错误/异常统一为 502 `wechat_unavailable`，不写票据或会话，不透传凭据或上游细节。测试用假 HTTP 出口验证协议，不访问真实微信。

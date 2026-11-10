@@ -5,6 +5,7 @@ import { loadConfig, parseSettlementRunMinutes, toDbConfig } from './config';
 import { loadHongKongTradingCalendar, loadTradingCalendar } from './trading-calendar';
 import { createMailer } from './auth/mailer';
 import { createGitHubLogin } from './auth/github';
+import { createWeChatQrCode } from './auth/wechat-qr';
 import { createWeChatLogin } from './auth/wechat';
 import { startSettlementScheduler } from './positions/settlement';
 
@@ -17,6 +18,8 @@ const app = createApp({
   mailer: createMailer(config),
   github: createGitHubLogin(config),
   wechat: createWeChatLogin(config),
+  wechatQr: createWeChatQrCode(config),
+  qrTicketTtlMs: config.WECHAT_QR_TTL_SECONDS * 1000,
   bindCodeSecret: config.BIND_CODE_SECRET,
   tradingCalendar,
   hkTradingCalendar: await loadHongKongTradingCalendar(pool),

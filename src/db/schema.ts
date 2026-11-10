@@ -187,7 +187,16 @@ export const positions = pgTable(
   ],
 );
 
-/** 交易类型；成对调仓由后续服务创建。 */
+/** 调仓意图保留源持仓与目标基金；目标持仓在转入确认时才需要存在。 */
+export const switches = pgTable('switches', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  sourcePositionId: uuid('source_position_id')
+    .notNull()
+    .references(() => positions.id, { onDelete: 'cascade' }),
+  targetFundCode: text('target_fund_code').notNull(),
+});
+
+/** 交易类型；调仓的两笔交易共享 switchId。 */
 export const tradeType = pgEnum('trade_type', ['buy', 'sell', 'switch_out', 'switch_in']);
 export const tradeStatus = pgEnum('trade_status', ['pending', 'confirmed']);
 
@@ -196,9 +205,8 @@ export const trades = pgTable(
   'trades',
   {
     id: uuid('id').primaryKey().defaultRandom(),
-    positionId: uuid('position_id')
-      .notNull()
-      .references(() => positions.id, { onDelete: 'cascade' }),
+    // 目标无持仓的调仓转入在确认前为空。
+    positionId: uuid('position_id').references(() => positions.id, { onDelete: 'cascade' }),
     type: tradeType('type').notNull(),
     status: tradeStatus('status').notNull().default('pending'),
     submittedDate: date('submitted_date', { mode: 'string' }).notNull(),
@@ -212,7 +220,7 @@ export const trades = pgTable(
     feeRate: numeric('fee_rate', { precision: 9, scale: 6 }).notNull(),
     confirmedNav: numeric('confirmed_nav', { precision: 24, scale: 4 }),
     confirmedShares: numeric('confirmed_shares', { precision: 24, scale: 4 }),
-    switchId: uuid('switch_id'),
+    switchId: uuid('switch_id').references(() => switches.id, { onDelete: 'cascade' }),
     // 不限长度，后续可保存访问令牌名。
     source: text('source').notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -237,4 +245,18 @@ export const githubOAuthStates = pgTable(
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   },
   (t) => [index('github_oauth_states_expires_idx').on(t.expiresAt)],
+);
+
+/** 扫码登录票据与浏览器凭据只存 SHA-256，确认者删除时票据一并作废。 */
+export const qrLoginTickets = pgTable(
+  'qr_login_tickets',
+  {
+    ticketHash: text('ticket_hash').primaryKey(),
+    browserHash: text('browser_hash').notNull(),
+    userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+    confirmedAt: timestamp('confirmed_at', { withTimezone: true }),
+    consumedAt: timestamp('consumed_at', { withTimezone: true }),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('qr_login_tickets_expires_idx').on(t.expiresAt)],
 );

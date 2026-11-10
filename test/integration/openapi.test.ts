@@ -65,6 +65,12 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
       'wechat_not_configured',
       'wechat_code_invalid',
       'wechat_unavailable',
+      'qr_browser_invalid',
+      'qr_ticket_invalid',
+      'qr_ticket_expired',
+      'qr_ticket_used',
+      'qr_ticket_confirmed',
+      'qr_miniprogram_required',
       'github_not_configured',
       'github_state_invalid',
       'github_authorization_failed',
@@ -233,6 +239,27 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     }
   });
 
+  it('documents authenticated switch creation, association lookup and paired cancellation', async () => {
+    const doc = (await (await createApp().request('/v1/openapi')).json()) as OpenApiDoc;
+    const operations = [
+      [
+        doc.paths['/v1/positions/{id}/switches']?.post,
+        ['201', '400', '401', '404', '409', '500', '502', '503'],
+      ],
+      [doc.paths['/v1/switches/{switchId}']?.get, ['200', '400', '401', '404', '500', '503']],
+      [
+        doc.paths['/v1/switches/{switchId}/trades/{tradeId}']?.delete,
+        ['204', '400', '401', '404', '409', '500', '503'],
+      ],
+    ] as const;
+    for (const [operation, statuses] of operations) {
+      expect(operation?.security).toEqual([{ SessionCookie: [] }, { SessionBearer: [] }]);
+      expect(Object.keys(operation?.responses ?? {}).sort()).toEqual([...statuses].sort());
+    }
+    expect(doc.components.schemas.SwitchCreate).toBeDefined();
+    expect(doc.components.schemas.Switch).toBeDefined();
+  });
+
   it('documents the fund search and basic info routes with their error responses', async () => {
     const app = createApp({ db: createHealthProbe(db.pool) });
     const res = await app.request('/v1/openapi');
@@ -316,6 +343,26 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     expect(doc.paths['/v1/channels/{id}']?.delete?.responses['409']).toBeDefined();
     expect(doc.components.schemas.Channel).toBeDefined();
     expect(doc.components.schemas.ChannelList).toBeDefined();
+  });
+
+  it('documents QR ticket creation, browser-bound polling and Bearer confirmation', async () => {
+    const doc = (await (await createApp().request('/v1/openapi')).json()) as OpenApiDoc;
+    const start = doc.paths['/v1/auth/wechat/qr']?.post;
+    const poll = doc.paths['/v1/auth/wechat/qr/{ticketId}']?.get;
+    const confirm = doc.paths['/v1/auth/wechat/qr/{ticketId}/confirm']?.post;
+    expect(start?.responses['201']).toBeDefined();
+    expect(start?.security).toBeUndefined();
+    expect(poll?.security).toEqual([{ QrBrowserCookie: [] }]);
+    expect(confirm?.security).toEqual([{ SessionBearer: [] }]);
+    for (const operation of [start, poll, confirm]) {
+      for (const status of ['429', '500', '503'])
+        expect(operation?.responses[status]).toBeDefined();
+    }
+    for (const status of ['400', '401', '403', '404', '409'])
+      expect(confirm?.responses[status]).toBeDefined();
+    const polling = JSON.stringify(poll?.responses['200']);
+    for (const state of ['pending', 'confirmed', 'expired', 'consumed'])
+      expect(polling).toContain(state);
   });
 
   it('returns a unified 404 for unknown routes', async () => {

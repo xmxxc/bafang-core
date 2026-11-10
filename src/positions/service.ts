@@ -1,12 +1,13 @@
 import { and, eq, gt, inArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../db';
-import { channels, positions, trades, users } from '../db/schema';
+import { channels, positions, switches, trades, users } from '../db/schema';
 import type { ErrorCode } from '../errors';
 import type { FundService } from '../market/funds';
 import type { LatestNav, NavService } from '../market/nav';
 import type { EstimateService } from '../market/estimates';
 import type { TradingCalendar } from '../trading-calendar';
 import { createPositionGains, type PositionGains, type QuotedPosition } from './gains';
+import { linkPendingSwitchIns } from './switch-targets';
 import { shanghaiDate, type Clock } from '../clock';
 import {
   divide,
@@ -115,6 +116,7 @@ export async function channelHasPositions(
         or(
           gt(positions.shares, '0'),
           sql`exists (select 1 from ${trades} where ${trades.positionId} = ${positions.id} and ${trades.status} = 'pending')`,
+          sql`exists (select 1 from ${switches} join ${trades} on ${trades.switchId} = ${switches.id} where ${switches.sourcePositionId} = ${positions.id} and ${trades.status} = 'pending')`,
         ),
       ),
     )
@@ -240,7 +242,7 @@ export function createPositionService(deps: {
     const totals = await deps.db
       .select({
         positionId: trades.positionId,
-        amount: sql<string>`coalesce(sum(${trades.amount}) filter (where ${trades.type} = 'buy'), 0)::text`,
+        amount: sql<string>`coalesce(sum(${trades.amount}) filter (where ${trades.type} in ('buy', 'switch_in')), 0)::text`,
         shares: sql<string>`coalesce(sum(${trades.shares}) filter (where ${trades.type} in ('sell', 'switch_out')), 0)::text`,
       })
       .from(trades)
@@ -255,6 +257,20 @@ export function createPositionService(deps: {
       )
       .groupBy(trades.positionId);
     const pending = new Map(totals.map((total) => [total.positionId, total]));
+    const pendingSwitches = await deps.db
+      .select({ sourcePositionId: switches.sourcePositionId })
+      .from(switches)
+      .innerJoin(trades, eq(trades.switchId, switches.id))
+      .where(
+        and(
+          inArray(
+            switches.sourcePositionId,
+            rows.map((row) => row.id),
+          ),
+          eq(trades.status, 'pending'),
+        ),
+      );
+    const pendingSources = new Set(pendingSwitches.map((row) => row.sourcePositionId));
     const navs = new Map(
       await Promise.all(
         [...new Set(rows.map((row) => row.fundCode))].map(
@@ -270,7 +286,7 @@ export function createPositionService(deps: {
           navs.get(row.fundCode) ?? null,
           total ? formatFixed(fixedFromDb(total.amount, AMOUNT_SCALE)) : '0.00',
           total ? formatFixed(fixedFromDb(total.shares, SHARES_SCALE)) : '0.0000',
-          Boolean(total),
+          Boolean(total) || pendingSources.has(row.id),
         );
       }),
       asOf,
@@ -367,6 +383,7 @@ export function createPositionService(deps: {
               snapshotDate: input.snapshotDate ?? shanghaiDate(deps.clock.now()),
             })
             .returning();
+          await linkPendingSwitchIns(tx, created!);
           return created!;
         });
       } catch (error) {
@@ -398,6 +415,16 @@ export function createPositionService(deps: {
 
     async delete(userId, id) {
       await mutate(userId, async (tx) => {
+        const [owned] = await tx
+          .select({ id: positions.id })
+          .from(positions)
+          .where(and(eq(positions.id, id), eq(positions.userId, userId)));
+        if (!owned) throw new PositionError('not_found', '持仓不存在', 404);
+        await tx
+          .delete(switches)
+          .where(
+            sql`${switches.id} in (select ${trades.switchId} from ${trades} where ${trades.positionId} = ${id} and ${trades.switchId} is not null)`,
+          );
         const removed = await tx
           .delete(positions)
           .where(and(eq(positions.id, id), eq(positions.userId, userId)))

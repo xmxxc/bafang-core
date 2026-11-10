@@ -30,13 +30,23 @@ export const BIND_CODE_GENERATE_RATE_LIMIT: RateLimitPolicy = { limit: 5, window
 /** 绑定码提交按 IP 限制；成功与失败都计数，连续失败最多每分钟 5 次。 */
 export const BIND_CODE_SUBMIT_RATE_LIMIT: RateLimitPolicy = { limit: 5, windowMs: 60_000 };
 
+/** 扫码登录票据申请按 IP 每分钟最多 5 次。 */
+export const QR_TICKET_CREATE_RATE_LIMIT: RateLimitPolicy = { limit: 5, windowMs: 60_000 };
+/** 轮询按 IP 限制总量，并按票据限制跨 IP 请求。 */
+export const QR_TICKET_POLL_IP_RATE_LIMIT: RateLimitPolicy = { limit: 120, windowMs: 60_000 };
+export const QR_TICKET_POLL_RATE_LIMIT: RateLimitPolicy = { limit: 60, windowMs: 60_000 };
+
 interface Bucket {
   windowStart: number;
   count: number;
 }
 
 /** 进程内固定窗口限流，时间取自可注入的时钟。 */
-export function rateLimit(policy: RateLimitPolicy, clock: Clock): MiddlewareHandler {
+export function rateLimit(
+  policy: RateLimitPolicy,
+  clock: Clock,
+  keyFor: (c: Context) => string = clientKey,
+): MiddlewareHandler {
   const buckets = new Map<string, Bucket>();
   let lastSweep = 0;
 
@@ -49,7 +59,7 @@ export function rateLimit(policy: RateLimitPolicy, clock: Clock): MiddlewareHand
       lastSweep = now;
     }
 
-    const key = clientKey(c);
+    const key = keyFor(c);
     let bucket = buckets.get(key);
     if (!bucket || now - bucket.windowStart >= policy.windowMs) {
       bucket = { windowStart: now, count: 0 };
