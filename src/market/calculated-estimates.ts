@@ -6,8 +6,10 @@ import type { SourceEstimate } from './estimate-sources';
 import { stale } from './holdings';
 import { fetchTencentQuotes } from './tencent';
 import { fetchThsIntraday } from './ths';
+import { fetchThsQuote } from './ths';
 import type { Quote } from './quote';
 import { formatNav } from './estimate-sources';
+import { UpstreamError } from './upstream';
 
 export interface Calculation {
   method: 'top_holdings' | 'parent_etf';
@@ -15,6 +17,7 @@ export interface Calculation {
   disclosedWeightPercent: number;
   parentEtfCode: string | null;
   quoteTimeEnd: string | null;
+  quoteSource?: 'tencent' | 'ths' | 'mixed';
 }
 export interface CalculatedSource extends SourceEstimate {
   calculation: Calculation;
@@ -34,6 +37,7 @@ interface Component {
   symbol: string;
   weight: Fixed;
   quote?: Quote;
+  quoteSource?: 'tencent' | 'ths';
 }
 const hundred = { value: 100n, scale: 0 };
 const one = { value: 1n, scale: 0 };
@@ -81,7 +85,11 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         mappings.set(code, entry);
       }
       // Only a verified exchange mapping can select this prefix. Unknown markets fail closed.
-      const symbol = /^5\d{5}$/.test(entry.code) ? `sh${entry.code}` : null;
+      const symbol = /^5\d{5}$/.test(entry.code)
+        ? `sh${entry.code}`
+        : /^1\d{5}$/.test(entry.code)
+          ? `sz${entry.code}`
+          : null;
       if (!symbol) return null;
       return {
         items: [{ symbol, weight: hundred }] as Component[],
@@ -105,7 +113,12 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
       if (!weight || weight.value < 0n || !symbol || item.reportDate !== report.reportDate)
         return null;
       total = add(total, weight);
-      items.push({ symbol, weight, quote: item.quote ?? undefined });
+      items.push({
+        symbol,
+        weight,
+        quote: item.quote ?? undefined,
+        quoteSource: item.quoteSource ?? undefined,
+      });
     }
     if (total.value > 1000000n) return null;
     return {
@@ -123,11 +136,36 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
       const base = await deps.nav.latestBefore(code, shanghaiDate(asOf), asOf);
       if (!base) return null;
       if (model.method === 'parent_etf') {
-        const quotes = await fetchTencentQuotes(
-          deps.upstream,
-          model.items.map((item) => item.symbol),
-        );
-        for (const item of model.items) item.quote = quotes.get(item.symbol) ?? undefined;
+        let quotes = new Map<string, Quote | null>();
+        try {
+          quotes = await fetchTencentQuotes(
+            deps.upstream,
+            model.items.map((item) => item.symbol),
+          );
+        } catch (error) {
+          if (!(error instanceof UpstreamError)) throw error;
+          console.warn(
+            '[bafang-core] parent ETF Tencent quote failed',
+            code,
+            error.kind,
+            error.message,
+          );
+        }
+        for (const item of model.items) {
+          let quote = quotes.get(item.symbol) ?? null;
+          if (quote && stale(quote, asOf, deps.calendar)) quote = null;
+          const quoteSource: 'tencent' | 'ths' = quote ? 'tencent' : 'ths';
+          if (!quote) {
+            quote = await fetchThsQuote(
+              deps.upstream,
+              item.symbol.startsWith('sh')
+                ? `hs_${item.symbol.slice(2)}`
+                : `sz_${item.symbol.slice(2)}`,
+            );
+          }
+          item.quote = quote ?? undefined;
+          item.quoteSource = quote ? quoteSource : undefined;
+        }
       }
       if (
         model.items.some(
@@ -150,6 +188,7 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         })),
       );
       if (!point) return null;
+      const quoteSources = new Set(model.items.map((item) => item.quoteSource).filter(Boolean));
       return {
         ...point,
         time: new Date(first),
@@ -160,6 +199,12 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
           disclosedWeightPercent: model.disclosedWeightPercent,
           parentEtfCode: model.parentEtfCode,
           quoteTimeEnd: new Date(last).toISOString(),
+          quoteSource:
+            quoteSources.size === 1
+              ? [...quoteSources][0]
+              : quoteSources.size > 1
+                ? 'mixed'
+                : undefined,
         },
       };
     },

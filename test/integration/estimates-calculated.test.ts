@@ -41,6 +41,8 @@ class ReplayControls {
   prices: Record<string, string> = {};
   times: Record<string, string> = {};
   missing = '';
+  tencentMissing = '';
+  szseIdentity = sample('szse/fund-159901.json');
   series: Record<string, string> = {};
   seriesDate = '20261106';
   pre = '100';
@@ -63,6 +65,7 @@ class ReplayControls {
     }
     if (url.hostname === 'fund.eastmoney.com') return this.mapping;
     if (url.hostname === 'query.sse.com.cn') return this.identity;
+    if (url.hostname === 'www.szse.cn') return this.szseIdentity;
     if (url.hostname === 'api.fund.eastmoney.com') {
       const body = JSON.parse(sample('eastmoney/nav-000001-latest.json'));
       body.Data.LSJZList[0].FSRQ = this.navDate;
@@ -75,7 +78,7 @@ class ReplayControls {
       return (url.pathname.match(/^\/q=(.*)$/)?.[1] ?? '')
         .split(',')
         .map((symbol) =>
-          symbol === this.missing
+          symbol === this.missing || symbol === this.tencentMissing
             ? `v_${symbol}="";`
             : quote(symbol, this.prices[symbol] ?? '101', this.times[symbol] ?? '20261106100000'),
         )
@@ -184,15 +187,15 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
     if (kind === 'missing') control.missing = 'sh600519';
     if (kind === 'old') {
       control.times = { sh600519: '20261106095459' };
-      control.missing = 'sh600519';
+      control.thsFault = true;
     }
     if (kind === 'future') {
       control.times = { sh600519: '20261106100100' };
-      control.missing = 'sh600519';
+      control.thsFault = true;
     }
     if (kind === 'yesterday') {
       control.times = { sh600519: '20261105150000' };
-      control.missing = 'sh600519';
+      control.thsFault = true;
     }
     if (kind === 'report-old') control.report = report(['20%', '10%'], '2025-12-31');
     if (kind === 'report-future') control.report = report(['20%', '10%'], '2026-12-31');
@@ -227,6 +230,66 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
         calculation: { method: 'parent_etf', parentEtfCode: '510310' },
       },
     });
+  });
+  it.each([
+    ['001051', '510050', 'sse'],
+    ['110021', '510130', 'sse'],
+    ['110019', '159901', 'szse'],
+  ])('accepts the official domestic ETF mapping %s→%s', async (fundCode, parent, market) => {
+    control.fund = 'etf';
+    control.mapping = sample(`eastmoney/fund-${fundCode}.txt`);
+    control.identity = market === 'sse' ? sample(`sse/fund-${parent}.json`) : '';
+    const target = app();
+    const item = await current(target, fundCode);
+    expect(item).toMatchObject({
+      status: 'estimated',
+      estimate: { source: 'calculated', calculation: { parentEtfCode: parent } },
+    });
+    expect((await history(target, fundCode)).points).toHaveLength(2);
+  });
+  it('falls back from a failed mother-ETF Tencent quote to a validated THS pair', async () => {
+    control.fund = 'etf';
+    control.fault = 'qt.gtimg.cn';
+    control.series.hs_510310 = '0930,101,0,0,0;1000,101,0,0,0';
+    expect(await current(app(), '110020')).toMatchObject({
+      status: 'estimated',
+      estimate: { source: 'calculated', calculation: { quoteSource: 'ths' } },
+    });
+    control.thsFault = true;
+    expect(await current(app(), '110020')).toMatchObject({ status: 'unavailable', estimate: null });
+  });
+  it.each(['normal', 'missing', 'old', 'future', 'yesterday', 'transport'])(
+    'mother ETF Tencent %s uses the appropriate trusted source',
+    async (kind) => {
+      control.fund = 'etf';
+      control.series.hs_510310 = '0930,101,0,0,0;1000,101,0,0,0';
+      if (kind === 'missing') control.tencentMissing = 'sh510310';
+      if (kind === 'old') control.times.sh510310 = '20261106095459';
+      if (kind === 'future') control.times.sh510310 = '20261106100100';
+      if (kind === 'yesterday') control.times.sh510310 = '20261105150000';
+      if (kind === 'transport') control.fault = 'qt.gtimg.cn';
+      expect(await current(app(), '110020')).toMatchObject({
+        status: 'estimated',
+        estimate: {
+          time: '2026-11-06T02:00:00.000Z',
+          fallback: true,
+          referenceOnly: true,
+          calculation: { quoteSource: kind === 'normal' ? 'tencent' : 'ths' },
+        },
+      });
+    },
+  );
+  it('rejects a missing Tencent quote and an inconsistent THS pair', async () => {
+    control.fund = 'etf';
+    control.tencentMissing = 'sh510310';
+    control.snapshotPre = '99';
+    expect(await current(app(), '110020')).toMatchObject({ status: 'unavailable', estimate: null });
+  });
+  it('rejects a SZSE non-ETF identity without using its valid price', async () => {
+    control.fund = 'etf';
+    control.mapping = sample('eastmoney/fund-110019.txt');
+    control.szseIdentity = control.szseIdentity.replace('"jjlb":"ETF"', '"jjlb":"LOF"');
+    expect(await current(app(), '110019')).toMatchObject({ status: 'unavailable', estimate: null });
   });
   it.each([
     'wrong-page',
@@ -284,7 +347,31 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
     expect(body.points[0]).toMatchObject({ changePercent: 1, value: '1.0100' });
   });
   it.each([
+    ['2026-11-10T07:31:00.000Z', 242],
+    ['2026-11-10T02:00:00.000Z', 31],
+    ['2026-11-10T01:29:00.000Z', 0],
+  ])('filters the real ETF pair at asOf %s', async (asOf, expectedCount) => {
+    control.fund = 'etf';
+    control.now = String(asOf);
+    control.navDate = '2026-11-09';
+    const original = control.replay;
+    control.replay = (url) => {
+      if (url.hostname === 'd.10jqka.com.cn') {
+        const [, kind, symbol] = /\/v6\/(realhead|time)\/([^/]+)\//.exec(url.pathname) ?? [];
+        return sample(`ths/${kind}-${symbol}.jsonp`);
+      }
+      return original(url);
+    };
+    const body = await history(app(), '110020');
+    expect(body.points).toHaveLength(Number(expectedCount));
+    expect(body.points.every((point) => Date.parse(point.time) <= Date.parse(control.now))).toBe(
+      true,
+    );
+    if (expectedCount === 242) expect(body.points.at(-1)?.time).toBe('2026-11-10T07:00:00.000Z');
+  });
+  it.each([
     'cross-day',
+    'garbage',
     'invalid-day',
     'negative-price',
     'bad-pre',
@@ -293,12 +380,35 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
   ])('rejects intraday %s', async (kind) => {
     control.report = report();
     if (kind === 'cross-day') control.seriesDate = '20261105';
+    if (kind === 'garbage') control.series.hs_600519 = 'garbage';
     if (kind === 'invalid-day') control.seriesDate = '20260230';
     if (kind === 'negative-price') control.series.hs_600519 = '0930,-101,0,0,0';
     if (kind === 'bad-pre') control.snapshotPre = '99';
     if (kind === 'non-session') control.series.hs_600519 = '1200,101,0,0,0';
     if (kind === 'duplicate-conflict') control.series.hs_600519 = '0930,101,0,0,0;0930,100,0,0,0';
-    expect((await history()).points).toEqual([]);
+    const response = await app().request('/v1/funds/000001/estimates/intraday');
+    if (kind === 'cross-day' || kind === 'non-session') {
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as IntradayEstimate).points).toEqual([]);
+    } else {
+      expect(response.status).toBe(502);
+    }
+  });
+  it('sorts and deduplicates identical historical labels', async () => {
+    control.report = report();
+    control.series.hs_600519 = '1000,101,0,0,0;0930,101,0,0,0;0930,101,0,0,0';
+    control.series.sz_300308 = control.series.hs_600519;
+    expect((await history()).points.map((p) => p.time)).toEqual([
+      '2026-11-06T01:30:00.000Z',
+      '2026-11-06T02:00:00.000Z',
+    ]);
+  });
+  it('returns a legitimate empty THS data payload as HTTP 200', async () => {
+    control.series.hs_600519 = '';
+    control.series.sz_300308 = '';
+    const response = await app().request('/v1/funds/000001/estimates/intraday');
+    expect(response.status).toBe(200);
+    expect(((await response.json()) as IntradayEstimate).points).toEqual([]);
   });
   it.each(['2026-11-06T00:00:00Z', '2026-11-07T02:00:00Z'])(
     'returns empty history outside sessions %s',

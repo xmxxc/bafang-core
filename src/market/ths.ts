@@ -87,42 +87,60 @@ export async function fetchThsIntraday(
   ]);
   const time = parseJsonp(TimeSchema, text)[symbol];
   const snapshot = parseJsonp(RealheadSchema, snapshotText).items;
-  if (!time?.date || !time.data) return [];
+  if (!time?.date) throw new UpstreamError('bad_response', 'ths time response missing date');
+  if (time.data === null || time.data === undefined)
+    throw new UpstreamError('bad_response', 'ths time response missing data');
   const match = /^(\d{4})(\d{2})(\d{2})$/.exec(time.date);
   const pre = parseDecimal(time.pre);
-  if (!match || pre === null || pre <= 0n || parseDecimal(snapshot['6']) !== pre) return [];
+  if (!match) throw new UpstreamError('bad_response', 'ths time response has an invalid date');
+  if (pre === null || pre <= 0n)
+    throw new UpstreamError('bad_response', 'ths time response has an invalid previous close');
+  if (parseDecimal(snapshot['6']) !== pre)
+    throw new UpstreamError('bad_response', 'ths time and realhead previous close disagree');
   const [, year, month, day] = match;
   const date = `${year}-${month}-${day}`;
   const check = new Date(`${date}T00:00:00Z`);
-  if (!Number.isFinite(check.getTime()) || check.toISOString().slice(0, 10) !== date) return [];
+  if (!Number.isFinite(check.getTime()) || check.toISOString().slice(0, 10) !== date)
+    throw new UpstreamError('bad_response', 'ths time response has an impossible date');
+  if (time.data === '') return [];
   const points = new Map<number, ThsIntradayPoint>();
   for (const raw of time.data.split(';')) {
     const [hhmm, price] = raw.split(',');
-    if (!hhmm || !/^\d{4}$/.test(hhmm) || !price) return [];
+    if (!hhmm || !/^\d{4}$/.test(hhmm) || !price)
+      throw new UpstreamError('bad_response', 'ths time response contains a malformed point');
     const hour = Number(hhmm.slice(0, 2)),
       minute = Number(hhmm.slice(2));
     const label = hour * 60 + minute;
-    if (minute > 59 || !((label >= 570 && label <= 690) || (label >= 780 && label <= 900)))
-      return [];
+    if (minute > 59 || hour > 23)
+      throw new UpstreamError('bad_response', 'ths time response contains an invalid clock label');
     const parsed = buildQuote(
       price,
       time.pre,
       date,
       shanghaiTime(year!, month!, day!, hhmm.slice(0, 2), hhmm.slice(2)),
     );
-    if (!parsed) return [];
+    if (!parsed)
+      throw new UpstreamError('bad_response', 'ths time response contains an invalid price');
+    // Valid after-session or other non-trading labels are filtered, never erase the day.
+    if (!((label >= 570 && label <= 690) || (label >= 780 && label <= 900))) continue;
     const at = parsed.time.getTime();
     const previous = points.get(at);
-    if (previous && previous.changePercent !== parsed.changePercent) return [];
+    if (previous && previous.changePercent !== parsed.changePercent)
+      throw new UpstreamError(
+        'bad_response',
+        'ths time response contains conflicting duplicate labels',
+      );
     points.set(at, { time: parsed.time, changePercent: parsed.changePercent });
   }
   const sorted = [...points.values()].sort((a, b) => a.time.getTime() - b.time.getTime());
   const last = lastMinute(time.data);
   const price = last ? parseDecimal(last.price) : null;
   const current = parseDecimal(snapshot['10']);
-  if (price === null || current === null || current <= 0n) return [];
+  if (price === null || current === null || current <= 0n)
+    throw new UpstreamError('bad_response', 'ths time response cannot validate its latest price');
   const drift = price > current ? price - current : current - price;
-  if (drift * PRICE_TOLERANCE_DIVISOR > pre) return [];
+  if (drift * PRICE_TOLERANCE_DIVISOR > pre)
+    throw new UpstreamError('bad_response', 'ths time and realhead prices disagree');
   return sorted;
 }
 

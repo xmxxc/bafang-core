@@ -87,6 +87,7 @@ export async function fetchVerifiedEtfCode(
   code: string,
   asOf: Date,
 ): Promise<boolean> {
+  if (/^1\d{5}$/.test(code)) return verifyShenzhenEtf(upstream, code, asOf);
   if (!/^5\d{5}$/.test(code)) return false;
   const url = new URL('https://query.sse.com.cn/commonSoaQuery.do');
   for (const [key, value] of Object.entries({
@@ -96,7 +97,8 @@ export async function fetchVerifiedEtfCode(
     isPagination: 'true',
     'pageHelp.pageSize': '100',
     'pageHelp.pageNo': '1',
-    subClass: '03',
+    // Empty subclass asks the official list for all ETF subclasses (01/03/etc.).
+    subClass: '',
   }))
     url.searchParams.set(key, value);
   const body = await upstream.fetchText({ url: url.href, referer: 'https://www.sse.com.cn/' });
@@ -121,13 +123,67 @@ export async function fetchVerifiedEtfCode(
     .safeParse(raw);
   if (!parsed.success || parsed.data.actionErrors.length)
     throw new UpstreamError('bad_response', 'SSE FUND_LIST protocol invalid');
-  // 03 = cross-market mainland equity ETF. Other markets/types require their own calendars.
+  const domesticStockEtfClasses = new Set(['01', '03', '08', '09', '31']);
   return (
     parsed.data.result.length === 1 &&
     parsed.data.result[0]!.fundCode === code &&
     parsed.data.result[0]!.fundType === '00' &&
-    parsed.data.result[0]!.subClass === '03' &&
+    domesticStockEtfClasses.has(parsed.data.result[0]!.subClass) &&
     validListingDate(parsed.data.result[0]!.listingDate, asOf)
+  );
+}
+
+/** 深交所基金列表：基金类别/投资类别/代码/上市日期均由交易所字段证明。 */
+async function verifyShenzhenEtf(
+  upstream: UpstreamFetcher,
+  code: string,
+  asOf: Date,
+): Promise<boolean> {
+  const url = new URL('https://www.szse.cn/api/report/ShowReport/data');
+  for (const [key, value] of Object.entries({
+    SHOWTYPE: 'JSON',
+    CATALOGID: '1105',
+    TABKEY: 'tab1',
+    PAGENO: '1',
+    txtkey1: code,
+    selectJjlb: 'ETF',
+    selectTzlb: '股票基金',
+  }))
+    url.searchParams.set(key, value);
+  const text = await upstream.fetchText({ url: url.href, referer: 'https://www.szse.cn/' });
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch {
+    throw new UpstreamError('bad_response', 'SZSE fund list is not JSON');
+  }
+  const parsed = z
+    .array(
+      z.object({
+        metadata: z.object({ catalogid: z.string(), tabkey: z.string() }),
+        data: z.array(
+          z.object({ sys_key: z.string(), jjlb: z.string(), tzlb: z.string(), ssrq: z.string() }),
+        ),
+      }),
+    )
+    .safeParse(raw);
+  if (!parsed.success) throw new UpstreamError('bad_response', 'SZSE fund list protocol invalid');
+  const tables = parsed.data.filter(
+    (table) => table.metadata.catalogid === '1105' && table.metadata.tabkey === 'tab1',
+  );
+  if (tables.length !== 1 || tables[0]!.data.length !== 1) return false;
+  const row = tables[0]!.data[0]!;
+  const identity =
+    /^<a href=['"]https?:\/\/www\.szse\.cn\/market\/trend\/index\.html\?code=(\d{6})['"]><u>(\d{6})<\/u><\/a>$/.exec(
+      row.sys_key,
+    );
+  return (
+    identity?.[1] === code &&
+    identity[2] === code &&
+    row.jjlb === 'ETF' &&
+    row.tzlb === '股票基金' &&
+    /^\d{4}-\d{2}-\d{2}$/.test(row.ssrq) &&
+    validListingDate(row.ssrq.replaceAll('-', ''), asOf)
   );
 }
 

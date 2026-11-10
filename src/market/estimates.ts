@@ -198,7 +198,12 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
             // A missing report or quote is an unavailable estimate. Upstream adapters normally
             // expose UpstreamError; defensive handling keeps a broken optional fallback isolated.
             if (error instanceof UpstreamError) {
-              console.warn('[bafang-core] calculated estimate unavailable', code, error.kind);
+              console.warn(
+                '[bafang-core] calculated estimate unavailable',
+                code,
+                error.kind,
+                error.message,
+              );
             } else {
               console.warn('[bafang-core] calculated estimate unavailable', code, String(error));
             }

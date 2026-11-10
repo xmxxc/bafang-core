@@ -265,7 +265,7 @@
               "sina",
               "calculated"
             ],
-            "description": "估值来源：tiantian 天天基金、sina 新浪财经、calculated 基于季报重仓股自算"
+            "description": "估值来源：tiantian 天天基金、sina 新浪财经、calculated 基于季报重仓股或已核实母ETF自算"
           },
           "sourceName": {
             "type": "string",
@@ -306,6 +306,14 @@
                 "type": "string",
                 "nullable": true,
                 "format": "date-time"
+              },
+              "quoteSource": {
+                "type": "string",
+                "enum": [
+                  "tencent",
+                  "ths",
+                  "mixed"
+                ]
               }
             },
             "required": [
@@ -1778,7 +1786,7 @@
           "market"
         ],
         "summary": "当日估值分时",
-        "description": "仅返回同日真实分时点推算的参考估值；盘前、休市、跨日或缺少成分点时为空，不插值补零。",
+        "description": "仅返回同日真实交易时段点推算的参考估值；正常盘后附带标签被过滤。盘前、休市、跨日或没有共同成分点时为空，不插值补零；上游损坏日期、价格、昨收冲突或非空坏协议返回502。",
         "parameters": [
           {
             "schema": {
@@ -1868,6 +1876,14 @@
                           "type": "string",
                           "nullable": true,
                           "format": "date-time"
+                        },
+                        "quoteSource": {
+                          "type": "string",
+                          "enum": [
+                            "tencent",
+                            "ths",
+                            "mixed"
+                          ]
                         }
                       },
                       "required": [

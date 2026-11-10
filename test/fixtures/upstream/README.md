@@ -147,3 +147,23 @@ The page capture is fetched evidence only; no page timestamp is used as a
 quote timestamp. Synthetic mutations in `estimates-calculated.test.ts` cover
 wrong pages, missing/duplicate/external/self links, non-ETF identity, upstream
 failure and recovery.
+
+The r3 identity extension preserves official relation pages for 001051→510050,
+110021→510130, and 110019→159901 under `eastmoney/fund-*.txt`. The Shanghai
+01-class responses are `sse/fund-510050.json` and `sse/fund-510130.json`;
+the Shenzhen fund list `szse/fund-159901.json` proves ETF identity using
+`jjlb=ETF`, `tzlb=股票基金`, `ssrq=2006-04-24`, and the exact requested code.
+The raw listing notice `szse/notice-159901.html` is supporting evidence only;
+production uses the parameterised official fund-list endpoint for any candidate
+Shenzhen code. Shanghai accepts the official domestic stock ETF subclasses
+01/03/08/09/31 documented in `sse/fund-type-protocol.txt`. A real query with
+an empty subclass parameter is preserved in `sse/fund-510050-all.json`.
+The request fund must still pass the domestic fund calendar checks; QDII and
+unproven identities remain unavailable. URL, capture window and byte hashes
+are in `estimate-r3-evidence.json`; the THS pair has separate metadata and a
+242-session-point summary under `ths/`.
+
+`ths/time-hs_510310.jsonp` and `ths/realhead-hs_510310.jsonp` are the raw
+mother-ETF pair used for the 242 valid session labels plus 15:05–15:30
+attached labels. The parser retains the session points and filters the
+post-session labels instead of treating the valid response as malformed.

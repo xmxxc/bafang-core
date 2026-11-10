@@ -13,6 +13,7 @@ const CalculationSchema = z
     disclosedWeightPercent: z.number().min(0).max(100),
     parentEtfCode: FundCodeSchema.nullable(),
     quoteTimeEnd: z.string().datetime().nullable(),
+    quoteSource: z.enum(['tencent', 'ths', 'mixed']).optional(),
   })
   .describe(
     '参考模型：重仓股报告期与披露占净值比例，或已核实母ETF。未披露资产贡献按0建模，不代表真实收益为0；估值时间为最早参与报价，quoteTimeEnd为最晚参与报价。',
@@ -35,7 +36,8 @@ const EstimateSchema = z
       }),
     time: z.string().openapi({ format: 'date-time', description: '来源给出的估值时间' }),
     source: z.enum(['tiantian', 'sina', 'calculated']).openapi({
-      description: '估值来源：tiantian 天天基金、sina 新浪财经、calculated 基于季报重仓股自算',
+      description:
+        '估值来源：tiantian 天天基金、sina 新浪财经、calculated 基于季报重仓股或已核实母ETF自算',
     }),
     sourceName: z.string().openapi({ example: '天天基金', description: '来源的展示名' }),
     fallback: z.boolean().openapi({
@@ -76,7 +78,7 @@ export const estimateIntradayRoute = createRoute({
   tags: ['market'],
   summary: '当日估值分时',
   description:
-    '仅返回同日真实分时点推算的参考估值；盘前、休市、跨日或缺少成分点时为空，不插值补零。',
+    '仅返回同日真实交易时段点推算的参考估值；正常盘后附带标签被过滤。盘前、休市、跨日或没有共同成分点时为空，不插值补零；上游损坏日期、价格、昨收冲突或非空坏协议返回502。',
   request: { params: z.object({ code: FundCodeSchema }) },
   responses: {
     200: {
