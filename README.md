@@ -142,7 +142,7 @@ docker compose up -d
 - “今日”是注入时钟的 Asia/Shanghai 日期；当天净值已公布时，`todayGain = 份额 ×（当日净值 − 上一净值）`，状态为 `confirmed`。上一净值取今日之前最近一期已公布净值，不使用上游已舍入的涨跌幅反推涨跌额。
 - 当天净值未公布时，`todayGain = 份额 × 上一净值 × 估值涨跌幅`，状态为 `estimated`。复用估值模块的日期、基准核对与回退规则；所有来源不可用、缺上一净值时，收益与收益率为 `null`、状态为 `unavailable`。
 - 周末与日历休市日的今日收益为 `unavailable`，不沿用上一交易日的确认收益。交易日盘前没有当日净值时同样为 `unavailable`，与估值接口的 `holiday` / `pre_market` 约定一致；最新净值仍用于市值与持有收益。
-- 估值模块提供的百分数先转十进制文本（含指数形式），用 bigint 定点四舍五入到 **6 位百分数小数**，再以调整 scale 的方式除以 100。`份额 × 上一净值` 保留完整 **8 位小数**，最终收益只舍入一次到 2 位。`todayGainRate = 已舍入的今日收益 ÷ previousMarketValue`，舍入到 4 位比值；分母为 0 或缺失时为 `null`。
+- 估值模块提供的百分数先转十进制文本（含指数形式），用 bigint 定点四舍五入到 **6 位百分数小数**，再以调整 scale 的方式除以 100。`份额 × 上一净值` 内部保留完整 **8 位小数**，汇总响应的 `previousMarketValue` 按金额输出 2 位，最终收益只舍入一次到 2 位。`todayGainRate = 已舍入的今日收益 ÷ previousMarketValue`，舍入到 4 位比值；分母为 0 或缺失时为 `null`。
 - `realizedGain` 是历次减仓确认累加的已实现收益；`realizedGainCost` 是对应的累计结转成本，均为 2 位小数，从 0 开始，校准、清仓与再次加仓均保留。累计收益 `totalGain = holdingGain + realizedGain`，持有收益缺失则累计收益也为 `null`。迁移 `0011` 为旧持仓补 0。
 
 | 接口                                   | 响应                                                                                                        |
@@ -154,8 +154,8 @@ docker compose up -d
 
 - 金额合计按每笔持仓已舍入的金额相加；份额与成本也相加。收益率按合计后的分子、分母重算，不平均各持仓收益率。按基金汇总沿用基金首次建仓顺序。
 - `totalAssets` 是可取得净值的市值合计；缺净值的持仓不计入总资产和持有收益，已实现收益仍全部相加；累计收益为可用持有收益合计加全部已实现收益，全部净值缺失时为 `null`，`valuationComplete: false`。`totalCost` 仍包含全部持仓；汇总持有收益率仅使用净值可用持仓的成本作分母。
-- 不可用的今日收益及其上一市值均不计入今日收益与收益率汇总，`todayGainComplete: false`。`isComplete` 仅在两个完整性字段都为 true 时为 true。汇总状态仅看可计入部分：全为估算是 `estimated`，全为确认是 `confirmed`，两者并存是 `mixed`，无可用收益是 `unavailable`。
-- 有持仓但对应数据全部缺失时，该项合计为 `null`；空持仓的金额合计为 `0.00`（上一市值 `0.00000000`）、收益率为 `null`、状态为 `unavailable`，完整性为 true。
+- 不可用的今日收益及其上一市值均不计入今日收益与收益率汇总，`todayGainComplete: false`。`isComplete` 仅在两个完整性字段都为 true 时为 true。汇总状态仅看可计入部分：全为估算是 `estimated`，全为确认是 `confirmed`，两者并存是 `mixed`，无可用收益是 `unavailable`，没有可计算的持仓是 `none`。
+- 有持仓但对应数据全部缺失时，该项合计为 `null`；空持仓的金额合计为 `0.00`（上一市值 `0.00`）、收益率为 `null`、状态为 `none`，完整性为 true。
 
 ### 加仓与交易记录
 

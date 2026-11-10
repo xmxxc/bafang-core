@@ -1,4 +1,4 @@
-import { divide, fixedFromDb, formatFixed, type Fixed } from './decimal';
+import { divide, fixedFromDb, formatFixed, rescale, type Fixed } from './decimal';
 import type { PositionView } from './service';
 
 export interface PositionSummary {
@@ -10,7 +10,7 @@ export interface PositionSummary {
   totalGain: string | null;
   todayGain: string | null;
   todayGainRate: string | null;
-  todayGainStatus: PositionView['todayGainStatus'] | 'mixed';
+  todayGainStatus: PositionView['todayGainStatus'] | 'mixed' | 'none';
   todayGainDate: string;
   previousMarketValue: string | null;
   valuationComplete: boolean;
@@ -82,9 +82,15 @@ export function summarizePositions(items: PositionView[], date: string): Positio
     todayGain: hasGain ? formatFixed(todayGain) : null,
     todayGainRate:
       previousValue.value === 0n ? null : formatFixed(divide(todayGain, previousValue, 4)),
-    todayGainStatus: statuses.size > 1 ? 'mixed' : (gains[0]?.todayGainStatus ?? 'unavailable'),
+    todayGainStatus:
+      items.length === 0
+        ? 'none'
+        : statuses.size > 1
+          ? 'mixed'
+          : (gains[0]?.todayGainStatus ?? 'unavailable'),
     todayGainDate: date,
-    previousMarketValue: hasGain ? formatFixed(previousValue) : null,
+    // Keep the full-precision denominator above for the aggregate rate, but expose amounts at 2 decimals.
+    previousMarketValue: hasGain ? formatFixed(rescale(previousValue, 2)) : null,
     valuationComplete,
     todayGainComplete,
     isComplete: valuationComplete && todayGainComplete,
