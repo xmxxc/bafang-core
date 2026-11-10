@@ -8,7 +8,10 @@ const Point = z
 const Holding = z
   .object({
     name: z.string(),
-    code: z.string().regex(/^[A-Za-z0-9]{4,10}$/),
+    code: z
+      .string()
+      .regex(/^(?!0+$)[A-Za-z0-9][A-Za-z0-9.-]*$/)
+      .describe('上游股票标识；格式不代表市场真实性，无法可靠映射时 quote 为 null'),
     weight: z.number().min(0).max(100),
     reportDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     quote: z

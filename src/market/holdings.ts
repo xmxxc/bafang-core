@@ -33,9 +33,15 @@ export function createHoldingsService(deps: {
   calendar: TradingCalendar;
 }): HoldingsService {
   const cache = new DailyCache<Report>();
-  const quotes = new Map<string, { value: ResolvedQuote; expiresAt: number; sampledAt: number }>();
+  let cachedReportDay: string | undefined;
+  const quotes = new Map<
+    string,
+    { value: ResolvedQuote; expiresAt: number; sampledAt: number; requestId: number }
+  >();
+  let lastRequestId = 0;
   return {
     async get(code) {
+      const requestId = ++lastRequestId;
       const asOf = deps.clock.now();
       const day = shanghaiDate(asOf);
       let parsed: Report | null | undefined = cache.get(day, code);
@@ -70,7 +76,11 @@ export function createHoldingsService(deps: {
             throw backupError;
           }
         }
-        cache.set(day, code, parsed);
+        // A response from yesterday may finish after today's reports have been cached.
+        if (!cachedReportDay || day >= cachedReportDay) {
+          cache.set(day, code, parsed);
+          cachedReportDay = day;
+        }
       }
       const symbols = parsed.items
         .map((i) => symbolFor(i.code))
@@ -122,12 +132,25 @@ export function createHoldingsService(deps: {
             }
           }
           const value = { quote, quoteSource: source, quoteFallback: fallback };
-          if (symbol && (quotes.get(symbol)?.sampledAt ?? 0) <= asOf.getTime())
-            quotes.set(symbol, {
-              value,
-              expiresAt: quoteExpiry(asOf, deps.calendar, quote),
-              sampledAt: asOf.getTime(),
-            });
+          if (symbol) {
+            const existing = quotes.get(symbol);
+            const previousQuote = existing?.value.quote;
+            // Prefer the newer market snapshot. Equal timestamps (or unavailable results)
+            // use request order to break millisecond ties, independent of completion order.
+            const newer =
+              quote && previousQuote && quote.time.getTime() !== previousQuote.time.getTime()
+                ? quote.time.getTime() > previousQuote.time.getTime()
+                : !existing ||
+                  asOf.getTime() > existing.sampledAt ||
+                  (asOf.getTime() === existing.sampledAt && requestId > existing.requestId);
+            if (newer)
+              quotes.set(symbol, {
+                value,
+                expiresAt: quoteExpiry(asOf, deps.calendar, quote),
+                sampledAt: asOf.getTime(),
+                requestId,
+              });
+          }
           return { ...item, ...value };
         }),
       );
@@ -165,8 +188,7 @@ function holding(
   rawWeight: string,
   reportDate: string,
 ): Report['items'][number] {
-  if (!/^[A-Za-z0-9]{4,10}$/.test(code) || /^0+$/.test(code) || !name)
-    bad('invalid holding identifier');
+  if (!/^(?!0+$)[A-Za-z0-9][A-Za-z0-9.-]*$/.test(code) || !name) bad('invalid holding identifier');
   if (!/^\d+(?:\.\d+)?%$/.test(rawWeight)) bad('holding weight missing or invalid');
   const weight = Number(rawWeight.slice(0, -1));
   if (!Number.isFinite(weight) || weight > 100) bad('holding weight out of range');

@@ -105,3 +105,22 @@ protocol-shaped mutations for error, field, date, price and time boundaries.
 They are not live upstream success captures. The original Tencent fixture is
 GBK and contains lunch-stamped snapshots at 12:05 on 2026-11-10; its prices are
 asserted at 12:06 and the same bytes must become unavailable at 14:00.
+
+### Holdings r6: original three-character stock identifier
+
+`eastmoney/holdings-040046.txt` is a verbatim copy of the review's first-party
+`evidence-r2/spec-source/040046.txt`. URL:
+https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=040046&topline=10&year=&month=&rt=1
+(F10 Referer); HTTP 200, UTF-8, captured 2026-11-10 05:52:54.056023 UTC.
+SHA256: `a5897bd2f9dedadbb941b2a0632a4c76d151f47013f875362fbe2908f123f527`.
+Metadata and independently extracted rows remain in the read-only review
+`040046-metadata.json` / `040046-extracted.json`.
+
+The latest displayed source block is dated **2022-12-08**, with ten overseas
+stocks including `PEP` / 百事 / 1.61%. This is evidence of the source's identifier
+and report contents, not a claim of current-year holdings. HTTP replay preserves
+all ten identifiers, names, weights and dates with unsupported quotes null.
+Replacing PEP with PEPX is explicitly a synthetic length control. Additional
+single-letter / punctuation-bearing identifiers and concurrent cache reports or
+quotes are synthetic boundary controls, not first-party market authenticity
+claims. Identifier syntax does not establish an exchange or supported quote.

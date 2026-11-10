@@ -320,7 +320,8 @@
           },
           "code": {
             "type": "string",
-            "pattern": "^[A-Za-z0-9]{4,10}$"
+            "pattern": "^(?!0+$)[A-Za-z0-9][A-Za-z0-9.-]*$",
+            "description": "上游股票标识；格式不代表市场真实性，无法可靠映射时 quote 为 null"
           },
           "weight": {
             "type": "number",

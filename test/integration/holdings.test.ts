@@ -26,6 +26,13 @@ function qt(symbol: string, price: string, stamp: string, previous = '100.00') {
   fields[30] = stamp;
   return `v_${symbol}="${fields.join('~')}";`;
 }
+function gate() {
+  let open!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    open = resolve;
+  });
+  return { promise, open };
+}
 class Replay implements UpstreamFetcher {
   em = script();
   sina = sina;
@@ -183,6 +190,40 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       });
     },
   );
+  it.each(['PEP', 'PEPX'])(
+    'retains %s in the real 040046 report with unavailable quotes',
+    async (code) => {
+      // PEP is verbatim source; PEPX is only a synthetic identifier-length control.
+      replay.em = fixture('eastmoney/holdings-040046.txt');
+      if (code === 'PEPX') replay.em = replay.em.replaceAll('PEP', 'PEPX');
+      const body = await get(app(), '/v1/funds/040046/holdings');
+      expect(body.reportDate).toBe('2022-12-08');
+      expect(body.items.map((item) => item.code)).toEqual([
+        'AAPL',
+        'MSFT',
+        'AMZN',
+        'NVDA',
+        'GOOG',
+        'GOOGL',
+        'TSLA',
+        code,
+        'META',
+        'AVGO',
+      ]);
+      expect(body.items[7]).toMatchObject({
+        code,
+        name: '百事',
+        weight: 1.61,
+        reportDate: '2022-12-08',
+        quote: null,
+        quoteSource: null,
+        quoteFallback: false,
+      });
+      expect(
+        body.items.every((item) => item.reportDate === '2022-12-08' && item.quote === null),
+      ).toBe(true);
+    },
+  );
   it('does not fill a shorter latest report with an older quarter', async () => {
     replay.em = script(block('2026-06-30', row('300308', '旧季独有股票')) + block());
     expect((await get()).items.map((item) => item.code)).toEqual(['600519']);
@@ -270,7 +311,7 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       quoteFallback: true,
     });
   });
-  it.each(['00700', '800001', 'AAPL'])(
+  it.each(['00700', '800001', 'AAPL', 'A', 'BRK.B', 'BRK-B'])(
     'retains unsupported-market %s with unavailable quotes',
     async (code) => {
       replay.em = script(block('2026-09-30', row(code, '未知市场', '1.00%')));
@@ -363,6 +404,218 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
     replay.stamp = '20261109140010';
     expect((await get(target)).items[0]!.quote).toMatchObject({ price: '100.00' });
   });
+  it.each([false, true])(
+    'preserves the new-day report after an old request completes late=%s',
+    async (delayed) => {
+      const started = gate(),
+        release = gate();
+      replay.now = new Date('2026-11-09T15:59:59Z');
+      replay.stamp = '20261109150000';
+      let first = true;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            if (request.url.includes('FundArchivesDatas') && first) {
+              first = false;
+              const old = replay.em;
+              started.open();
+              if (delayed) await release.promise;
+              return old;
+            }
+            return replay.fetchText(request);
+          },
+        },
+      });
+      const earlier = get(target);
+      await started.promise;
+      let oldBody: Body;
+      if (!delayed) await earlier;
+      try {
+        replay.now = new Date('2026-11-09T16:00:01Z');
+        replay.em = script(block('2026-09-30', row('300308', '次日名单')));
+        expect((await get(target)).items[0]).toMatchObject({ code: '300308', name: '次日名单' });
+      } finally {
+        release.open();
+        oldBody = await earlier;
+      }
+      expect(oldBody.items[0]).toMatchObject({ code: '600519', name: '贵州茅台' });
+      replay.emDown = true;
+      expect((await get(target)).items[0]).toMatchObject({ code: '300308', name: '次日名单' });
+    },
+  );
+  it.each(
+    [
+      [
+        'equal asOf',
+        false,
+        '100.00',
+        '20261109135900',
+        '101.00',
+        '20261109140000',
+        '2026-11-09T06:00:00.000Z',
+      ],
+      [
+        'different asOf',
+        true,
+        '100.00',
+        '20261109135900',
+        '101.00',
+        '20261109140001',
+        '2026-11-09T06:00:01.000Z',
+      ],
+      [
+        'equal snapshot time',
+        false,
+        '100.00',
+        '20261109140000',
+        '101.00',
+        '20261109140000',
+        '2026-11-09T06:00:00.000Z',
+      ],
+      [
+        'first request newer snapshot',
+        false,
+        '101.00',
+        '20261109140000',
+        '100.00',
+        '20261109135900',
+        '2026-11-09T06:00:00.000Z',
+      ],
+      [
+        'later asOf older snapshot',
+        true,
+        '101.00',
+        '20261109140000',
+        '100.00',
+        '20261109135900',
+        '2026-11-09T06:00:00.000Z',
+      ],
+    ].flatMap(([label, advance, aPrice, aStamp, bPrice, bStamp, expectedTime]) =>
+      [true, false].map((firstFinishesLast) => ({
+        label,
+        advance,
+        aPrice: String(aPrice),
+        aStamp: String(aStamp),
+        bPrice: String(bPrice),
+        bStamp: String(bStamp),
+        expectedTime,
+        firstFinishesLast,
+      })),
+    ),
+  )(
+    'keeps the newest quote for $label, first finishes last=$firstFinishesLast',
+    async ({ advance, aPrice, aStamp, bPrice, bStamp, expectedTime, firstFinishesLast }) => {
+      const aStarted = gate(),
+        bStarted = gate(),
+        aRelease = gate(),
+        bRelease = gate();
+      let first = true;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            if (request.url.includes('qt.gtimg.cn')) {
+              if (first) {
+                first = false;
+                aStarted.open();
+                await aRelease.promise;
+                return qt('sh600519', aPrice, aStamp);
+              }
+              bStarted.open();
+              await bRelease.promise;
+              return qt('sh600519', bPrice, bStamp);
+            }
+            return replay.fetchText(request);
+          },
+        },
+      });
+      const a = get(target);
+      await aStarted.promise;
+      if (advance) replay.now = new Date('2026-11-09T06:00:01Z');
+      const b = get(target);
+      await bStarted.promise;
+      try {
+        if (firstFinishesLast) {
+          bRelease.open();
+          await b;
+          aRelease.open();
+        } else {
+          aRelease.open();
+          await a;
+          bRelease.open();
+        }
+      } finally {
+        aRelease.open();
+        bRelease.open();
+      }
+      const [aBody, bBody] = await Promise.all([a, b]);
+      expect(aBody.items[0]!.quote).toMatchObject({ price: aPrice });
+      expect(bBody.items[0]!.quote).toMatchObject({ price: bPrice });
+      expect((await get(target)).items[0]!.quote).toMatchObject({
+        price: '101.00',
+        quoteTime: expectedTime,
+      });
+    },
+  );
+  it.each([true, false])(
+    'keeps newer unavailable snapshots with short TTL, first finishes last=%s',
+    async (firstFinishesLast) => {
+      const aStarted = gate(),
+        bStarted = gate(),
+        aRelease = gate(),
+        bRelease = gate();
+      let first = true,
+        recovered = false;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            if (request.url.includes('qt.gtimg.cn')) {
+              if (first) {
+                first = false;
+                aStarted.open();
+                await aRelease.promise;
+                return qt('sh600519', '100.00', '20261109135900');
+              }
+              if (!recovered) {
+                bStarted.open();
+                await bRelease.promise;
+                return 'v_sh600519="";';
+              }
+            }
+            return replay.fetchText(request);
+          },
+        },
+      });
+      const a = get(target);
+      await aStarted.promise;
+      const b = get(target);
+      await bStarted.promise;
+      try {
+        if (firstFinishesLast) {
+          bRelease.open();
+          await b;
+          aRelease.open();
+        } else {
+          aRelease.open();
+          await a;
+          bRelease.open();
+        }
+      } finally {
+        aRelease.open();
+        bRelease.open();
+      }
+      const [aBody, bBody] = await Promise.all([a, b]);
+      expect(aBody.items[0]!.quote).toMatchObject({ price: '100.00', changePercent: 0 });
+      expect(bBody.items[0]!.quote).toBeNull();
+      expect((await get(target)).items[0]!.quote).toBeNull();
+      recovered = true;
+      replay.now = new Date('2026-11-09T06:00:10Z');
+      replay.stamp = '20261109140010';
+      expect((await get(target)).items[0]!.quote).toMatchObject({
+        price: '100.00',
+        changePercent: 0,
+      });
+    },
+  );
   it('keeps overlapping requests from reusing a quote from a later asOf', async () => {
     let start!: () => void;
     let release!: () => void;
@@ -445,6 +698,9 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
     ['excessive weight', script(block('2026-09-30', row('600519', '贵州茅台', '101%')))],
     ['missing weight', script(block('2026-09-30', row('600519', '贵州茅台', '')))],
     ['missing code', script(block('2026-09-30', row('', '贵州茅台')))],
+    ['invalid code punctuation', script(block('2026-09-30', row('PE@P')))],
+    ['blank code', script(block('2026-09-30', row(' ')))],
+    ['punctuation-only code', script(block('2026-09-30', row('.')))],
     ['fabricated zero code', script(block('2026-09-30', row('000000')))],
     ['invalid columns', script(block().replace('股票代码', '债券代码'))],
   ])('rejects %s without poisoning the report cache', async (_name, invalid) => {
