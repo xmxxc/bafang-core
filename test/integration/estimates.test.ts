@@ -254,6 +254,88 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
   });
 
   describe('estimate base check', () => {
+    it.each([null, '', '--', '未知类型'])(
+      'does not infer a calendar from unknown fund type %s',
+      async (type) => {
+        const replay = samples();
+        upstream.use((url) => {
+          if (url.hostname === 'fundmobapi.eastmoney.com') {
+            const body = JSON.parse(sample('eastmoney/base-000001.json')) as {
+              Datas: { FTYPE: string | null };
+            };
+            body.Datas.FTYPE = type;
+            return JSON.stringify(body);
+          }
+          return replay(url);
+        });
+        expect((await get(app(), '000001')).items).toEqual([
+          { code: '000001', status: 'unavailable', estimate: null },
+        ]);
+      },
+    );
+
+    it('does not infer a QDII calendar even when the published base matches', async () => {
+      upstream.use(
+        samples({
+          sina: () =>
+            'var hq_str_fu_040046="华安纳斯达克100,15:31:00,7.3714,7.3159,7.3159,0,0.7583,2026-11-06,7.3159,0";',
+        }),
+      );
+      expect((await get(app(), '040046')).items).toEqual([
+        { code: '040046', status: 'unavailable', estimate: null },
+      ]);
+    });
+
+    it('returns unavailable when fund metadata cannot establish a calendar', async () => {
+      const replay = samples();
+      upstream.use((url) =>
+        url.hostname === 'fundmobapi.eastmoney.com'
+          ? new UpstreamError('timeout', 'metadata unavailable')
+          : replay(url),
+      );
+      expect((await get(app(), '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+    });
+
+    it('uses the domestic holiday calendar when checking the previous trading day', async () => {
+      clock.set('2026-11-09T02:00:00.000Z');
+      upstream.use(
+        samples({
+          tiantian: tiantianWith('110020', { GZTIME: '2026-11-09 10:00' }),
+          nav: () =>
+            JSON.stringify({
+              Data: {
+                LSJZList: [{ FSRQ: '2026-11-05', DWJZ: '1.7030', LJJZ: '1.7030', JZZZL: '0' }],
+              },
+              ErrCode: 0,
+            }),
+        }),
+      );
+      const body = await get(
+        app({ tradingCalendar: new ChineseTradingCalendar(['2026-11-06']) }),
+        '110020',
+      );
+      expect(body.items[0]?.status).toBe('estimated');
+      expect(body.items[0]?.estimate?.time).toBe('2026-11-09T02:00:00.000Z');
+    });
+
+    it('rejects a matching but unsettled intermediate trading day base', async () => {
+      clock.set('2026-11-09T07:35:00.000Z');
+      upstream.use(
+        samples({
+          tiantian: tiantianWith('110020', { GZTIME: '2026-11-09 15:31' }),
+          sina: () =>
+            'var hq_str_fu_040046="华安纳斯达克100,15:31:00,7.3714,7.3159,7.3159,0,0.7583,2026-11-09,7.3159,0";',
+        }),
+      );
+      const body = await get(app(), '110020,040046');
+      expect(body.items).toEqual([
+        { code: '110020', status: 'unavailable', estimate: null },
+        { code: '040046', status: 'unavailable', estimate: null },
+      ]);
+    });
+
     it('marks a QDII estimate unavailable when its base NAV is older than the latest published NAV', async () => {
       // Recorded 2026-11-06: Tiantian has no estimate for 040046; Sina's line estimates on base
       // 7.8140, which is the 11-04 NAV, while the 11-05 NAV 7.3159 is already published.
@@ -453,6 +535,71 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
   });
 
   describe('caching', () => {
+    it('rejects the old base after crossing into the next trading day, then accepts the updated base', async () => {
+      const target = app();
+      clock.set('2026-11-06T08:30:00.000Z');
+      expect((await get(target, '000001')).items[0]?.estimate).toEqual(SINA_000001);
+
+      clock.set('2026-11-09T07:35:00.000Z');
+      let base = '1.0000';
+      upstream.use(
+        samples({
+          sina: () =>
+            `var hq_str_fu_000001="华夏成长混合,15:31:00,1.0200,${base},1.0100,0,1,2026-11-09,1.0100,0";`,
+          nav: () => {
+            const body = JSON.parse(sample('eastmoney/nav-000001-latest.json')) as {
+              Data: { LSJZList: { DWJZ: string; FSRQ: string }[] };
+            };
+            Object.assign(body.Data.LSJZList[0]!, { DWJZ: '1.0100', FSRQ: '2026-11-06' });
+            return JSON.stringify(body);
+          },
+        }),
+      );
+      expect((await get(target, '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+      base = '1.0100';
+      clock.set('2026-11-09T07:35:30.000Z');
+      const body = await get(target, '000001');
+      expect(body.items[0]?.status).toBe('estimated');
+      expect(body.items[0]?.estimate?.time).toBe('2026-11-09T07:31:00.000Z');
+    });
+
+    it('does not serve a cached closing estimate when the current NAV can no longer be verified', async () => {
+      const target = app();
+      clock.set('2026-11-06T08:30:00.000Z');
+      expect((await get(target, '000001')).items[0]?.estimate).toEqual(SINA_000001);
+      upstream.use(upstreamDown());
+      clock.set('2026-11-06T11:05:00.000Z');
+      expect((await get(target, '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+    });
+
+    it('rechecks the published NAV before serving a cached closing estimate', async () => {
+      const target = app();
+      clock.set('2026-11-06T08:30:00.000Z');
+      expect((await get(target, '000001')).items[0]?.estimate).toEqual(SINA_000001);
+
+      // At 19:00 the NAV cache changes its publication window. A corrected previous NAV
+      // now disagrees with the cached source base, although the closing estimate TTL is valid.
+      clock.set('2026-11-06T11:05:00.000Z');
+      upstream.use(
+        samples({
+          nav: () => {
+            const body = JSON.parse(sample('eastmoney/nav-000001-latest.json')) as {
+              Data: { LSJZList: { DWJZ: string }[] };
+            };
+            body.Data.LSJZList[0]!.DWJZ = '1.0100';
+            return JSON.stringify(body);
+          },
+        }),
+      );
+      expect((await get(target, '000001')).items).toEqual([
+        { code: '000001', status: 'unavailable', estimate: null },
+      ]);
+    });
+
     it('caches estimates for seconds during trading hours', async () => {
       const target = app();
       expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
@@ -487,7 +634,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       clock.set('2026-11-06T08:30:00.000Z'); // Friday 16:30
       expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
 
-      upstream.use(upstreamDown());
+      upstream.use(samples({ tiantian: upstreamDown(), sina: upstreamDown() }));
       clock.set('2026-11-06T15:59:59.000Z'); // Friday 23:59:59 — hours later, still cached
       expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
 

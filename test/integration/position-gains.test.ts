@@ -112,6 +112,32 @@ describe('今日收益与持仓汇总（HTTP）', () => {
     return (await response.json()) as PositionView;
   }
 
+  it('keeps QDII today gains unavailable while an intermediate trading day is unsettled', async () => {
+    now = new Date('2026-11-09T07:35:00Z');
+    app = makeApp((url) => {
+      if (url.hostname === 'hq.sinajs.cn') {
+        return 'var hq_str_fu_040046="华安纳斯达克100,15:31:00,7.3714,7.3159,7.3159,0,0.7583,2026-11-09,7.3159,0";';
+      }
+      return replay(url);
+    });
+    const headers = await login();
+    const [channel] = await channels(headers);
+    const position = await create(headers, channel!.id, '040046');
+    expect(position).toMatchObject({
+      navDate: '2026-11-05',
+      todayGain: null,
+      todayGainRate: null,
+      todayGainStatus: 'unavailable',
+      todayGainDate: '2026-11-09',
+    });
+    const detail = await app.request(`/v1/positions/${position.id}`, { headers });
+    expect(detail.status).toBe(200);
+    expect(await detail.json()).toMatchObject({ todayGain: null, todayGainStatus: 'unavailable' });
+    const summary = await app.request('/v1/positions/summary', { headers });
+    expect(summary.status).toBe(200);
+    expect(await summary.json()).toMatchObject({ todayGain: null });
+  });
+
   it('returns estimated gain and rate before today’s NAV is published', async () => {
     const headers = await login();
     const [channel] = await channels(headers);

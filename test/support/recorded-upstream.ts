@@ -180,5 +180,6 @@ export function estimateSamples(
     'fundcomapi.tiantianfunds.com': overrides.tiantian ?? tiantianSamples(),
     'hq.sinajs.cn': overrides.sina ?? sinaSamples(),
     'api.fund.eastmoney.com': overrides.nav ?? eastmoneySamples,
+    'fundmobapi.eastmoney.com': eastmoneySamples,
   });
 }
