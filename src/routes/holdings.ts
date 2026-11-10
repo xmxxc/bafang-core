@@ -8,8 +8,8 @@ const Point = z
 const Holding = z
   .object({
     name: z.string(),
-    code: z.string().regex(/^\d{6}$/),
-    weight: z.number().nullable(),
+    code: z.string().regex(/^[A-Za-z0-9]{4,10}$/),
+    weight: z.number().min(0).max(100),
     reportDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
     quote: z
       .object({
@@ -32,6 +32,10 @@ export const fundHoldingsRoute = createRoute({
   summary: '基金前十大重仓股',
   request: { params: z.object({ code: FundCodeSchema }) },
   responses: {
+    400: {
+      description: '参数不合法',
+      content: { 'application/json': { schema: ErrorResponseSchema } },
+    },
     200: {
       description: '最新季报前十大重仓股',
       content: {
@@ -43,7 +47,7 @@ export const fundHoldingsRoute = createRoute({
       },
     },
     404: {
-      description: '无有效季报',
+      description: '上游成功确认无股票季报（空内容及空报告年份列表）',
       content: { 'application/json': { schema: ErrorResponseSchema } },
     },
     429: { description: '限流', content: { 'application/json': { schema: ErrorResponseSchema } } },

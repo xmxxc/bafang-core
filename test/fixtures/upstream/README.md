@@ -62,3 +62,46 @@
 | `eastmoney/holdings-000001.json` | `https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=000001&topline=10&year=&month=&rt=1`，Referer `https://fundf10.eastmoney.com/`     | 东方财富 F10 原始脚本响应；`content` 内 HTML 表格，截止日 `2026-09-30`，表格列含股票代码、股票名称、占净值比例                                                         |
 | `tencent/holdings-000001.txt`    | `https://qt.gtimg.cn/q=sz300308,sz002371,sh600519`，Referer `https://gu.qq.com/`                                                                        | 腾讯原始报价响应；`v_<symbol>` 行，价格/昨收/时间字段沿用 `src/market/tencent.ts`                                                                                      |
 | `sina/holdings-000001.json`      | `https://stock.finance.sina.com.cn/fundInfo/api/openapi.php/FdFundService.getTopHold?format=json&symbol=000001`，Referer `https://finance.sina.com.cn/` | 采集时返回 `result.status.code=0` 且 `result.data=[]`（部分请求超时）；该文件保留为真实空响应证据。未取得可证明的股票行字段，core 不将资产配置或合成边界数据当作重仓股 |
+
+| `sina/holdings-000001-success.json` | 同一新浪 `FdFundService.getTopHold` URL 的真实非空响应（审查采集 2026-11-10） | `result.data.heavy_stock`，真实返回 5 只股票；`zcpz` 为资产配置，解析器不混用 |
+| `ths/realhead-sz_300308-holdings.jsonp` / `ths/time-sz_300308-holdings.jsonp` | 同花顺 `realhead/time/sz_300308/last.js` 真实 pair | 真实深市股票备用报价回放 |
+
+### Holdings r5 evidence and boundary cases
+
+The following files are verbatim copies of the independent review's first-party
+captures, under `docs/agents/work/ai-coding/p1-core/reports/6-review/evidence-r1/`
+in the main checkout (capture metadata: `official-fetch.json`,
+`official-fetch-second.json`, `official-fetch-hk.json`):
+
+- `sina/holdings-000001-page.txt`: decoded UTF-8 official page,
+  https://finance.sina.com.cn/fund/quotes/000001/bc.shtml,
+  captured 2026-11-10 05:11:56 UTC (`sina-page-utf8.txt`). Its
+  `sdzc_blk` / `fund_sdzc_table` contains ten stocks and a quarter date;
+  the separately preserved JSON API contains only five and is not the full fallback.
+- `eastmoney/holdings-005827.txt`, `eastmoney/holdings-110011.txt`:
+  https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=005827&topline=10&year=&month=&rt=1
+  (respectively `code=110011`), captured 2026-11-10 05:14:29 UTC.
+  Each raw script contains several quarters, including five-digit HK stock codes.
+- `ths/realhead-hs_600519-holdings.jsonp` and
+  `ths/time-hs_600519-holdings.jsonp`: original official
+  https://d.10jqka.com.cn/v6/realhead/hs_600519/last.js and
+  https://d.10jqka.com.cn/v6/time/hs_600519/last.js, captured
+  2026-11-10 05:11:08 / 05:11:11 UTC. Along with the previously copied
+  `sz_300308` pair, tests replay these at 13:12 Shanghai and again at 14:00
+  to verify fresh fallback and stale rejection with the same raw bytes.
+
+`eastmoney/holdings-000009-empty.txt` was captured in this implementation
+session on 2026-11-10 UTC using the production `HttpUpstreamFetcher`, URL
+https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=000009&topline=10&year=&month=&rt=1
+and the F10 Referer. The successful response is exactly
+`var apidata={ content:"",arryear:[],curyear:2026};`.
+A second request for 000198 independently returned the same successful empty
+shape. This recognized protocol means no available stock report (404), not a
+transport or parsing failure (502). A plain curl request first returned 404;
+that transport error was not used as evidence of an empty report.
+
+Inline HTML/script/quote builders in `holdings.test.ts` are **synthetic**,
+protocol-shaped mutations for error, field, date, price and time boundaries.
+They are not live upstream success captures. The original Tencent fixture is
+GBK and contains lunch-stamped snapshots at 12:05 on 2026-11-10; its prices are
+asserted at 12:06 and the same bytes must become unavailable at 14:00.

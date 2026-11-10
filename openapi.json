@@ -320,11 +320,12 @@
           },
           "code": {
             "type": "string",
-            "pattern": "^\\d{6}$"
+            "pattern": "^[A-Za-z0-9]{4,10}$"
           },
           "weight": {
             "type": "number",
-            "nullable": true
+            "minimum": 0,
+            "maximum": 100
           },
           "reportDate": {
             "type": "string",
@@ -1759,8 +1760,18 @@
               }
             }
           },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "无有效季报",
+            "description": "上游成功确认无股票季报（空内容及空报告年份列表）",
             "content": {
               "application/json": {
                 "schema": {
