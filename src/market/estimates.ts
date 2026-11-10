@@ -1,4 +1,4 @@
-import { shanghaiDate, type Clock } from '../clock';
+import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { TradingCalendar } from '../trading-calendar';
 import {
   fetchSinaEstimates,
@@ -327,6 +327,8 @@ function baseVerifier(
         const previousDate = calendar ? previousTradingDate(date, calendar) : null;
         const expected = previousDate ? await expectedBase(code, date) : null;
         const matches =
+          calendar !== null &&
+          sourceUsable(source.time, asOf, calendar) &&
           expected !== null &&
           expected.date === previousDate &&
           formatNav(expected.unitNav) === source.base.unitNav &&
@@ -338,6 +340,32 @@ function baseVerifier(
     for (const [code, source] of checked) if (source) accepted.set(code, source);
     return accepted;
   };
+}
+
+/**
+ * 来源估值必须能在固定请求时刻成立：不能来自未来、盘前或休市；盘中沿用行情的
+ * 五分钟预算，午休允许沿用 11:30 的午前快照，收盘后保留已完成的收盘点。
+ */
+function sourceUsable(sourceTime: Date, asOf: Date, calendar: TradingCalendar): boolean {
+  if (
+    sourceTime.getTime() > asOf.getTime() ||
+    shanghaiDate(sourceTime) !== shanghaiDate(asOf) ||
+    !calendar.isTradingDay(asOf)
+  )
+    return false;
+  const sourceMinute = shanghaiMinutesOfDay(sourceTime);
+  const requestMinute = shanghaiMinutesOfDay(asOf);
+  if (sourceMinute < 570) return false;
+  // A source may timestamp a closing estimate after 15:00, but only after the request has closed.
+  if (requestMinute < 900 && sourceMinute > 900) return false;
+  const lunch = requestMinute >= 690 && requestMinute < 780;
+  if (requestMinute >= 570 && requestMinute < 900) {
+    const target = lunch
+      ? new Date(`${shanghaiDate(asOf)}T11:30:00+08:00`).getTime()
+      : asOf.getTime();
+    return target - sourceTime.getTime() <= 5 * 60_000;
+  }
+  return true;
 }
 
 /** 只在有可靠日历且能找到前一个交易日时接受估值。 */

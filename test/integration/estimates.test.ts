@@ -41,7 +41,7 @@ const mustNotFetch: Replay = (url) => {
  * 看不出估值用的基准。盘中时这两项是上一期净值，这里按录制的东方财富净值历史把它还原成盘中的样子
  * （2026-11-05 的单位净值 1.7030），作为一级成功的默认回放。
  */
-const INTRADAY_110020 = { PDATE: '2026-11-05', NAV: 1.703 };
+const INTRADAY_110020 = { PDATE: '2026-11-05', NAV: 1.703, GZTIME: '2026-11-06 10:00' };
 
 /** 在盘中样子的天天基金样本上，改写某只基金的字段。 */
 function tiantianWith(code: string, patch: Record<string, unknown>): Replay {
@@ -64,7 +64,7 @@ function tiantianFrom(code: string, patch: Record<string, unknown>, intraday: bo
               NAV: 1,
               GSZ: 0.9843,
               GSZZL: -1.5738,
-              GZTIME: '2026-11-06 16:02',
+              GZTIME: '2026-11-06 10:00',
             }
           : row;
     return row.FCODE === code ? { ...base, ...patch } : base;
@@ -81,7 +81,7 @@ function samples(overrides: Parameters<typeof estimateSamples>[0] = {}): Replay 
 const TIANTIAN_110020 = {
   changePercent: -1.44,
   value: '1.6785',
-  time: '2026-11-06T07:00:00.000Z',
+  time: '2026-11-06T02:00:00.000Z',
   source: 'tiantian',
   sourceName: '天天基金',
   fallback: false,
@@ -90,7 +90,7 @@ const TIANTIAN_110020 = {
 const TIANTIAN_000001 = {
   changePercent: -1.5738,
   value: '0.9843',
-  time: '2026-11-06T08:02:00.000Z',
+  time: '2026-11-06T02:00:00.000Z',
   source: 'tiantian',
   sourceName: '天天基金',
   fallback: false,
@@ -225,6 +225,24 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       upstream.use(samples({ tiantian: tiantianWith('110020', { GSZZL: 0 }) }));
       const body = await get(app(), '110020');
       expect(body.items[0]?.estimate).toMatchObject({ source: 'tiantian', changePercent: 0 });
+    });
+
+    it('rejects a future Tiantian estimate at a fixed 10:00 request time', async () => {
+      upstream.use(samples({ tiantian: tiantianWith('110020', { GZTIME: '2026-11-06 14:00' }) }));
+      const body = await get(app(), '110020');
+      expect(body.items).toEqual([{ code: '110020', status: 'unavailable', estimate: null }]);
+    });
+
+    it('rejects a future Sina estimate at a fixed 10:00 request time', async () => {
+      upstream.use(
+        samples({
+          tiantian: upstreamDown(),
+          sina: () =>
+            'var hq_str_fu_000001="华夏成长混合A,14:00:00,0.9843,1.0000,3.5730,0,-1.5738,2026-11-06,0.9805,-1.9459";',
+        }),
+      );
+      const body = await get(app(), '000001');
+      expect(body.items).toEqual([{ code: '000001', status: 'unavailable', estimate: null }]);
     });
   });
 
@@ -570,6 +588,7 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
     });
 
     it('serves estimates during the lunch break', async () => {
+      upstream.use(samples({ tiantian: tiantianWith('110020', { GZTIME: '2026-11-06 11:30' }) }));
       clock.set('2026-11-06T04:00:00.000Z'); // 12:00
       const body = await get(app(), '110020');
       expect(body.marketStatus).toBe('trading');
@@ -689,12 +708,14 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
 
     it('keeps the closing estimate after the close, across midnight, until the next open', async () => {
       const target = app();
+      upstream.use(samples({ tiantian: tiantianWith('110020', { GZTIME: '2026-11-06 15:00' }) }));
+      const closingEstimate = { ...TIANTIAN_110020, time: '2026-11-06T07:00:00.000Z' };
       clock.set('2026-11-06T08:30:00.000Z'); // Friday 16:30
-      expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
+      expect((await get(target, '110020')).items[0]?.estimate).toEqual(closingEstimate);
 
       upstream.use(samples({ tiantian: upstreamDown(), sina: upstreamDown() }));
       clock.set('2026-11-06T15:59:59.000Z'); // Friday 23:59:59 — hours later, still cached
-      expect((await get(target, '110020')).items[0]?.estimate).toEqual(TIANTIAN_110020);
+      expect((await get(target, '110020')).items[0]?.estimate).toEqual(closingEstimate);
 
       clock.set('2026-11-06T16:00:30.000Z'); // Saturday 00:00:30 — weekend, no estimate
       expect((await get(target, '110020')).items[0]?.status).toBe('holiday');
