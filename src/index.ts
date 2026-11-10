@@ -1,4 +1,5 @@
 import { serve } from '@hono/node-server';
+import { installShutdownHandlers } from './shutdown';
 import { createApp } from './app';
 import { createDb, createHealthProbe, createPool } from './db';
 import { loadConfig, parseSettlementRunMinutes, toDbConfig } from './config';
@@ -36,15 +37,8 @@ const stopSettlementScheduler = app.settlementJob
     )
   : () => undefined;
 
-serve({ fetch: app.fetch, port: config.PORT }, (info) => {
+const server = serve({ fetch: app.fetch, port: config.PORT }, (info) => {
   console.log(`bafang-core listening on http://localhost:${info.port}`);
 });
 
-process.once('SIGTERM', () => {
-  stopSettlementScheduler();
-  void pool.end();
-});
-process.once('SIGINT', () => {
-  stopSettlementScheduler();
-  void pool.end();
-});
+installShutdownHandlers(server, stopSettlementScheduler, pool);
