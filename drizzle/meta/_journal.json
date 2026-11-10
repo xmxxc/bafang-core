@@ -85,6 +85,13 @@
       "when": 1794127540626,
       "tag": "0011_tiny_exiles",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1794127540627,
+      "tag": "0012_youthful_the_stranger",
+      "breakpoints": true
     }
   ]
 }

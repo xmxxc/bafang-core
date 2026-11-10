@@ -28,6 +28,8 @@ const EnvSchema = z.object({
   GITHUB_LOGIN_REDIRECT_URL: z.string().optional(),
   WECHAT_APP_ID: z.string().optional(),
   WECHAT_APP_SECRET: z.string().optional(),
+  /** 扫码登录票据有效秒数，默认 5 分钟。 */
+  WECHAT_QR_TTL_SECONDS: z.coerce.number().int().min(60).max(600).default(300),
   /** 绑定码 HMAC；仅明确 development/test 环境允许开发默认值。 */
   BIND_CODE_SECRET: z.string().optional(),
 });

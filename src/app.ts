@@ -1,3 +1,10 @@
+import {
+  createQrLoginService,
+  QR_BROWSER_COOKIE,
+  QR_TICKET_TTL_MS,
+  QR_BROWSER_GRACE_MS,
+} from './auth/qr-login';
+import type { WeChatQrCode } from './auth/wechat-qr';
 import { OpenAPIHono } from '@hono/zod-openapi';
 import { setCookie, getCookie, deleteCookie } from 'hono/cookie';
 import { HTTPException } from 'hono/http-exception';
@@ -17,6 +24,9 @@ import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
 import { marketIndicesRoute } from './routes/market-indices';
 import {
+  qrStartRoute,
+  qrPollRoute,
+  qrConfirmRoute,
   emailCodeRequestRoute,
   emailLoginRoute,
   logoutRoute,
@@ -38,6 +48,9 @@ import { marketStatus } from './market/status';
 import { createIndexService } from './market/indices';
 import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
 import {
+  QR_TICKET_CREATE_RATE_LIMIT,
+  QR_TICKET_POLL_IP_RATE_LIMIT,
+  QR_TICKET_POLL_RATE_LIMIT,
   ANONYMOUS_MARKET_RATE_LIMIT,
   EMAIL_CODE_REQUEST_RATE_LIMIT,
   EMAIL_LOGIN_RATE_LIMIT,
@@ -105,6 +118,10 @@ export interface AppDeps {
   github?: GitHubLogin;
   /** 微信 code2session 适配器；测试时替换为假实现。 */
   wechat?: WeChatCode2Session;
+  /** 小程序码适配器；测试可替换为假图片或假 HTTP 出口。 */
+  wechatQr?: WeChatQrCode;
+  /** 扫码票据有效毫秒数，默认 5 分钟。 */
+  qrTicketTtlMs?: number;
   /** 绑定码 HMAC 密钥；生产环境应显式配置。 */
   bindCodeSecret?: string;
   /** 测试替换绑定码随机出口。 */
@@ -123,6 +140,8 @@ export interface ResolvedDeps {
   mailer: Mailer;
   github: GitHubLogin | undefined;
   wechat: WeChatCode2Session | undefined;
+  wechatQr: WeChatQrCode | undefined;
+  qrTicketTtlMs: number;
   bindCodeSecret: string | undefined;
   clock: Clock;
   tradingCalendar: TradingCalendar;
@@ -151,6 +170,8 @@ export function resolveDeps(deps: AppDeps = {}): ResolvedDeps {
     database: deps.database,
     github: deps.github,
     wechat: deps.wechat,
+    wechatQr: deps.wechatQr,
+    qrTicketTtlMs: deps.qrTicketTtlMs ?? QR_TICKET_TTL_MS,
     bindCodeSecret,
     mailer: deps.mailer ?? new MissingMailer(),
     clock: deps.clock ?? new SystemClock(),
@@ -187,6 +208,13 @@ export function createApp(deps: AppDeps = {}): App {
     description: '小程序会话令牌',
   });
 
+  app.openAPIRegistry.registerComponent('securitySchemes', 'QrBrowserCookie', {
+    type: 'apiKey',
+    in: 'cookie',
+    name: QR_BROWSER_COOKIE,
+    description: '申请扫码登录票据时设置的临时浏览器凭据',
+  });
+
   app.openapi(healthRoute, async (c) => {
     const connected = resolved.db ? await resolved.db.ping() : false;
     if (!connected) {
@@ -194,7 +222,7 @@ export function createApp(deps: AppDeps = {}): App {
     }
     return c.json(
       {
-        status: 'ok',
+        status: 'ok' as const,
         database: { connected: true },
         time: resolved.clock.now().toISOString(),
       },
@@ -448,6 +476,80 @@ export function createApp(deps: AppDeps = {}): App {
     const { email, code } = (await c.req.json()) as { email: string; code: string };
     const linked = await auth.associateEmail(getAuth(c).userId, email, code);
     return c.json({ type: linked.type, externalId: linked.externalId }, 200);
+  });
+
+  const qr =
+    resolved.database && resolved.wechatQr
+      ? createQrLoginService({
+          db: resolved.database,
+          clock: resolved.clock,
+          qr: resolved.wechatQr,
+          ttlMs: resolved.qrTicketTtlMs,
+        })
+      : null;
+  app.use('/v1/auth/wechat/qr*', async (c, next) => {
+    c.header('Cache-Control', 'no-store');
+    c.header('Referrer-Policy', 'no-referrer');
+    await next();
+  });
+  app.use('/v1/auth/wechat/qr', rateLimit(QR_TICKET_CREATE_RATE_LIMIT, resolved.clock));
+  app.openapi(qrStartRoute, async (c) => {
+    if (!resolved.wechatQr)
+      return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
+    if (!qr) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const result = await qr.start();
+    setCookie(c, QR_BROWSER_COOKIE, result.browser, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax',
+      path: '/',
+      maxAge: (resolved.qrTicketTtlMs + QR_BROWSER_GRACE_MS) / 1000,
+      expires: new Date(result.expiresAt.getTime() + QR_BROWSER_GRACE_MS),
+    });
+    return c.json(
+      { ticketId: result.ticketId, expiresAt: result.expiresAt.toISOString(), image: result.image },
+      201,
+    );
+  });
+  app.use('/v1/auth/wechat/qr/:ticketId', rateLimit(QR_TICKET_POLL_IP_RATE_LIMIT, resolved.clock));
+  app.use(
+    '/v1/auth/wechat/qr/:ticketId',
+    rateLimit(QR_TICKET_POLL_RATE_LIMIT, resolved.clock, (c) => c.req.param('ticketId')!),
+  );
+  app.openapi(qrPollRoute, async (c) => {
+    if (!resolved.wechatQr)
+      return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
+    if (!qr) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const result = await qr.poll(c.req.valid('param').ticketId, getCookie(c, QR_BROWSER_COOKIE));
+    if (result.status !== 'confirmed') return c.json(result, 200);
+    setSessionCookie(c, result.token, result.expiresAt);
+    return c.json(
+      {
+        status: 'confirmed' as const,
+        user: { id: result.userId },
+        session: { device: 'web' as const, expiresAt: result.expiresAt.toISOString() },
+        token: null,
+      },
+      200,
+    );
+  });
+
+  app.use(
+    '/v1/auth/wechat/qr/:ticketId/confirm',
+    rateLimit(WECHAT_LOGIN_RATE_LIMIT, resolved.clock),
+  );
+  app.openapi(qrConfirmRoute, async (c) => {
+    if (!resolved.wechatQr)
+      return c.json(errorBody('wechat_not_configured', '微信登录未配置'), 503);
+    if (!qr || !auth) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const header = c.req.header('Authorization');
+    const session = header?.startsWith('Bearer ')
+      ? await auth.authenticate(header.slice(7).trim())
+      : null;
+    if (!session) return c.json(errorBody('unauthorized', '需要有效的小程序 Bearer 会话'), 401);
+    if (session.device !== 'miniprogram')
+      return c.json(errorBody('qr_miniprogram_required', '需要小程序会话'), 403);
+    return c.json(await qr.confirm(c.req.valid('param').ticketId, session), 200);
   });
 
   app.use('/v1/auth/wechat/login', async (c, next) => {

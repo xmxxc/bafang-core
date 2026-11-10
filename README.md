@@ -255,3 +255,13 @@ A 股与港股的交易日历都由 core 自己维护：特殊日期按市场、
 | `pnpm openapi:generate`             | 重新生成 `openapi.json`    |
 | `pnpm openapi:check`                | 检查 `openapi.json` 未漂移 |
 | `docker compose up -d`              | 起本地开发数据库           |
+
+### 扫码登录
+
+- 与小程序登录共用 `WECHAT_APP_ID` / `WECHAT_APP_SECRET`；缺失时三个扫码接口均返回 503 `wechat_not_configured`。`WECHAT_QR_TTL_SECONDS` 配置票据有效期（60–600 秒，默认 300 秒）。先执行 `pnpm db:migrate` 应用 `0012`。
+- 网页匿名 `POST /v1/auth/wechat/qr`，返回 `{ ticketId, expiresAt, image: { contentType, base64 } }`，图片可用 `data:<contentType>;base64,<base64>` 展示。票据是密码学随机的 192 位值，以 32 个 base64url 字符直接作为小程序码 `scene`，符合微信的长度/字符限制；数据库只存票据和浏览器凭据的 SHA-256。小程序码默认打开 glance 首页，glance 从 `scene` 取票据，展示确认登录按钮。
+- 申请时下发 `__Host-bafang_qr` 临时 Cookie（httpOnly、Secure、SameSite=Lax、Path=/，在票据到期后继续保留 5 分钟，供网页读取已过期状态，不能延长票据有效期）。浏览器轮询必须保留并携带它；每次新申请会替换浏览器的临时 Cookie，旧票据需重新申请。Cookie 缺失、错误或票据不存在时返回 403 `qr_browser_invalid`，票据 id 单独泄露不能领取会话。本地联调使用 HTTPS/受信 localhost。
+- glance 以自己的有效小程序会话 `Authorization: Bearer <token>` 调用 `POST /v1/auth/wechat/qr/{ticketId}/confirm`，成功返回 `{ status: "confirmed" }`。未登录、失效会话或仅携带 Cookie 返回 401 `unauthorized`，网页 Bearer 会话返回 403 `qr_miniprogram_required`；不存在/过期/已确认/已消费分别返回 `qr_ticket_invalid` (404)、`qr_ticket_expired` (400)、`qr_ticket_confirmed` (409)、`qr_ticket_used` (409)。确认者决定网页会话的用户归属，并发确认仅一个成功。
+- 网页 `GET /v1/auth/wechat/qr/{ticketId}` 轮询：`pending` 待确认；`expired` 已过期；`consumed` 已领取；确认后的第一次有效轮询返回 `{ status: "confirmed", user: { id }, session: { device: "web", expiresAt }, token: null }`，同时设置与邮箱/GitHub 相同的 30 天 `bafang_session` Cookie。票据消费与会话创建在同一事务内，跨实例并发轮询仅一个获取会话。已交付的响应丢失时需重新申请，不能重放领取。glance 会话和网页会话独立，任意一端退出不影响另一端。
+- 到期后不能确认或领取，已确认未领取也会到期。过期记录保留 24 小时供错误识别，在后续申请时清理；清理后视为不存在。接口均返回 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`。申请按 IP 每分钟 5 次，轮询按 IP 每分钟 120 次且按票据每分钟 60 次，确认按 IP 每分钟 10 次；成功/失败均计数，沿用进程内限流。
+- `WeChatQrCode` 为可注入适配器（`createApp({ wechatQr })`）。真实实现使用固定 HTTPS `/cgi-bin/token` 获取 `access_token` 并在内存缓存，过期前 10%（最多 60 秒）刷新，并发请求共用获取中的凭据；调用 `/wxa/getwxacodeunlimit` 传入 `scene`。每次请求 5 秒超时、禁止重定向、不自动重试；只接受 PNG/JPEG 图片字节，微信 JSON 错误/异常统一为 502 `wechat_unavailable`，不写票据或会话，不透传凭据或上游细节。测试用假 HTTP 出口验证协议，不访问真实微信。

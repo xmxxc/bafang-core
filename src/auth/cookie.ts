@@ -3,7 +3,7 @@ import { setCookie } from 'hono/cookie';
 import { SESSION_COOKIE } from './middleware';
 import { SESSION_TTL_MS } from './service';
 
-/** 邮箱与 GitHub 网页登录统一使用相同的会话 Cookie。 */
+/** 邮箱、GitHub 与扫码登录统一使用相同的会话 Cookie。 */
 export function setSessionCookie(c: Context, token: string, expiresAt: Date): void {
   setCookie(c, SESSION_COOKIE, token, {
     httpOnly: true,
