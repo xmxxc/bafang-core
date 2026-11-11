@@ -91,7 +91,9 @@ interface CacheEntry {
  * 基准（见 estimate-sources），或者净值模块给不出期望的基准（净值上游失败且没有缓存、基金没有
  * 净值数据）。净值模块自己的缓存仍可用，所以此前已取到的净值在净值上游故障期间照常用于核对。
  * 基准日期还必须是适用日历的上一个交易日；中间交易日净值尚未公布时不提供估值。
- * 日历年度覆盖未知、来源缺少基准日期（新浪）、QDII 缺少境外市场日历映射时不提供估值。缓存命中也重新核对基准，防止净值更新后沿用旧估值。
+ * 无日期来源须在近 1 月的估值日前净值中唯一匹配上一交易日，且历史必须包含再前一个交易日。
+ * 日历年度覆盖未知、基准无法唯一核实、QDII 缺少境外市场日历映射时不提供估值。
+ * 缓存保留来源原始基准，命中也重新核对日期与唯一性，防止净值更新后沿用旧估值。
  *
  * 缓存先放在进程内，按基金代码作键、带到期时间，以后换成 Redis 时用同样的键与 TTL 即可。
  */
@@ -253,6 +255,30 @@ function baseVerifier(
     return lookup;
   }
 
+  async function undatedBaseDate(
+    code: string,
+    source: SourceEstimate,
+    date: string,
+    previousDate: string,
+    calendar: TradingCalendar,
+  ): Promise<string | null> {
+    const precedingDate = previousTradingDate(previousDate, calendar);
+    if (!precedingDate) return null;
+    try {
+      const history = (await nav.history(code, '1m', asOf))?.filter((point) => point.date < date);
+      if (!history?.some((point) => point.date === precedingDate)) return null;
+      if (history.some((point) => formatNav(point.unitNav) === null)) return null;
+      const matches = history.filter((point) => formatNav(point.unitNav) === source.base.unitNav);
+      // 不能只取最近一个相等的数值：重复净值无法区分来源究竟使用了哪一天。
+      // 前一期也必须在窗口内，避免仅有一条净值时把历史不足误认为唯一匹配。
+      return matches.length === 1 && matches[0]!.date === previousDate ? previousDate : null;
+    } catch (error) {
+      if (!(error instanceof UpstreamError)) throw error;
+      console.warn('[bafang-core] estimate history unavailable', code, error.kind, error.message);
+      return null;
+    }
+  }
+
   return async (candidates: Map<string, SourceEstimate>): Promise<Map<string, SourceEstimate>> => {
     const checked = await Promise.all(
       [...candidates].map(async ([code, source]) => {
@@ -260,11 +286,15 @@ function baseVerifier(
         const calendar = await fundCalendar(code, asOf);
         const previousDate = calendar ? previousTradingDate(date, calendar) : null;
         const expected = previousDate ? await expectedBase(code, date) : null;
+        const baseDate =
+          source.base.date === null && calendar && previousDate && expected?.date === previousDate
+            ? await undatedBaseDate(code, source, date, previousDate, calendar)
+            : source.base.date;
         const matches =
           expected !== null &&
           expected.date === previousDate &&
           formatNav(expected.unitNav) === source.base.unitNav &&
-          source.base.date === expected.date;
+          baseDate === expected.date;
         return [code, matches ? source : null] as const;
       }),
     );
