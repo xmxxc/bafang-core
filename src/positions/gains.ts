@@ -1,5 +1,5 @@
 import { shanghaiDate, type Clock } from '../clock';
-import type { EstimateService } from '../market/estimates';
+import type { EstimateService, EstimateSource } from '../market/estimates';
 import type { NavService } from '../market/nav';
 import type { TradingCalendar } from '../trading-calendar';
 import {
@@ -24,6 +24,21 @@ export interface PositionGains {
   totalGain: string | null;
 }
 
+/** 今日收益实际使用的行情；净值只有日期精度，不虚构发布时间。 */
+export interface PositionQuote {
+  type: 'estimate' | 'nav' | 'unavailable';
+  direction: 'up' | 'down' | 'flat' | null;
+  value: string | null;
+  changePercent: number | null;
+  date: string | null;
+  time: string | null;
+  source: EstimateSource | 'eastmoney' | null;
+  sourceName: string | null;
+  fallback: boolean;
+}
+
+export type QuotedPosition = PositionValuation & PositionGains & { quote: PositionQuote };
+
 /** 在读取时计算收益；同一批次同一基金共用行情，跨渠道使用同一份基准与估值。 */
 export function createPositionGains(deps: {
   nav: NavService;
@@ -31,8 +46,8 @@ export function createPositionGains(deps: {
   clock: Clock;
   calendar: TradingCalendar;
 }) {
-  return async (items: PositionValuation[]): Promise<(PositionValuation & PositionGains)[]> => {
-    const now = deps.clock.now();
+  return async (items: PositionValuation[], asOf?: Date): Promise<QuotedPosition[]> => {
+    const now = asOf ?? deps.clock.now();
     const today = shanghaiDate(now);
     const tradingDay = deps.calendar.isTradingDay(now);
     const codes = [...new Set(items.map((item) => item.fundCode))];
@@ -42,7 +57,7 @@ export function createPositionGains(deps: {
           async (code) =>
             [
               code,
-              tradingDay ? await deps.nav.latestBefore(code, today).catch(() => null) : null,
+              tradingDay ? await deps.nav.latestBefore(code, today, now).catch(() => null) : null,
             ] as const,
         ),
       ),
@@ -55,7 +70,7 @@ export function createPositionGains(deps: {
       ),
     ];
     const batch =
-      tradingDay && unconfirmed.length > 0 ? await deps.estimates.batch(unconfirmed) : null;
+      tradingDay && unconfirmed.length > 0 ? await deps.estimates.batch(unconfirmed, now) : null;
     const estimates = new Map(batch?.items.map((item) => [item.code, item.estimate]));
     return items.map((item) => {
       const baseNav = previous.get(item.fundCode);
@@ -64,22 +79,58 @@ export function createPositionGains(deps: {
       const denominator = prior ? multiply(shares, prior, 8) : null;
       let gain = null;
       let status: PositionGains['todayGainStatus'] = 'unavailable';
+      let quote: PositionQuote = {
+        type: 'unavailable',
+        direction: null,
+        value: null,
+        changePercent: null,
+        date: null,
+        time: null,
+        source: null,
+        sourceName: null,
+        fallback: false,
+      };
       if (denominator && prior && tradingDay) {
         if (item.navDate === today && item.nav !== null) {
-          gain = multiply(shares, subtract(fixedFromDb(item.nav, 4), prior), 2);
+          const change = subtract(fixedFromDb(item.nav, 4), prior);
+          gain = multiply(shares, change, 2);
           status = 'confirmed';
+          const rate = prior.value === 0n ? null : divide(change, prior, 4);
+          quote = {
+            type: 'nav',
+            direction: changeDirection(change.value),
+            value: item.nav,
+            changePercent: rate ? Number(formatFixed({ value: rate.value, scale: 2 })) : null,
+            date: today,
+            time: today,
+            source: 'eastmoney',
+            sourceName: '东方财富',
+            fallback: false,
+          };
         } else {
           const estimate = estimates.get(item.fundCode);
           // 行情接口的百分数转为十进制文本，按 6 位百分数定点舍入；除以 100 只调整 scale。
           const percent = estimate ? estimatePercent(estimate.changePercent) : null;
-          if (percent) {
+          if (estimate && percent) {
             gain = multiply(denominator, { value: percent.value, scale: percent.scale + 2 }, 2);
             status = 'estimated';
+            quote = {
+              type: 'estimate',
+              direction: changeDirection(estimate.changePercent),
+              value: estimate.value,
+              changePercent: estimate.changePercent,
+              date: today,
+              time: estimate.time,
+              source: estimate.source,
+              sourceName: estimate.sourceName,
+              fallback: estimate.fallback,
+            };
           }
         }
       }
       return {
         ...item,
+        quote,
         todayGain: gain ? formatFixed(gain) : null,
         todayGainRate:
           gain && denominator && denominator.value !== 0n
@@ -95,6 +146,10 @@ export function createPositionGains(deps: {
       };
     });
   };
+}
+
+function changeDirection(change: bigint | number): 'up' | 'down' | 'flat' {
+  return change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
 }
 
 /** 有限行情百分数的文本可能是指数形式；只在 scale 上应用指数，再由定点模块舍入。 */

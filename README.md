@@ -163,6 +163,15 @@ docker compose up -d
 - 不可用的今日收益及其上一市值均不计入今日收益与收益率汇总，`todayGainComplete: false`。`isComplete` 仅在两个完整性字段都为 true 时为 true。汇总状态仅看可计入部分：全为估算是 `estimated`，全为确认是 `confirmed`，两者并存是 `mixed`，无可用收益是 `unavailable`，没有可计算的持仓是 `none`。
 - 有持仓但对应数据全部缺失时，该项合计为 `null`；空持仓的金额合计为 `0.00`（上一市值 `0.00`）、收益率为 `null`、状态为 `none`，完整性为 true。
 
+### 今日概览
+
+`GET /v1/overview?channelId=` 需要网页 Cookie 或小程序 Bearer 会话，一次返回 `summary`、`positions`、`indices`、`time` 与 `referenceOnly: true`（仅供参考）。`channelId` 可选，只筛选自己的持仓与汇总；不影响大盘指数。渠道不属于自己或不存在返回 404，格式错误返回 400。
+
+- `summary` 复用 `PositionSummary` 的金额、收益类型、收益率与完整性口径，包含已清仓的历史已实现收益；另含 `risingCount` / `fallingCount`。涨跌只数按有已确认份额的基金去重，同基金跨渠道只计一次，平盘、行情不可用和只有在途加仓的零份额持仓不计入。
+- `positions` 隐藏已清仓，按创建顺序逐笔展示，含原持仓字段、`fundName`、`channelName` 与 `quote`。基金名称暂不可用时为 `null`，基金代码仍保留。`quote.type` 为 `estimate`、`nav` 或 `unavailable`，并提供单位水平、百分数涨跌幅、所属日期、来源、来源名称、是否回退及数据时间。`quote.direction` 按未舍入的行情判断 `up` / `down` / `flat`，不可用为 `null`；涨跌只数使用此方向，微小的净值变动即使展示为 `0.00%` 也会计入。行情与今日收益使用同一轮计算的数据；净值只有日期精度，`quote.time` 返回 `YYYY-MM-DD`，估值时间为来源的 ISO 时间。
+- 估值不可用时，`quote` 的数值、来源、日期和时间均为 `null`，今日收益为 `null`；该持仓和分母不计入今日收益合计，`todayGainComplete=false`。缺净值另使 `valuationComplete=false`；`isComplete` 为两者合取。盘前、休市不沿用昨日涨跌。
+- `indices` 复用大盘指数响应，逐项给出市场状态、来源、时间及可用性；全部来源失败时仍返回四个 `available=false` 的指数，概览保持 200。
+
 ### 加仓与交易记录
 
 需要登录，持仓与交易均只能操作自己的，别人的返回 404 `not_found`。

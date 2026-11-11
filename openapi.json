@@ -574,51 +574,264 @@
           "fallback"
         ]
       },
-      "ChannelList": {
+      "Overview": {
         "type": "object",
         "properties": {
-          "items": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/Channel"
-            }
-          }
-        },
-        "required": [
-          "items"
-        ]
-      },
-      "Channel": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "渠道 id"
+          "summary": {
+            "$ref": "#/components/schemas/OverviewSummary"
           },
-          "name": {
-            "type": "string",
-            "example": "支付宝",
-            "description": "渠道名"
-          }
-        },
-        "required": [
-          "id",
-          "name"
-        ]
-      },
-      "PositionList": {
-        "type": "object",
-        "properties": {
-          "items": {
+          "positions": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/Position"
-            }
+              "$ref": "#/components/schemas/OverviewPosition"
+            },
+            "description": "按持仓创建顺序返回，隐藏已清仓；同基金跨渠道逐笔展示"
+          },
+          "indices": {
+            "$ref": "#/components/schemas/MarketIndices"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "概览生成时间"
+          },
+          "referenceOnly": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "行情和估值仅供参考，供前端展示提示"
           }
         },
         "required": [
-          "items"
+          "summary",
+          "positions",
+          "indices",
+          "time",
+          "referenceOnly"
+        ]
+      },
+      "OverviewSummary": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PositionSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "risingCount": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "有已确认份额且今日行情涨幅大于 0 的基金只数，同基金跨渠道只计一次"
+              },
+              "fallingCount": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "有已确认份额且今日行情涨幅小于 0 的基金只数；平盘及不可用不计入涨跌只数"
+              }
+            },
+            "required": [
+              "risingCount",
+              "fallingCount"
+            ]
+          }
+        ]
+      },
+      "PositionSummary": {
+        "type": "object",
+        "properties": {
+          "todayGain": {
+            "type": "string",
+            "nullable": true,
+            "description": "今日收益（元），2 位小数；不可用为 null。估算 = 份额 × 上一净值 × 估值涨跌幅，确认 = 份额 ×（当日净值 − 上一净值）"
+          },
+          "todayGainRate": {
+            "type": "string",
+            "nullable": true,
+            "description": "今日收益 ÷ 上一市值，比值、4 位小数；分母为 0 或缺失为 null"
+          },
+          "todayGainDate": {
+            "type": "string",
+            "description": "今日收益所属日期，按注入时钟的 Asia/Shanghai 日期 YYYY-MM-DD"
+          },
+          "previousMarketValue": {
+            "type": "string",
+            "nullable": true,
+            "description": "份额 × 今日之前最近一期已公布净值，金额 2 位小数；汇总计算保留完整精度；仅计入今日收益可用的持仓；缺失为 null"
+          },
+          "realizedGain": {
+            "type": "string",
+            "description": "已实现收益，2 位小数；跨持有周期保留并累加"
+          },
+          "totalGain": {
+            "type": "string",
+            "nullable": true,
+            "description": "累计收益 = 持有收益 + 已实现收益，2 位小数；缺失为 null"
+          },
+          "totalAssets": {
+            "type": "string",
+            "nullable": true,
+            "description": "可取得净值的持仓市值合计，2 位小数；有持仓但全部缺失为 null，空持仓为 0.00"
+          },
+          "totalCost": {
+            "type": "string",
+            "description": "全部持仓总成本合计，2 位小数"
+          },
+          "holdingGain": {
+            "type": "string",
+            "nullable": true,
+            "description": "可取得净值的持仓持有收益合计，2 位小数；全部缺失为 null"
+          },
+          "holdingGainRate": {
+            "type": "string",
+            "nullable": true,
+            "description": "持有收益合计 ÷ 可取得净值的持仓成本合计，比值、4 位小数；分母为 0 为 null"
+          },
+          "todayGainStatus": {
+            "type": "string",
+            "enum": [
+              "estimated",
+              "confirmed",
+              "mixed",
+              "unavailable",
+              "none"
+            ],
+            "description": "仅看可计入的持仓：估算 / 确认 / 两者混合 / 无可用收益 / 没有可计算的持仓"
+          },
+          "valuationComplete": {
+            "type": "boolean",
+            "description": "所有持仓市值与持有收益均可用；缺净值时不计入其市值与持有收益，累计收益仍包含全部已实现收益"
+          },
+          "todayGainComplete": {
+            "type": "boolean",
+            "description": "所有持仓今日收益均可用；不可用的持仓及其分母不计入今日收益及收益率"
+          },
+          "isComplete": {
+            "type": "boolean",
+            "description": "valuationComplete 与 todayGainComplete 均为 true；空持仓为 true"
+          }
+        },
+        "required": [
+          "todayGain",
+          "todayGainRate",
+          "todayGainDate",
+          "previousMarketValue",
+          "realizedGain",
+          "totalGain",
+          "totalAssets",
+          "totalCost",
+          "holdingGain",
+          "holdingGainRate",
+          "todayGainStatus",
+          "valuationComplete",
+          "todayGainComplete",
+          "isComplete"
+        ]
+      },
+      "OverviewPosition": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Position"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "fundName": {
+                "type": "string",
+                "nullable": true,
+                "description": "基金名称；基础信息暂不可用为 null，仍保留基金代码"
+              },
+              "channelName": {
+                "type": "string",
+                "nullable": true,
+                "description": "渠道名称；读取期间渠道已删除时为 null"
+              },
+              "quote": {
+                "$ref": "#/components/schemas/OverviewQuote"
+              }
+            },
+            "required": [
+              "fundName",
+              "channelName",
+              "quote"
+            ]
+          }
+        ]
+      },
+      "OverviewQuote": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "estimate",
+              "nav",
+              "unavailable"
+            ],
+            "description": "今日收益所用行情：估值 / 当日净值 / 不可用；不沿用上一交易日涨跌"
+          },
+          "direction": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "up",
+              "down",
+              "flat",
+              null
+            ],
+            "description": "按未舍入的行情判断上涨 / 下跌 / 平盘，不受展示百分数舍入影响；不可用为 null"
+          },
+          "value": {
+            "type": "string",
+            "nullable": true,
+            "description": "估值或单位净值，4 位小数；不可用为 null"
+          },
+          "changePercent": {
+            "type": "number",
+            "nullable": true,
+            "description": "涨跌幅（百分比）；净值按当日与上一净值计算，保留 2 位小数；不可用为 null"
+          },
+          "date": {
+            "type": "string",
+            "nullable": true,
+            "description": "行情所属日期 YYYY-MM-DD；不可用为 null"
+          },
+          "time": {
+            "type": "string",
+            "nullable": true,
+            "description": "估值为来源给出的 ISO 时间；净值只提供日期 YYYY-MM-DD，不虚构发布时间；不可用为 null"
+          },
+          "source": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "tiantian",
+              "sina",
+              "eastmoney",
+              null
+            ],
+            "description": "行情来源：天天基金 / 新浪财经 / 东方财富净值；不可用为 null"
+          },
+          "sourceName": {
+            "type": "string",
+            "nullable": true,
+            "description": "来源展示名；不可用为 null"
+          },
+          "fallback": {
+            "type": "boolean",
+            "description": "估值是否使用备用来源；净值与不可用时为 false"
+          }
+        },
+        "required": [
+          "type",
+          "direction",
+          "value",
+          "changePercent",
+          "date",
+          "time",
+          "source",
+          "sourceName",
+          "fallback"
         ]
       },
       "Position": {
@@ -766,95 +979,51 @@
           "holdingGainRate"
         ]
       },
-      "PositionSummary": {
+      "ChannelList": {
         "type": "object",
         "properties": {
-          "todayGain": {
-            "type": "string",
-            "nullable": true,
-            "description": "今日收益（元），2 位小数；不可用为 null。估算 = 份额 × 上一净值 × 估值涨跌幅，确认 = 份额 ×（当日净值 − 上一净值）"
-          },
-          "todayGainRate": {
-            "type": "string",
-            "nullable": true,
-            "description": "今日收益 ÷ 上一市值，比值、4 位小数；分母为 0 或缺失为 null"
-          },
-          "todayGainDate": {
-            "type": "string",
-            "description": "今日收益所属日期，按注入时钟的 Asia/Shanghai 日期 YYYY-MM-DD"
-          },
-          "previousMarketValue": {
-            "type": "string",
-            "nullable": true,
-            "description": "份额 × 今日之前最近一期已公布净值，金额 2 位小数；汇总计算保留完整精度；仅计入今日收益可用的持仓；缺失为 null"
-          },
-          "realizedGain": {
-            "type": "string",
-            "description": "已实现收益，2 位小数；跨持有周期保留并累加"
-          },
-          "totalGain": {
-            "type": "string",
-            "nullable": true,
-            "description": "累计收益 = 持有收益 + 已实现收益，2 位小数；缺失为 null"
-          },
-          "totalAssets": {
-            "type": "string",
-            "nullable": true,
-            "description": "可取得净值的持仓市值合计，2 位小数；有持仓但全部缺失为 null，空持仓为 0.00"
-          },
-          "totalCost": {
-            "type": "string",
-            "description": "全部持仓总成本合计，2 位小数"
-          },
-          "holdingGain": {
-            "type": "string",
-            "nullable": true,
-            "description": "可取得净值的持仓持有收益合计，2 位小数；全部缺失为 null"
-          },
-          "holdingGainRate": {
-            "type": "string",
-            "nullable": true,
-            "description": "持有收益合计 ÷ 可取得净值的持仓成本合计，比值、4 位小数；分母为 0 为 null"
-          },
-          "todayGainStatus": {
-            "type": "string",
-            "enum": [
-              "estimated",
-              "confirmed",
-              "mixed",
-              "unavailable",
-              "none"
-            ],
-            "description": "仅看可计入的持仓：估算 / 确认 / 两者混合 / 无可用收益 / 没有可计算的持仓"
-          },
-          "valuationComplete": {
-            "type": "boolean",
-            "description": "所有持仓市值与持有收益均可用；缺净值时不计入其市值与持有收益，累计收益仍包含全部已实现收益"
-          },
-          "todayGainComplete": {
-            "type": "boolean",
-            "description": "所有持仓今日收益均可用；不可用的持仓及其分母不计入今日收益及收益率"
-          },
-          "isComplete": {
-            "type": "boolean",
-            "description": "valuationComplete 与 todayGainComplete 均为 true；空持仓为 true"
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Channel"
+            }
           }
         },
         "required": [
-          "todayGain",
-          "todayGainRate",
-          "todayGainDate",
-          "previousMarketValue",
-          "realizedGain",
-          "totalGain",
-          "totalAssets",
-          "totalCost",
-          "holdingGain",
-          "holdingGainRate",
-          "todayGainStatus",
-          "valuationComplete",
-          "todayGainComplete",
-          "isComplete"
+          "items"
+        ]
+      },
+      "Channel": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "渠道 id"
+          },
+          "name": {
+            "type": "string",
+            "example": "支付宝",
+            "description": "渠道名"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "PositionList": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Position"
+            }
+          }
+        },
+        "required": [
+          "items"
         ]
       },
       "FundPositionSummaryList": {
@@ -1970,6 +2139,98 @@
           },
           "500": {
             "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/overview": {
+      "get": {
+        "tags": [
+          "overview"
+        ],
+        "security": [
+          {
+            "SessionCookie": []
+          },
+          {
+            "SessionBearer": []
+          }
+        ],
+        "summary": "今日概览",
+        "description": "需要网页或小程序会话，一次返回自己的持仓汇总、涨跌只数、持仓行情及四个大盘指数。channelId 仅筛选持仓及汇总，不影响大盘指数；渠道不存在或属于别人时返回 404 not_found。汇总沿用持仓汇总口径（包含已清仓的已实现收益）；列表隐藏已清仓，待确认交易不改变份额或成本。净值公布前使用当天估值，公布后使用当日净值；盘前、休市或行情缺失时明确不可用。不可用持仓的今日收益及其分母不计入合计，todayGainComplete=false；缺净值时 valuationComplete=false，isComplete 为两者合取。指数行情失败时逐项 available=false，概览仍返回 200；行情仅供参考。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "仅查看自己的此渠道"
+            },
+            "required": false,
+            "description": "仅查看自己的此渠道",
+            "name": "channelId",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "今日概览",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或会话已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "not_found：渠道不存在（包含别人的渠道）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "数据库不可用",
             "content": {
               "application/json": {
                 "schema": {
