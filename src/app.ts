@@ -201,7 +201,27 @@ export function createApp(deps: AppDeps = {}): App {
   const app = new OpenAPIHono({
     defaultHook: (result, c) => {
       if (!result.success) {
-        return c.json(errorBody('validation_error', result.error.message), 400);
+        const messages = result.error.issues.map((issue) => {
+          let message = issue.message?.trim() || '请求参数不合法';
+          // Default Zod explanations can contain schema patterns or submitted object keys.
+          if (
+            issue.code === 'invalid_format' &&
+            issue.format === 'regex' &&
+            issue.pattern &&
+            message.includes(issue.pattern)
+          ) {
+            message = '格式不合法';
+          } else if (issue.code === 'unrecognized_keys') {
+            message = '包含不支持的字段';
+          }
+          const path = issue.path.map(String).join('.');
+          return path && (issue.path.length > 1 || result.error.issues.length > 1)
+            ? `${path}：${message}`
+            : message;
+        });
+        // Set preserves validation order while removing repeated explanations at the same path.
+        const message = [...new Set(messages)].join('；') || '请求参数不合法';
+        return c.json(errorBody('validation_error', message), 400);
       }
       return undefined;
     },
