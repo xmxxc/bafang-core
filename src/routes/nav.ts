@@ -33,7 +33,7 @@ export const NavPointSchema = z
   .object({
     date: NavDateSchema,
     unitNav: NavAmountSchema,
-    cumulativeNav: NavAmountSchema.nullable(),
+    cumulativeNav: NavAmountSchema.nullable().openapi({ description: '累计净值，缺失时为 null' }),
     dailyChange: NavDailyChangeSchema,
   })
   .openapi('NavPoint');
