@@ -1,0 +1,11 @@
+# 生产：Caddy 为 CORE_DOMAIN 自动申请并续期证书（HTTP-01/TLS-ALPN-01，需要 80/443 可达），
+# 再反代到 Compose 内部的 core:3000。Caddy 会覆盖客户端传入的 X-Forwarded-For，
+# core 的限流取该头最右一项作为客户端地址。
+{
+	email {$ACME_EMAIL}
+}
+
+{$CORE_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy core:3000
+}

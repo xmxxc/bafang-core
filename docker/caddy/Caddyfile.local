@@ -1,0 +1,12 @@
+# 本地验证：用 Caddy 自带的内部 CA 签发证书（tls internal），不访问任何 ACME 服务。
+# 由 compose.local.yaml 挂载，替代生产 Caddyfile。
+{
+	local_certs
+	skip_install_trust
+}
+
+{$CORE_DOMAIN} {
+	tls internal
+	encode zstd gzip
+	reverse_proxy core:3000
+}

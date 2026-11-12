@@ -1,0 +1,78 @@
+# 生产部署：core + PostgreSQL + Caddy（自动 HTTPS 反代）。说明见 docs/deployment.md。
+#
+#   cp .env.production.example .env.production   # 填入真实值，不提交
+#   docker compose -f compose.prod.yaml --env-file .env.production up -d
+#
+# 只有 Caddy 对外暴露端口；core 与 PostgreSQL 只在 Compose 内部网络可达。
+name: bafang-core
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-bafang}
+      POSTGRES_PASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
+      POSTGRES_DB: ${PGDATABASE:-bafang}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  core:
+    # 镜像名与标签可由环境变量指定，便于 CD 用 docker save | docker load 推送同一标签后切换。
+    image: ${BAFANG_CORE_IMAGE:-bafang-core}:${BAFANG_CORE_TAG:-latest}
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # 只把下面列出的配置传给 core；空值等同未配置（见 .env.production.example）。
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGUSER: ${PGUSER:-bafang}
+      PGPASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
+      PGDATABASE: ${PGDATABASE:-bafang}
+      PGSCHEMA: ${PGSCHEMA:-public}
+      SETTLEMENT_ROUNDS: ${SETTLEMENT_ROUNDS:-21:30,22:30,23:30}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM: ${RESEND_FROM:-}
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GITHUB_CALLBACK_URL: ${GITHUB_CALLBACK_URL:-}
+      GITHUB_LOGIN_REDIRECT_URL: ${GITHUB_LOGIN_REDIRECT_URL:-}
+      WECHAT_APP_ID: ${WECHAT_APP_ID:-}
+      WECHAT_APP_SECRET: ${WECHAT_APP_SECRET:-}
+      WECHAT_QR_TTL_SECONDS: ${WECHAT_QR_TTL_SECONDS:-300}
+      BIND_CODE_SECRET: ${BIND_CODE_SECRET:-}
+    expose:
+      - '3000'
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - core
+    environment:
+      CORE_DOMAIN: ${CORE_DOMAIN:?CORE_DOMAIN 必填}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL 必填}
+    ports:
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+      - '${HTTPS_PORT:-443}:443/udp'
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
