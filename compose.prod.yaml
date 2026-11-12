@@ -28,7 +28,8 @@ services:
       retries: 10
 
   # 一次性迁移：与 core 同一镜像，用迁移角色（库 owner）执行迁移后退出。
-  # 迁移凭据只交给这个服务；`up core` 会先运行它，迁移失败则 core 不启动。
+  # 业务服务中迁移凭据只交给这个服务（postgres 也拿到这组值，只用于首次初始化建角色）；
+  # `up core` 会先运行它，迁移失败则 core 不启动。
   migrate:
     image: ${BAFANG_CORE_IMAGE:-bafang-core}:${BAFANG_CORE_TAG:-latest}
     build: .

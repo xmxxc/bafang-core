@@ -5,7 +5,7 @@ core 在国内 VPS 上用 Docker Compose 运行，服务定义在 `compose.prod.
 | 服务       | 镜像                             | 说明                                                                                     |
 | ---------- | -------------------------------- | ---------------------------------------------------------------------------------------- |
 | `postgres` | `postgres:16-alpine`             | 数据卷 `pgdata`；只在 Compose 内部网络可达，不映射端口；首次初始化建出迁移角色与运行角色 |
-| `migrate`  | `bafang-core:${BAFANG_CORE_TAG}` | 一次性任务：与 core 同一镜像，用迁移角色执行迁移后退出；只有它拿迁移凭据                 |
+| `migrate`  | `bafang-core:${BAFANG_CORE_TAG}` | 一次性任务：与 core 同一镜像，用迁移角色执行迁移后退出；业务服务中只有它拿迁移凭据       |
 | `core`     | `bafang-core:${BAFANG_CORE_TAG}` | 本仓库 `Dockerfile` 构建；`migrate` 成功退出后才启动，用运行角色监听 3000；不映射端口    |
 | `caddy`    | `caddy:2-alpine`                 | 唯一对外的服务（80/443），为 `CORE_DOMAIN` 自动签发、续期证书并反代到 `core:3000`        |
 
@@ -19,7 +19,7 @@ core 不使用 PostgreSQL 超级用户。postgres 首次初始化（空数据卷
 | `PG_MIGRATION_USER`（默认 `bafang_owner`） | NOSUPERUSER NOCREATEDB NOCREATEROLE，业务库 owner | 一次性 `migrate` 服务执行迁移，拥有全部表                                                               |
 | `PGUSER`（默认 `bafang_app`）              | NOSUPERUSER NOCREATEDB NOCREATEROLE               | core 长期运行、日历导入、手动交易确认；只有 `public` 下表的增删改查与序列使用权限，不能建表、改表、删表 |
 
-迁移角色新建的表通过默认权限（`ALTER DEFAULT PRIVILEGES`）自动授予运行角色，升级新增的表无需手工授权。迁移凭据只出现在一次性 `migrate` 服务的配置里；长期运行的 `core` 容器配置（含 Docker 健康检查拉起的进程）中没有迁移凭据，只有运行角色。`core` 依赖 `migrate` 成功退出（`service_completed_successfully`），所以 `dc up -d core` 每次都会先跑迁移，迁移失败时 core 不启动。
+迁移角色新建的表通过默认权限（`ALTER DEFAULT PRIVILEGES`）自动授予运行角色，升级新增的表无需手工授权。业务服务中，迁移凭据只出现在一次性 `migrate` 服务的配置里（postgres 服务也拿到这组值，只用于首次初始化时建角色）；长期运行的 `core` 容器配置（含 Docker 健康检查拉起的进程）中没有迁移凭据，只有运行角色。`core` 依赖 `migrate` 成功退出（`service_completed_successfully`），所以 `dc up -d core` 每次都会先跑迁移，迁移失败时 core 不启动。CD 部署时还会在切换前用新镜像单独跑一次 `migrate`，迁移失败就不动旧 core（见"持续部署"）。
 
 取舍：分成两个角色后，即使 core 失陷，也只能读写业务数据，不能改表结构或触及集群其他库；代价是多一组密码、多一个一次性服务，且 `PGSCHEMA` 改为非 `public` 时需要自行给运行角色授权。
 
@@ -47,7 +47,7 @@ core 不使用 PostgreSQL 超级用户。postgres 首次初始化（空数据卷
 | `WECHAT_QR_TTL_SECONDS`                                                                           | 否       | 扫码登录票据有效秒数（60–600），默认 300                                                                                          |
 | `BIND_CODE_SECRET`                                                                                | 生产必填 | 绑定码 HMAC 密钥，用 `openssl rand -base64 48` 生成。留空时绑定码能力禁用                                                         |
 
-数据库相关的值只在 postgres **首次初始化**时生效；之后修改 `.env.production` 不会改动库里已有的角色和密码（需要时以 `postgres` 身份 `ALTER ROLE … PASSWORD …`，再改配置）。值里含 `$` 时用单引号包起来（`PGPASSWORD='a$b'`），否则会被 Compose 当作变量展开。各登录方式的行为见 README。
+数据库相关的值只在 postgres **首次初始化**时生效；之后修改 `.env.production` 不会改动库里已有的角色和密码，改密码按下文"数据库密码轮换"操作。值里含 `$` 时用单引号包起来（`PGPASSWORD='a$b'`），否则会被 Compose 当作变量展开。各登录方式的行为见 README。
 
 ## 首次部署
 
@@ -199,6 +199,36 @@ dc exec -T postgres psql -U postgres -c 'drop database bafang_before_restore'
 **恢复演练**：定期执行第 2、3 步（库名换成 `bafang_restore_check`），核对后 `drop database bafang_restore_check`，不影响线上库。
 
 库名、角色名按 `.env.production` 调整。备份恢复之后才有的数据会丢失；回滚前先确认可以接受。
+
+## 数据库密码轮换
+
+`POSTGRES_PASSWORD`、`PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`、`PGUSER` / `PGPASSWORD`、`PGDATABASE` 除了交给业务服务，也是 postgres 服务的初始化配置。改了其中任何一个，下一次 `dc up` 都会让 Compose **重建 postgres 容器**：
+
+- 数据卷 `pgdata` 保留，数据不丢；卷不是空的，初始化脚本不会重跑，所以库里的密码不会跟着 `.env.production` 变，必须先用 `ALTER ROLE` 改；
+- 重建期间数据库不可用，`/v1/health` 短暂返回 503，请求失败，要安排维护窗口；
+- 先改 `.env.production`、后改库会让新配置连不上：`migrate` 认证失败，core 不启动（改的是运行角色密码时，新 core 连库失败）。
+
+步骤（以迁移角色为例，其他角色同理，把角色名换掉）：
+
+```bash
+# 0. 维护窗口内进行；先备份（见"数据库备份与恢复"）。CD 已开通时，期间不要合并到 main，
+#    或暂时把仓库变量 CD_ENABLED 设为 false
+
+# 1. 先改库里的密码。\password 交互输入，新密码不进命令行历史和进程列表
+dc exec postgres psql -U postgres -c '\password bafang_owner'
+
+# 2. 再把同一个新密码写进 .env.production（PG_MIGRATION_PASSWORD）
+
+# 3. 应用配置：postgres 被重建并等到健康，然后用新密码跑 migrate（迁移门禁），通过后 core 才启动
+dc up -d --no-build core
+
+# 4. 验证
+dc ps -a                            # postgres、core 为 healthy；migrate 为 Exited (0)
+dc logs --tail 20 migrate
+curl -fsS https://<CORE_DOMAIN>/v1/health
+```
+
+改的是 `POSTGRES_PASSWORD` 时第 1 步用 `\password postgres`；容器内本地连接不用这个密码，它只在初始化和以密码方式连接超级用户时用到。第 3 步失败时，`dc logs migrate` 里出现 `password authentication failed` 说明库里的密码和配置不一致，回到第 1 步核对。
 
 ## 本机验证
 
