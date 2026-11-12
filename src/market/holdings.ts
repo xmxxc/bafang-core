@@ -73,6 +73,7 @@ export function createHoldingsService(deps: {
           );
           // Only a recognized, successful empty report proves absence of a report.
           if (!parsed) return null;
+          deps.upstream.recordSuccess?.('eastmoney');
         } catch (error) {
           if (!(error instanceof UpstreamError)) throw error;
           console.warn('[bafang-core] eastmoney holdings failed', error.kind, error.message);
@@ -85,6 +86,7 @@ export function createHoldingsService(deps: {
               }),
               day,
             );
+            deps.upstream.recordSuccess?.('sina');
           } catch (backupError) {
             if (!(backupError instanceof UpstreamError)) throw backupError;
             console.warn(
@@ -152,6 +154,8 @@ export function createHoldingsService(deps: {
           let quote = observed?.quote ?? null;
           let sampledAt = observed?.at ?? lookupAt;
           if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
+          // A parsed quote that is fresh when observed counts as that upstream's success.
+          if (quote) deps.upstream.recordSuccess?.('tencent');
           let source: 'tencent' | 'ths' | null = quote ? 'tencent' : null;
           const fallback = !quote && symbol !== null;
           if (fallback) {
@@ -173,6 +177,7 @@ export function createHoldingsService(deps: {
             // the short TTL of an unavailable result.
             sampledAt = deps.clock.now();
             if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
+            if (quote) deps.upstream.recordSuccess?.('ths');
             source = quote ? 'ths' : null;
           }
           const value = { quote, quoteSource: source, quoteFallback: fallback };

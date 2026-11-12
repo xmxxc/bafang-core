@@ -80,6 +80,9 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
       ) {
         const parent = await fetchLinkedEtfCode(deps.upstream, code);
         if (!parent || !(await fetchVerifiedEtfCode(deps.upstream, parent, asOf))) return null;
+        // The fund page relationship is adopted only after the exchange confirms the ETF.
+        // The exchange lists (SSE/SZSE) are not health-reported upstreams.
+        deps.upstream.recordSuccess?.('eastmoney');
         entry = { code: parent, at: asOf.getTime(), day: shanghaiDate(asOf) };
         if (mappings.size >= 5000) mappings.delete(mappings.keys().next().value!);
         mappings.set(code, entry);
@@ -164,6 +167,7 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         for (const item of model.items) {
           let quote = quotes.get(item.symbol) ?? null;
           if (quote && stale(quote, observedAt, deps.calendar)) quote = null;
+          if (quote) deps.upstream.recordSuccess?.('tencent');
           const quoteSource: 'tencent' | 'ths' = quote ? 'tencent' : 'ths';
           if (!quote) {
             quote = await fetchThsQuote(
@@ -174,6 +178,7 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
             );
             // The backup snapshot is judged when its own call returns.
             if (quote && stale(quote, deps.clock.now(), deps.calendar)) quote = null;
+            if (quote) deps.upstream.recordSuccess?.('ths');
           }
           item.quote = quote ?? undefined;
           item.quoteSource = quote ? quoteSource : undefined;
@@ -248,7 +253,7 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
           const points = await fetchThsIntraday(deps.upstream, symbol);
           const observedAt = deps.clock.now();
           if (shanghaiDate(observedAt) !== result.tradeDate) return null;
-          return new Map(
+          const usable = new Map(
             points
               .filter(
                 (point) =>
@@ -256,6 +261,9 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
               )
               .map((point) => [point.time.getTime(), point]),
           );
+          // An empty series (before the first trade) is a legal empty result, not a success.
+          if (usable.size > 0) deps.upstream.recordSuccess?.('ths');
+          return usable;
         }),
       );
       // A series observed after the Shanghai date changed belongs to a previous day: no points,

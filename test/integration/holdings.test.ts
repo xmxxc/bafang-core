@@ -1077,4 +1077,84 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
     expect(limited.headers.get('Retry-After')).toBe('60');
     expect(await limited.json()).toMatchObject({ error: { code: 'rate_limited' } });
   });
+
+  describe('upstream last success times in /v1/health', () => {
+    type Upstreams = Record<string, { lastSuccessAt: string | null }>;
+    async function upstreams(target: ReturnType<typeof app>): Promise<Upstreams> {
+      const response = await target.request('/v1/health');
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { upstreams: Upstreams }).upstreams;
+    }
+    const at = (target: Upstreams) =>
+      Object.fromEntries(Object.entries(target).map(([name, v]) => [name, v.lastSuccessAt]));
+    const NONE = { eastmoney: null, tiantian: null, sina: null, tencent: null, ths: null };
+
+    it('records EastMoney and Tencent for an adopted list and fresh quotes, not for cache hits', async () => {
+      const target = app();
+      await get(target);
+      expect(at(await upstreams(target))).toEqual({
+        ...NONE,
+        eastmoney: '2026-11-09T06:00:00.000Z',
+        tencent: '2026-11-09T06:00:00.000Z',
+      });
+      // Same day and within the quote TTL: the list and the quote are both cache hits.
+      replay.now = new Date('2026-11-09T06:00:05Z');
+      await get(target);
+      expect(at(await upstreams(target))).toMatchObject({
+        eastmoney: '2026-11-09T06:00:00.000Z',
+        tencent: '2026-11-09T06:00:00.000Z',
+      });
+    });
+
+    it('records Sina and THS when they are the adopted fallbacks', async () => {
+      replay.emDown = true;
+      replay.sinaDown = false;
+      replay.tencentDown = true;
+      replay.ths = true;
+      replay.now = new Date('2026-11-10T05:12:00Z');
+      const target = app();
+      const body = await get(target);
+      expect(body.holdingsSource).toBe('sina');
+      expect(body.items.some((item) => item.quoteSource === 'ths')).toBe(true);
+      expect(at(await upstreams(target))).toEqual({
+        ...NONE,
+        sina: '2026-11-10T05:12:00.000Z',
+        ths: '2026-11-10T05:12:00.000Z',
+      });
+    });
+
+    it('does not record a legal empty EastMoney report', async () => {
+      replay.em = fixture('eastmoney/holdings-000009-empty.txt');
+      const target = app();
+      expect((await target.request('/v1/funds/000009/holdings')).status).toBe(404);
+      expect(at(await upstreams(target))).toEqual(NONE);
+    });
+
+    it('does not record lists or quotes that fail validation', async () => {
+      replay.em = script(block('2026-09-30', row('600519', '贵州茅台', '')));
+      replay.sinaDown = false;
+      replay.sina = sina.replace('2026-09-30', '2026-99-99');
+      const target = app();
+      expect((await target.request(endpoint)).status).toBe(502);
+      expect(at(await upstreams(target))).toEqual(NONE);
+
+      // A valid list with an empty Tencent quote, a stale THS pair, then a stale Tencent quote.
+      replay.em = script(block('2026-09-30', row('600519')));
+      replay.missingQuote = true;
+      replay.ths = true;
+      replay.now = new Date('2026-11-10T06:00:00Z');
+      const fresh = app();
+      expect((await get(fresh)).items[0]).toMatchObject({ quote: null, quoteSource: null });
+      replay.missingQuote = false;
+      replay.ths = false;
+      replay.stamp = '20261110133000';
+      const later = app();
+      expect((await get(later)).items[0]).toMatchObject({ quote: null, quoteSource: null });
+      for (const target of [fresh, later])
+        expect(at(await upstreams(target))).toEqual({
+          ...NONE,
+          eastmoney: '2026-11-10T06:00:00.000Z',
+        });
+    });
+  });
 });

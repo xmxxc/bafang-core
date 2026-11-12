@@ -630,6 +630,89 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
       ]);
     });
   });
+  describe('upstream last success times in /v1/health', () => {
+    type Upstreams = Record<string, { lastSuccessAt: string | null }>;
+    async function upstreams(target: ReturnType<typeof app>) {
+      const response = await target.request('/v1/health');
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { upstreams: Upstreams };
+      return Object.fromEntries(
+        Object.entries(body.upstreams).map(([name, v]) => [name, v.lastSuccessAt]),
+      );
+    }
+    const T = `${day}T02:00:00.000Z`;
+
+    it.each([
+      ['tencent', 'normal', { tencent: T, ths: null }],
+      ['THS when Tencent fails', 'transport', { tencent: null, ths: T }],
+      ['THS but not a stale Tencent quote', 'old', { tencent: null, ths: T }],
+      ['neither when THS is also inconsistent', 'both-bad', { tencent: null, ths: null }],
+    ])('records %s for parent ETF quotes', async (_name, kind, expected) => {
+      control.fund = 'etf';
+      control.series.hs_510310 = '0930,101,0,0,0;1000,101,0,0,0';
+      if (kind === 'transport') control.fault = 'qt.gtimg.cn';
+      if (kind === 'old') control.times.sh510310 = '20261106095459';
+      if (kind === 'both-bad') {
+        control.tencentMissing = 'sh510310';
+        control.snapshotPre = '99';
+      }
+      const target = app();
+      expect((await current(target, '110020')).status).toBe(
+        kind === 'both-bad' ? 'unavailable' : 'estimated',
+      );
+      expect(await upstreams(target)).toMatchObject({ tiantian: null, sina: null, ...expected });
+    });
+
+    it.each([
+      ['an adopted relation', 'valid', '2026-11-06T03:00:01.000Z'],
+      ['a page without the relation link', 'no-link', '2026-11-06T03:00:00.000Z'],
+      ['a relation the exchange does not confirm', 'non-etf', '2026-11-06T03:00:00.000Z'],
+    ])('refreshes EastMoney for the ETF relation only for %s', async (_name, kind, expected) => {
+      control.fund = 'etf';
+      const replay = control.replay;
+      let relationFetchedAt = '';
+      control.replay = (url) => {
+        if (url.hostname === 'fund.eastmoney.com' && relationFetchedAt)
+          control.now = relationFetchedAt;
+        return replay(url);
+      };
+      const target = app();
+      // Warm up: caches the NAV for the day and the relation for an hour.
+      expect((await current(target, '110020')).status).toBe('estimated');
+      // One hour later the relation is fetched again. Fund info (also EastMoney, uncached) is
+      // fetched first at 03:00; the relation page moves the clock one second on, and the NAV
+      // is a cache hit, so only a recorded relation can produce the later time.
+      control.now = `${day}T03:00:00.000Z`;
+      relationFetchedAt = `${day}T03:00:01.000Z`;
+      control.times.sh510310 = '20261106110000';
+      if (kind === 'no-link') control.mapping = control.mapping.replace(/查看\s*相关ETF/g, '');
+      if (kind === 'non-etf')
+        control.identity = control.identity.replace(/"subClass":"\d+"/g, '"subClass":"05"');
+      expect((await current(target, '110020')).status).toBe(
+        kind === 'valid' ? 'estimated' : 'unavailable',
+      );
+      expect((await upstreams(target)).eastmoney).toBe(expected);
+    });
+
+    it('records THS for an intraday series with points, not for an empty or failed one', async () => {
+      control.report = report();
+      const target = app();
+      expect((await history(target)).points).toHaveLength(2);
+      expect((await upstreams(target)).ths).toBe(T);
+
+      control.series.hs_600519 = '';
+      control.series.sz_300308 = '';
+      const empty = app();
+      expect((await history(empty)).points).toEqual([]);
+      expect((await upstreams(empty)).ths).toBeNull();
+
+      control.series = {};
+      control.snapshotPrice = '200';
+      const invalid = app();
+      expect((await invalid.request('/v1/funds/000001/estimates/intraday')).status).toBe(502);
+      expect((await upstreams(invalid)).ths).toBeNull();
+    });
+  });
 });
 
 describe('calculated estimate review r5 boundaries over HTTP', () => {
