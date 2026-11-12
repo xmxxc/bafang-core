@@ -267,7 +267,7 @@ $L down -v   # 用完删除容器和数据卷
    - 先确保 postgres 运行并健康（已停止的会被启动，最多等 120 秒），再以超级用户 `postgres` 把业务库备份到 `backups/pre-deploy-<UTC 时间>-<标签>.dump`。数据库起不来或备份失败都拒绝部署，core 不切换；
    - 先用新镜像单独执行一次性迁移服务（`run --rm migrate`），以它的退出码为准。**迁移失败时旧 core 容器没有动过、继续服务**：记录 `migrate-failed`，workflow 失败，不回滚。之所以单独先跑：直接 `up core` 时 Compose 会先删掉旧 core、建好新容器，再执行 migrate，迁移失败时旧版本已经停了；
    - 迁移成功后以新标签执行 `up -d --no-build core`（Compose 会再跑一次 migrate，已执行过的迁移不会重跑）；
-   - 在容器内轮询 `/v1/health`，按实际经过的时间计算上限：默认 180 秒，单次请求最多 5 秒且不超过剩余时间。通过后把 `BAFANG_CORE_IMAGE`、`BAFANG_CORE_TAG` 写回 `.env.production`，之后手动执行 `dc` 也是新版本；
+   - 在容器内轮询 `/v1/health`，按实际经过的时间计算上限：默认 180 秒，单次请求最多 5 秒且不超过剩余时间。通过后把 `BAFANG_CORE_IMAGE`、`BAFANG_CORE_TAG` 写回 `.env.production`（已有该行则原地替换，否则另起一行追加；其他行不变，文件没有末尾换行也可以），之后手动执行 `dc` 也是新版本；
    - 新 core 未能创建、启动，或健康检查不过：打印 core 与迁移日志，停止 core，用 `bafang-core:rollback` 以 `up -d --no-build core` 重建容器，复检上限默认 120 秒，然后让 workflow 失败。回滚通过后 `.env.production` 一律改写为 `bafang-core:rollback`：原来写的标签可能已被同名新镜像覆盖（包括连续几次失败部署的情况），之后手动执行 `dc` 会起坏镜像。成功部署和成功回滚后，脚本都会核对 `.env.production` 展开出的镜像 ID 与运行中 core 的镜像 ID 一致，不一致就报错。
 4. 每次结果追加到部署目录的 `deploy-history.log`（`deployed` / `migrate-failed` / `failed` / `rolled-back` / `rollback-failed`，回滚行记"原标签@镜像 ID"）。
 

@@ -79,12 +79,16 @@ wait_healthy() {
 }
 
 # 把 KEY=VALUE 写回 .env.production：已有该行则替换，否则追加；原地覆盖以保留文件权限。
+# env 文件可以没有末尾换行，追加前先补一个，新键才会独立成行、不改动原末行的值。
 persist() {
   tmp=$(mktemp)
   if grep -q "^$1=" .env.production; then
     sed "s|^$1=.*|$1=$2|" .env.production >"$tmp"
   else
     cat .env.production >"$tmp"
+    if [ -s "$tmp" ] && [ -n "$(tail -c 1 "$tmp")" ]; then
+      printf '\n' >>"$tmp"
+    fi
     printf '%s=%s\n' "$1" "$2" >>"$tmp"
   fi
   cat "$tmp" >.env.production
