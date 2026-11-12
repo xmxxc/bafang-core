@@ -1,9 +1,8 @@
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
+import { migrationFolderThrough } from '../support/migrations';
 import { createTestSchema, dropTestSchema } from '../support/test-db';
 
 // D17: migration-only setup may select the old migration chain; behavior is checked over HTTP.
@@ -11,23 +10,9 @@ describe('binding-code migration over HTTP', () => {
   it.each(['fresh', 'upgrade'] as const)(
     'supports the complete binding flow after %s migration',
     async (mode) => {
-      const folder = await mkdtemp(join(tmpdir(), 'binding-migrations-'));
+      const folder = await migrationFolderThrough(9);
       let database: Awaited<ReturnType<typeof createTestSchema>> | undefined;
       try {
-        await mkdir(join(folder, 'meta'));
-        const journal = JSON.parse(
-          await readFile(join(MIGRATIONS_FOLDER, 'meta/_journal.json'), 'utf8'),
-        ) as {
-          entries: { idx: number; tag: string }[];
-        };
-        journal.entries = journal.entries.filter((entry) => entry.idx <= 9);
-        await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
-        for (const entry of journal.entries) {
-          await copyFile(
-            join(MIGRATIONS_FOLDER, `${entry.tag}.sql`),
-            join(folder, `${entry.tag}.sql`),
-          );
-        }
         database = await createTestSchema(mode === 'upgrade' ? folder : MIGRATIONS_FOLDER);
         let emailCode = '';
         const app = createApp({
