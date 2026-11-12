@@ -19,7 +19,8 @@ import { type Db, type HealthProbe } from './db';
 import { errorBody } from './errors';
 import { healthRoute } from './routes/health';
 import { fundDetailRoute, fundSearchRoute } from './routes/funds';
-import { estimateBatchRoute } from './routes/estimates';
+import { fundHoldingsRoute } from './routes/holdings';
+import { estimateBatchRoute, estimateIntradayRoute } from './routes/estimates';
 import { latestNavRoute, navHistoryRoute } from './routes/nav';
 import { marketStatusRoute } from './routes/market-status';
 import { marketIndicesRoute } from './routes/market-indices';
@@ -42,6 +43,7 @@ import {
   wechatBindCodeRoute,
 } from './routes/auth';
 import { createFundService } from './market/funds';
+import { createHoldingsService } from './market/holdings';
 import { createNavService } from './market/nav';
 import { createEstimateService } from './market/estimates';
 import { marketStatus } from './market/status';
@@ -265,6 +267,11 @@ export function createApp(deps: AppDeps = {}): App {
   });
 
   const funds = createFundService({ upstream, clock: resolved.clock });
+  const holdings = createHoldingsService({
+    upstream,
+    clock: resolved.clock,
+    calendar: resolved.tradingCalendar,
+  });
   const nav = createNavService({
     upstream,
     clock: resolved.clock,
@@ -276,6 +283,7 @@ export function createApp(deps: AppDeps = {}): App {
     calendar: resolved.tradingCalendar,
     nav,
     funds,
+    holdings,
   });
   const positions = resolved.database
     ? createPositionService({
@@ -312,6 +320,49 @@ export function createApp(deps: AppDeps = {}): App {
     const { codes } = c.req.valid('query');
     return c.json(await estimates.batch([...new Set(codes.split(','))]), 200);
   });
+  app.openapi(estimateIntradayRoute, async (c) => {
+    const { code } = c.req.valid('param');
+    try {
+      return c.json(await estimates.intraday(code), 200);
+    } catch (error) {
+      if (!(error instanceof UpstreamError)) throw error;
+      console.warn('[bafang-core] estimate intraday failed', code, error.kind, error.message);
+      return c.json(errorBody('upstream_unavailable', '行情上游暂不可用'), 502);
+    }
+  });
+
+  app.openapi(fundHoldingsRoute, async (c) => {
+    const { code } = c.req.valid('param');
+    try {
+      const result = await holdings.get(code);
+      if (!result) return c.json(errorBody('fund_not_found', '没有有效的基金季报'), 404);
+      return c.json(
+        {
+          reportDate: result.reportDate,
+          holdingsSource: result.holdingsSource,
+          holdingsFallback: result.holdingsFallback,
+          items: result.items.map((item) => ({
+            ...item,
+            quote: item.quote
+              ? {
+                  price: item.quote.price,
+                  prevClose: item.quote.prevClose,
+                  change: item.quote.change,
+                  changePercent: item.quote.changePercent,
+                  tradeDate: item.quote.tradeDate,
+                  quoteTime: item.quote.time.toISOString(),
+                }
+              : null,
+          })),
+        },
+        200,
+      );
+    } catch (error) {
+      if (error instanceof UpstreamError)
+        return c.json(errorBody('upstream_unavailable', '行情上游暂不可用'), 502);
+      throw error;
+    }
+  });
 
   app.openapi(fundDetailRoute, async (c) => {
     const { code } = c.req.valid('param');
@@ -319,7 +370,16 @@ export function createApp(deps: AppDeps = {}): App {
     if (!fund) {
       return c.json(errorBody('fund_not_found', `没有代码为 ${code} 的基金`), 404);
     }
-    return c.json(fund, 200);
+    return c.json(
+      {
+        code: fund.code,
+        name: fund.name,
+        category: fund.category,
+        type: fund.type,
+        settlement: fund.settlement,
+      },
+      200,
+    );
   });
 
   app.openapi(latestNavRoute, async (c) => {

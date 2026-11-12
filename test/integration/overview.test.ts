@@ -23,6 +23,8 @@ describe('今日概览（HTTP）', () => {
   let clockReads: Date[];
   let published: boolean;
   let changePercent: number;
+  /** Tiantian estimate time; it must not be later than the request instant. */
+  let estimateTime: string;
   let verificationCode: string;
 
   const replay: Replay = (url) => {
@@ -46,7 +48,13 @@ describe('今日概览（HTTP）', () => {
       };
       body.data = body.data.map((row) =>
         row.FCODE === '110020'
-          ? { ...row, PDATE: '2026-11-05', NAV: 1.703, GSZZL: changePercent }
+          ? {
+              ...row,
+              PDATE: '2026-11-05',
+              NAV: 1.703,
+              GSZZL: changePercent,
+              GZTIME: estimateTime,
+            }
           : row,
       );
       return tiantianSamples(JSON.stringify(body))(url);
@@ -80,6 +88,7 @@ describe('今日概览（HTTP）', () => {
     clockReads = [];
     published = false;
     changePercent = -1.44;
+    estimateTime = '2026-11-06 10:00';
     app = makeApp();
   });
   afterEach(async () => dropTestSchema(database));
@@ -158,7 +167,7 @@ describe('今日概览（HTTP）', () => {
             sourceName: '天天基金',
             fallback: false,
             date: '2026-11-06',
-            time: '2026-11-06T07:00:00.000Z',
+            time: '2026-11-06T02:00:00.000Z',
           },
         },
       ],
@@ -229,6 +238,7 @@ describe('今日概览（HTTP）', () => {
     await create(headers, channel!.id);
 
     const requestTime = new Date('2026-11-06T06:59:59.999Z');
+    estimateTime = '2026-11-06 14:59';
     now = requestTime;
     const fixed = await overview(headers);
 
@@ -243,6 +253,10 @@ describe('今日概览（HTTP）', () => {
 
     expect(body).toEqual(fixed);
     expect(body.time).toBe(requestTime.toISOString());
+    expect(body.positions[0]!.quote).toMatchObject({
+      type: 'estimate',
+      time: '2026-11-06T06:59:00.000Z',
+    });
     expect(
       body.indices.items.filter((item) => item.market === 'cn').map((item) => item.marketStatus),
     ).toEqual(['trading', 'trading', 'trading']);

@@ -8,3 +8,14 @@ docs/agents/issue-tracker.md
 docs/agents/triage-labels.md
 test/fixtures/upstream/**/*.json
 openapi.json
+# Raw upstream evidence; formatting would alter the captured response bytes.
+test/fixtures/upstream/eastmoney/fund-110020.txt
+test/fixtures/upstream/sse/fund-510310.txt
+test/fixtures/upstream/sse/fund-type-protocol.txt
+test/fixtures/upstream/eastmoney/fund-001051.txt
+test/fixtures/upstream/eastmoney/fund-110021.txt
+test/fixtures/upstream/eastmoney/fund-110019.txt
+test/fixtures/upstream/ths/time-hs_510310.jsonp
+test/fixtures/upstream/ths/realhead-hs_510310.jsonp
+test/fixtures/upstream/szse/notice-159901.html
+test/fixtures/upstream/eastmoney/fund-000216.txt

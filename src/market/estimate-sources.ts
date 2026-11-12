@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { formatFixed, parseFixed, rescale, type Fixed } from '../fixed-point';
 import { UpstreamError, type UpstreamFetcher } from './upstream';
 
 /**
@@ -33,15 +34,17 @@ const TiantianResponseSchema = z.object({
 });
 
 const NumberLike = z.union([z.number(), z.string()]).nullish();
+/** 由 `quoteDecimalTokens` 保留了原文的十进制文本；仍是 JSON 数字说明预处理没认出来，整行不采纳。 */
+const DecimalText = z.string().nullish();
 
 const TiantianRowSchema = z.object({
   FCODE: z.string(),
-  GSZ: NumberLike,
+  GSZ: DecimalText,
   GSZZL: NumberLike,
   /** 形如 "2026-11-06 14:30"。 */
   GZTIME: z.string().nullish(),
   /** 天天基金已知的最近一期单位净值及其日期。 */
-  NAV: NumberLike,
+  NAV: DecimalText,
   PDATE: z.string().nullish(),
 });
 
@@ -61,10 +64,8 @@ export async function fetchTiantianEstimates(
   today: string,
 ): Promise<Map<string, SourceEstimate>> {
   const url = `${TIANTIAN_URL}?FCODES=${codes.join(',')}&FIELDS=FCODE,GSZ,GSZZL,GZTIME,NAV,PDATE`;
-  const body = parseJson(
-    TiantianResponseSchema,
-    await upstream.fetchText({ url, referer: TIANTIAN_REFERER }),
-  );
+  const text = await upstream.fetchText({ url, referer: TIANTIAN_REFERER });
+  const body = parseJson(TiantianResponseSchema, quoteDecimalTokens(text, ['GSZ', 'NAV']));
   if (!body.success || (body.errorCode ?? 0) !== 0) {
     throw new UpstreamError('bad_response', `tiantian returned errorCode ${body.errorCode}`);
   }
@@ -131,12 +132,12 @@ function toEstimate(
   base: SourceEstimate['base'],
 ): SourceEstimate | null {
   const change = toFiniteNumber(changeRaw);
-  const value = toFiniteNumber(valueRaw);
-  if (change === null || value === null || value <= 0) return null;
+  const value = formatNav(valueRaw);
+  if (change === null || value === null) return null;
   if (date !== today || !time || !/^\d{2}:\d{2}(:\d{2})?$/.test(time)) return null;
   const at = new Date(`${date}T${time.length === 5 ? `${time}:00` : time}+08:00`);
   if (Number.isNaN(at.getTime())) return null;
-  return { changePercent: change, value: value.toFixed(4), time: at, base };
+  return { changePercent: change, value, time: at, base };
 }
 
 /** 是否为真实存在的 YYYY-MM-DD 日期。 */
@@ -146,10 +147,29 @@ function isIsoDate(value: string): boolean {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-/** 把单位净值规整成 4 位小数字符串；缺失、不可解析或不为正时返回 null。 */
+/**
+ * 把单位净值（或估值）规整成 4 位小数字符串：保留上游的十进制文本，用定点四舍五入（远离零），
+ * 不经过二进制浮点。缺失、不可解析，或舍入后不为正时返回 null。
+ */
 export function formatNav(raw: unknown): string | null {
-  const nav = toFiniteNumber(raw);
-  return nav !== null && nav > 0 ? nav.toFixed(4) : null;
+  const parsed = toDecimal(raw);
+  if (!parsed) return null;
+  const nav = rescale(parsed, 4);
+  return nav.value > 0n ? formatFixed(nav) : null;
+}
+
+/**
+ * 上游十进制文本的精确定点表示，可以是指数形式（如 `1e-7`），只把指数折进 scale，不做浮点运算。
+ * 只接受字符串：JSON 数字已经被 `JSON.parse` 变成 binary64，不再是上游写下的数，一律拒绝。
+ */
+function toDecimal(raw: unknown): Fixed | null {
+  if (typeof raw !== 'string') return null;
+  const match = /^\+?([^eE]+)(?:[eE]([+-]?\d{1,3}))?$/.exec(raw.trim());
+  if (!match) return null;
+  const [, mantissa = '', exponent = '0'] = match;
+  const scale = mantissa.split('.')[1]?.length ?? 0;
+  const parsed = parseFixed(mantissa, scale);
+  return parsed && { value: parsed.value, scale: scale - Number(exponent) };
 }
 
 function toFiniteNumber(raw: unknown): number | null {
@@ -159,6 +179,20 @@ function toFiniteNumber(raw: unknown): number | null {
   if (trimmed === '' || trimmed === '--') return null;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+/**
+ * 在 `JSON.parse` 之前，把指定键的 JSON 数字 token 原样改写成字符串，例如
+ * `"GSZ":1.00004999999999999999` → `"GSZ":"1.00004999999999999999"`，让定点工具拿到上游原文。
+ * 只匹配「键名字符串 + 冒号 + 严格符合 JSON 语法的数字 + 逗号或右花括号」：JSON 字符串内部的引号
+ * 必然转义，不会被误认成键。其他写法保持原样，由解析或 schema 拒绝。
+ */
+function quoteDecimalTokens(text: string, keys: readonly string[]): string {
+  const pattern = new RegExp(
+    `("(?:${keys.join('|')})"\\s*:\\s*)(-?(?:0|[1-9]\\d*)(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)(?=\\s*[,}])`,
+    'g',
+  );
+  return text.replace(pattern, '$1"$2"');
 }
 
 function parseJson<T>(schema: z.ZodType<T>, text: string): T {

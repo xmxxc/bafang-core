@@ -1,0 +1,78 @@
+[
+  {
+    "url": "https://fund.eastmoney.com/000216.html",
+    "utc": "2026-11-10T11:02:17.299136+00:00",
+    "status": 200,
+    "headers": {
+      "Date": "Tue, 10 Nov 2026 11:02:15 GMT",
+      "Content-Type": "text/html",
+      "ETag": "\"6af2f7d6-1cf97\"",
+      "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+      "Server": "Lego Server",
+      "X-Cache-Lookup": "Cache Miss",
+      "Last-Modified": "Tue, 10 Nov 2026 10:54:14 GMT",
+      "Content-Length": "118679",
+      "Accept-Ranges": "bytes",
+      "X-NWS-LOG-UUID": "1712446598269803799",
+      "Connection": "close"
+    },
+    "bytes": 118679,
+    "sha256": "a86f9b7d492c747185110911e26277dcdeccf7442e72b87c6456076177750efc",
+    "fixture": "eastmoney/fund-000216.txt"
+  },
+  {
+    "url": "https://fundmobapi.eastmoney.com/FundMApi/FundBaseTypeInformation.ashx?FCODE=000216&deviceid=Wap&plat=Wap&product=EFund&version=2.0.0",
+    "utc": "2026-11-10T11:02:16.330515+00:00",
+    "status": 200,
+    "headers": {
+      "Server": "nginx/1.24.0",
+      "Date": "Tue, 10 Nov 2026 11:02:15 GMT",
+      "Content-Type": "text/plain; charset=utf-8",
+      "Content-Length": "1586",
+      "Connection": "close",
+      "Cache-Control": "private",
+      "X-AspNet-Version": "4.0.30319",
+      "X-Powered-By": "ASP.NET"
+    },
+    "bytes": 1586,
+    "sha256": "69b6fee90a8ba871bbed928b7fc066b7f446869859d8c329bb8656323aa63c9a",
+    "fixture": "eastmoney/base-000216.json"
+  },
+  {
+    "url": "https://query.sse.com.cn/commonSoaQuery.do?sqlId=FUND_LIST&fundType=00&fundCode=518880&isPagination=true&pageHelp.pageSize=100&pageHelp.pageNo=1&subClass=",
+    "utc": "2026-11-10T11:02:19.168394+00:00",
+    "status": 200,
+    "headers": {
+      "Server": "nginx",
+      "Date": "Tue, 10 Nov 2026 11:02:18 GMT",
+      "Content-Type": "application/json;charset=UTF-8",
+      "Content-Length": "1128",
+      "Connection": "close",
+      "Content-Language": "en-CN",
+      "X-Download-Options": "noopen",
+      "X-Permitted-Cross-Domain-Policies": "none",
+      "X-Xss-Protection": "1",
+      "Referrer-Policy": "origin-when-cross-origin",
+      "Content-Security-Policy": "style-src 'self' https://*.sseinfo.com https://*.sse.com.cn  https://yunhq.sse.com.cn:32042 'unsafe-inline'; script-src 'self' https://*.sseinfo.com https://*.sse.com.cn https://yunhq.sse.com.cn:32042 'unsafe-inline' 'unsafe-eval'; frame-ancestors *.sse.com.cn *.sseinfo.com "
+    },
+    "bytes": 1128,
+    "sha256": "5a7978c939b4606501810b2a45125e100364e63e7ea0b6f608687f0d7a690b0e",
+    "fixture": "sse/fund-518880.json"
+  },
+  {
+    "fixture": "szse/fund-159972.json",
+    "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1105&TABKEY=tab1&PAGENO=1&txtkey1=159972&selectJjlb=ETF&selectTzlb=",
+    "captureWindowUTC": "2026-11-10T11:10:00Z/2026-11-10T11:12:00Z",
+    "status": 200,
+    "sha256": "73194393119fab637a938759039514c4749d35597c89cb326ce05738fca690d0",
+    "bytes": 7659
+  },
+  {
+    "fixture": "szse/fund-159934.json",
+    "url": "https://www.szse.cn/api/report/ShowReport/data?SHOWTYPE=JSON&CATALOGID=1105&TABKEY=tab1&PAGENO=1&txtkey1=159934&selectJjlb=ETF&selectTzlb=",
+    "captureWindowUTC": "2026-11-10T11:10:00Z/2026-11-10T11:12:00Z",
+    "status": 200,
+    "sha256": "5761feb2e425adcf1ca3195a7ae6ed26a381239540461fac738c0635a608c612",
+    "bytes": 7656
+  }
+]

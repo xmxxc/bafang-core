@@ -311,9 +311,10 @@
             "type": "string",
             "enum": [
               "tiantian",
-              "sina"
+              "sina",
+              "calculated"
             ],
-            "description": "估值来源：tiantian 天天基金（一级）、sina 新浪财经（二级）"
+            "description": "估值来源：tiantian 天天基金、sina 新浪财经、calculated 基于季报重仓股或已核实母ETF自算"
           },
           "sourceName": {
             "type": "string",
@@ -323,6 +324,61 @@
           "fallback": {
             "type": "boolean",
             "description": "是否发生了回退：一级来源（天天基金）失败或没有估值，改用了后面的来源"
+          },
+          "calculation": {
+            "type": "object",
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "top_holdings",
+                  "parent_etf"
+                ]
+              },
+              "reportDate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "disclosedWeightPercent": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "parentEtfCode": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^\\d{6}$",
+                "example": "000001",
+                "description": "6 位基金代码"
+              },
+              "quoteTimeEnd": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "quoteSource": {
+                "type": "string",
+                "enum": [
+                  "tencent",
+                  "ths",
+                  "mixed"
+                ]
+              }
+            },
+            "required": [
+              "method",
+              "reportDate",
+              "disclosedWeightPercent",
+              "parentEtfCode",
+              "quoteTimeEnd"
+            ],
+            "description": "参考模型：重仓股报告期与披露占净值比例，或已核实母ETF。未披露资产贡献按0建模，不代表真实收益为0；估值时间为最早参与报价，quoteTimeEnd为最晚参与报价。"
           },
           "referenceOnly": {
             "type": "boolean",
@@ -342,6 +398,138 @@
           "referenceOnly"
         ],
         "description": "状态为 estimated 时给出；unavailable、pre_market、holiday 时为 null"
+      },
+      "FundHoldings": {
+        "type": "object",
+        "properties": {
+          "reportDate": {
+            "type": "string"
+          },
+          "holdingsSource": {
+            "type": "string",
+            "enum": [
+              "eastmoney",
+              "sina"
+            ],
+            "description": "重仓名单来源：eastmoney 为东方财富 F10（主）；sina 为新浪基金页面（东方财富失败时的备用）"
+          },
+          "holdingsFallback": {
+            "type": "boolean",
+            "description": "为 true 表示名单来自新浪回退：新浪官方表只列 A 股持仓，港股等境外持仓会缺失，不保证是完整的前十大重仓；新浪页面没有重仓区块时返回 502"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FundTopHolding"
+            }
+          }
+        },
+        "required": [
+          "reportDate",
+          "holdingsSource",
+          "holdingsFallback",
+          "items"
+        ]
+      },
+      "FundTopHolding": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^(?!0+$)[A-Za-z0-9][A-Za-z0-9.-]*$",
+            "description": "上游股票标识；格式不代表市场真实性，无法可靠映射时 quote 为 null"
+          },
+          "weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "reportDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "quote": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "price": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "prevClose": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "change": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "changePercent": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "tradeDate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "quoteTime": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "price",
+              "prevClose",
+              "change",
+              "changePercent",
+              "tradeDate",
+              "quoteTime"
+            ]
+          },
+          "quoteSource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "tencent",
+              "ths",
+              null
+            ]
+          },
+          "quoteFallback": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "code",
+          "weight",
+          "reportDate",
+          "quote",
+          "quoteSource",
+          "quoteFallback"
+        ]
       },
       "FundDetail": {
         "allOf": [
@@ -908,10 +1096,11 @@
             "enum": [
               "tiantian",
               "sina",
+              "calculated",
               "eastmoney",
               null
             ],
-            "description": "行情来源：天天基金 / 新浪财经 / 东方财富净值；不可用为 null"
+            "description": "行情来源：天天基金 / 新浪财经 / 自算估值 / 东方财富净值；不可用为 null"
           },
           "sourceName": {
             "type": [
@@ -1877,7 +2066,7 @@
           "market"
         ],
         "summary": "批量估值",
-        "description": "一次返回多只基金的估值涨跌、估值时间、来源与是否回退。来源按天天基金 → 新浪财经的顺序回退；全部失败时该基金为 unavailable，不返回 0%。估值基准的日期与单位净值必须匹配估值日期之前最近一期已公布净值，且日期必须是适用日历的上一个交易日。估值日或向前检索经过的年度覆盖未知、基金适用日历无法确定或净值无法核对时均为 unavailable。无基准日期的来源（如新浪）仅在近 1 月的估值日前净值中唯一匹配上一交易日、且历史包含再前一个适用交易日时采纳，否则 unavailable；QDII 尚无可靠境外日历映射，不采纳。估值日覆盖已知时，盘前与休市逐只返回 pre_market / holiday；交易日收盘后返回当天的收盘估值。交易时段结果缓存 30 秒；收盘估值缓存到下一个已覆盖交易日开盘，缓存命中仍重新核对基准。marketStatus 保持市场状态接口的兼容判断，覆盖未知时可能为 trading 而基金为 unavailable。匿名可用并限流。",
+        "description": "一次返回多只基金的估值涨跌、估值时间、来源与是否回退。来源按天天基金 → 新浪财经 → 自算的顺序回退；全部失败时该基金为 unavailable，不返回 0%。自算普通基金使用有效季报前十重仓股的可信当日行情（名单须为东方财富完整披露，新浪A股子集不采纳），权重不归一化，属于部分持仓参考模型；ETF联接使用已核实母ETF的实时涨跌，支持交易所明确确认的股票、黄金、债券等境内ETF；身份核验独立于资产类别，QDII及未知境外日历仍不可用。估值基准的日期与单位净值必须匹配估值日期之前最近一期已公布净值，且日期必须是适用日历的上一个交易日。估值日或向前检索经过的年度覆盖未知、基金适用日历无法确定或净值无法核对时均为 unavailable。无基准日期的来源（如新浪）仅在近 1 月的估值日前净值中唯一匹配上一交易日、且历史包含再前一个适用交易日时采纳，否则 unavailable；QDII 尚无可靠境外日历映射，不采纳。每个来源的估值时间按该来源返回的时刻判定：不得晚于返回时刻，盘中落后不超过 5 分钟；因此估值时间可能略晚于顶层 time（请求时刻）。估值日覆盖已知时，盘前与休市逐只返回 pre_market / holiday；交易日收盘后返回当天的收盘估值。交易时段结果缓存 30 秒；收盘估值缓存到下一个已覆盖交易日开盘，缓存命中仍重新核对基准。marketStatus 保持市场状态接口的兼容判断，覆盖未知时可能为 trading 而基金为 unavailable。匿名可用并限流。",
         "parameters": [
           {
             "schema": {
@@ -1925,6 +2114,303 @@
           },
           "500": {
             "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/{code}/estimates/intraday": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "当日估值分时",
+        "description": "仅返回同日真实交易时段点推算的参考估值；正常盘后附带标签被过滤，每条成分序列只保留不晚于其自身取回时刻的标签，取回时已跨上海日期则不可用；重仓股名单来自新浪回退（仅A股子集）时不可用。盘前、休市、跨日或没有共同成分点时为空，不插值补零；上游损坏日期、价格、昨收冲突或非空坏协议返回502。",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}$",
+              "example": "000001",
+              "description": "6 位基金代码"
+            },
+            "required": true,
+            "description": "6 位基金代码",
+            "name": "code",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "当日分时序列",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "pattern": "^\\d{6}$",
+                      "example": "000001",
+                      "description": "6 位基金代码"
+                    },
+                    "tradeDate": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "estimated",
+                        "unavailable",
+                        "pre_market",
+                        "holiday"
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "calculated"
+                      ]
+                    },
+                    "referenceOnly": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "fallback": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ]
+                    },
+                    "calculation": {
+                      "type": [
+                        "object",
+                        "null"
+                      ],
+                      "properties": {
+                        "method": {
+                          "type": "string",
+                          "enum": [
+                            "top_holdings",
+                            "parent_etf"
+                          ]
+                        },
+                        "reportDate": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "disclosedWeightPercent": {
+                          "type": "number",
+                          "minimum": 0,
+                          "maximum": 100
+                        },
+                        "parentEtfCode": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "pattern": "^\\d{6}$",
+                          "example": "000001",
+                          "description": "6 位基金代码"
+                        },
+                        "quoteTimeEnd": {
+                          "type": [
+                            "string",
+                            "null"
+                          ],
+                          "format": "date-time"
+                        },
+                        "quoteSource": {
+                          "type": "string",
+                          "enum": [
+                            "tencent",
+                            "ths",
+                            "mixed"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "method",
+                        "reportDate",
+                        "disclosedWeightPercent",
+                        "parentEtfCode",
+                        "quoteTimeEnd"
+                      ],
+                      "description": "参考模型：重仓股报告期与披露占净值比例，或已核实母ETF。未披露资产贡献按0建模，不代表真实收益为0；估值时间为最早参与报价，quoteTimeEnd为最晚参与报价。"
+                    },
+                    "points": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "time": {
+                            "type": "string",
+                            "format": "date-time"
+                          },
+                          "changePercent": {
+                            "type": "number"
+                          },
+                          "value": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "time",
+                          "changePercent",
+                          "value"
+                        ]
+                      }
+                    },
+                    "coverage": {
+                      "type": "object",
+                      "properties": {
+                        "returnedPoints": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "omittedPoints": {
+                          "type": "integer",
+                          "minimum": 0
+                        }
+                      },
+                      "required": [
+                        "returnedPoints",
+                        "omittedPoints"
+                      ],
+                      "description": "返回点数与因成分缺点而跳过的同日时间标签数；不是全天预期点数，不保证覆盖完整交易日"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "tradeDate",
+                    "status",
+                    "source",
+                    "referenceOnly",
+                    "fallback",
+                    "calculation",
+                    "points",
+                    "coverage"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "限流",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "行情上游故障或协议损坏",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/{code}/holdings": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "基金前十大重仓股",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}$",
+              "example": "000001",
+              "description": "6 位基金代码"
+            },
+            "required": true,
+            "description": "6 位基金代码",
+            "name": "code",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "最新季报前十大重仓股。东方财富为主；回退新浪时 holdingsFallback 为 true，名单只含 A 股持仓，不保证是完整前十大",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundHoldings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "上游成功确认无股票季报（空内容及空报告年份列表）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "限流",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游不可用",
             "content": {
               "application/json": {
                 "schema": {
