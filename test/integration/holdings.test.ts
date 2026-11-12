@@ -849,6 +849,46 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       ['600519', null],
       ['300308', null],
     ]);
+    // The Tencent quote was valid when observed but was not adopted: no success is reported.
+    const health = await target.request('/v1/health');
+    expect(health.status).toBe(200);
+    expect(((await health.json()) as { upstreams: unknown }).upstreams).toMatchObject({
+      tencent: { lastSuccessAt: null },
+      ths: { lastSuccessAt: null },
+    });
+  });
+  it('does not report a THS quote that a slower backup pushes past the close', async () => {
+    replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
+    replay.now = new Date('2026-11-09T06:59:59Z');
+    const target = app({
+      upstream: {
+        async fetchText(request) {
+          if (request.url.includes('qt.gtimg.cn')) return 'v_sh600519="";\nv_sz300308="";';
+          if (request.url.includes('/sz_300308/')) {
+            // The 600519 backup is observed first, at 14:59:59; this one ends after the close.
+            await new Promise((resolve) => setTimeout(resolve, 20));
+            replay.now = new Date('2026-11-09T07:00:05Z');
+            throw new UpstreamError('timeout', 'slow THS backup');
+          }
+          if (request.url.includes('/realhead/hs_600519/'))
+            return 'cb({"items":{"6":"100.00","10":"101.00"}})';
+          if (request.url.includes('/time/hs_600519/'))
+            return 'cb({"hs_600519":{"pre":"100.00","date":"20261109","data":"1459,101.00,0,0,0"}})';
+          return replay.fetchText(request);
+        },
+      },
+    });
+    const body = await get(target);
+    expect(body.items.map((item) => [item.code, item.quote, item.quoteFallback])).toEqual([
+      ['600519', null, true],
+      ['300308', null, true],
+    ]);
+    const health = await target.request('/v1/health');
+    expect(((await health.json()) as { upstreams: unknown }).upstreams).toMatchObject({
+      eastmoney: { lastSuccessAt: '2026-11-09T06:59:59.000Z' },
+      tencent: { lastSuccessAt: null },
+      ths: { lastSuccessAt: null },
+    });
   });
   it.each([
     ['slow', '2026-11-09T06:00:15Z'],

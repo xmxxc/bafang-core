@@ -21,6 +21,11 @@ export interface Calculation {
 }
 export interface CalculatedSource extends SourceEstimate {
   calculation: Calculation;
+  /**
+   * Upstreams whose quotes this calculation fetched itself (parent ETF). The caller reports
+   * them only once the estimate is adopted. Never serialized into the response.
+   */
+  fetchedQuoteSources: ('tencent' | 'ths')[];
 }
 export interface IntradayEstimate {
   code: string;
@@ -167,7 +172,6 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         for (const item of model.items) {
           let quote = quotes.get(item.symbol) ?? null;
           if (quote && stale(quote, observedAt, deps.calendar)) quote = null;
-          if (quote) deps.upstream.recordSuccess?.('tencent');
           const quoteSource: 'tencent' | 'ths' = quote ? 'tencent' : 'ths';
           if (!quote) {
             quote = await fetchThsQuote(
@@ -178,7 +182,6 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
             );
             // The backup snapshot is judged when its own call returns.
             if (quote && stale(quote, deps.clock.now(), deps.calendar)) quote = null;
-            if (quote) deps.upstream.recordSuccess?.('ths');
           }
           item.quote = quote ?? undefined;
           item.quoteSource = quote ? quoteSource : undefined;
@@ -213,6 +216,8 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         ...point,
         time: new Date(first),
         base: { date: base.date, unitNav: formatNav(base.unitNav)! },
+        fetchedQuoteSources:
+          model.method === 'parent_etf' ? [...quoteSources].filter((x) => x !== undefined) : [],
         calculation: {
           method: model.method,
           reportDate: model.reportDate,
@@ -261,8 +266,6 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
               )
               .map((point) => [point.time.getTime(), point]),
           );
-          // An empty series (before the first trade) is a legal empty result, not a success.
-          if (usable.size > 0) deps.upstream.recordSuccess?.('ths');
           return usable;
         }),
       );
@@ -289,6 +292,8 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         else result.coverage.omittedPoints++;
       }
       result.coverage.returnedPoints = result.points.length;
+      // Every returned point uses every THS series; an empty result is not a success.
+      if (result.points.length > 0) deps.upstream.recordSuccess?.('ths');
       result.status = result.points.length ? 'estimated' : 'unavailable';
       result.calculation = {
         method: model.method,
