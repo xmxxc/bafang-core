@@ -1,11 +1,12 @@
 # 生产部署
 
-core 在国内 VPS 上用 Docker Compose 运行，由三个服务组成，定义在 `compose.prod.yaml`：
+core 在国内 VPS 上用 Docker Compose 运行，服务定义在 `compose.prod.yaml`：
 
 | 服务       | 镜像                             | 说明                                                                                     |
 | ---------- | -------------------------------- | ---------------------------------------------------------------------------------------- |
 | `postgres` | `postgres:16-alpine`             | 数据卷 `pgdata`；只在 Compose 内部网络可达，不映射端口；首次初始化建出迁移角色与运行角色 |
-| `core`     | `bafang-core:${BAFANG_CORE_TAG}` | 本仓库 `Dockerfile` 构建；启动时先用迁移角色自动迁移，再用运行角色监听 3000；不映射端口  |
+| `migrate`  | `bafang-core:${BAFANG_CORE_TAG}` | 一次性任务：与 core 同一镜像，用迁移角色执行迁移后退出；只有它拿迁移凭据                 |
+| `core`     | `bafang-core:${BAFANG_CORE_TAG}` | 本仓库 `Dockerfile` 构建；`migrate` 成功退出后才启动，用运行角色监听 3000；不映射端口    |
 | `caddy`    | `caddy:2-alpine`                 | 唯一对外的服务（80/443），为 `CORE_DOMAIN` 自动签发、续期证书并反代到 `core:3000`        |
 
 ## 数据库角色
@@ -15,12 +16,12 @@ core 不使用 PostgreSQL 超级用户。postgres 首次初始化（空数据卷
 | 角色                                       | 属性                                              | 用途                                                                                                    |
 | ------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
 | `postgres`                                 | 超级用户                                          | 只用于初始化与运维（备份、恢复、改密码）；密码 `POSTGRES_PASSWORD` 只交给 postgres 服务，不交给 core    |
-| `PG_MIGRATION_USER`（默认 `bafang_owner`） | NOSUPERUSER NOCREATEDB NOCREATEROLE，业务库 owner | core 启动时执行迁移，拥有全部表                                                                         |
+| `PG_MIGRATION_USER`（默认 `bafang_owner`） | NOSUPERUSER NOCREATEDB NOCREATEROLE，业务库 owner | 一次性 `migrate` 服务执行迁移，拥有全部表                                                               |
 | `PGUSER`（默认 `bafang_app`）              | NOSUPERUSER NOCREATEDB NOCREATEROLE               | core 长期运行、日历导入、手动交易确认；只有 `public` 下表的增删改查与序列使用权限，不能建表、改表、删表 |
 
-迁移角色新建的表通过默认权限（`ALTER DEFAULT PRIVILEGES`）自动授予运行角色，升级新增的表无需手工授权。容器入口先用迁移角色迁移，再在启动服务前把 `PG_MIGRATION_*` 从进程环境中移除，HTTP 服务进程里只有运行角色的凭据。
+迁移角色新建的表通过默认权限（`ALTER DEFAULT PRIVILEGES`）自动授予运行角色，升级新增的表无需手工授权。迁移凭据只出现在一次性 `migrate` 服务的配置里；长期运行的 `core` 容器配置（含 Docker 健康检查拉起的进程）中没有迁移凭据，只有运行角色。`core` 依赖 `migrate` 成功退出（`service_completed_successfully`），所以 `dc up -d core` 每次都会先跑迁移，迁移失败时 core 不启动。
 
-取舍：分成两个角色后，即使 core 失陷，也只能读写业务数据，不能改表结构或触及集群其他库；代价是多一组密码，迁移凭据仍需放在 core 容器的配置里（只在迁移时用），且 `PGSCHEMA` 改为非 `public` 时需要自行给运行角色授权。
+取舍：分成两个角色后，即使 core 失陷，也只能读写业务数据，不能改表结构或触及集群其他库；代价是多一组密码、多一个一次性服务，且 `PGSCHEMA` 改为非 `public` 时需要自行给运行角色授权。
 
 镜像在构建阶段装好全部运行依赖，运行时不访问 npm、GitHub 或境外仓库。行情上游、Resend、微信、GitHub OAuth 是 core 的业务出站请求；Caddy 签发证书时需要访问 ACME 服务（默认 Let's Encrypt）。
 
@@ -93,7 +94,7 @@ alias dc='docker compose -f compose.prod.yaml --env-file .env.production'
    dc logs core
    ```
 
-   日志里依次出现 `running database migrations`、`migrations applied`、`bafang-core listening on …` 即迁移完成、服务就绪。
+   Compose 先等 postgres 健康，再运行 `migrate`（`dc logs migrate` 依次出现 `running database migrations`、`migrations applied`，随后以 0 退出），最后启动 core 与 caddy（`dc logs core` 出现 `bafang-core listening on …`）。`dc ps -a` 中 `migrate` 显示 `Exited (0)` 属正常。
 
 6. **导入交易日历**（新库是空的，估值与今日收益依赖年度日历覆盖，详见 `docs/deployment-calendar-coverage.md`）。镜像里带有仓库 `data/holidays/` 下的年度文件：
 
@@ -132,16 +133,17 @@ alias dc='docker compose -f compose.prod.yaml --env-file .env.production'
 
    ```bash
    dc up -d --no-build core
+   dc logs migrate
    dc logs -f core
    ```
 
-   新容器启动时自动执行迁移，迁移幂等，已执行过的不会重跑。**迁移失败时容器以非零状态退出、不会启动 HTTP 服务**；`restart: unless-stopped` 会让它反复重试，`dc ps` 显示 `Restarting`，此时看 `dc logs core` 排查。
+   `up core` 会先用新镜像重新运行 `migrate`：迁移幂等，已执行过的不会重跑。**迁移失败时 `migrate` 以非零状态退出，`up` 报 `service "migrate" didn't complete successfully` 并返回非零，core 不会被启动**（新 core 容器停在 Created）；看 `dc logs migrate` 排查，修复后再次 `dc up -d --no-build core`。
 
 4. 验证 `/v1/health`；版本说明里要求重新导入日历等额外步骤时照做（例如 `docs/deployment-calendar-coverage.md`）。
 
-**回滚：** 新版本没有带迁移（`dc logs core` 与 `__drizzle_migrations` 条数可确认）时，把 `BAFANG_CORE_TAG` 改回旧标签再 `dc up -d --no-build core` 即可。新版本执行过迁移时，迁移只向前、旧版本不会撤销它们，必须按下节"恢复"流程把升级前的备份恢复到新库再切换，期间 core 保持停止，最后用旧标签创建容器。
+**回滚：** 新版本没有带迁移（`dc logs migrate` 与 `__drizzle_migrations` 条数可确认）时，把 `BAFANG_CORE_TAG` 改回旧标签再 `dc up -d --no-build core` 即可。新版本执行过迁移时，迁移只向前、旧版本不会撤销它们，必须按下节"恢复"流程把升级前的备份恢复到新库再切换，期间 core 保持停止，最后用旧标签创建容器。
 
-只想单独执行迁移时用 `dc run --rm core migrate`。
+只想单独执行迁移时用 `dc up --no-build migrate`（或 `dc run --rm migrate`）。不要用 `dc run --rm core migrate`：core 的配置里没有迁移凭据。
 
 ## 数据库备份与恢复
 
@@ -163,7 +165,8 @@ dc exec -T postgres pg_dump -U postgres -d bafang -Fc > backups/bafang-$(date +%
 **恢复**（数据损坏，或回滚执行过迁移的升级）。不在原库上就地覆盖：`pg_restore --clean` 只清理备份里有的对象，升级新增、引用旧表的对象（例如带外键的新表）会让清理失败。做法是恢复到新的空库，核验后改名切换：
 
 ```bash
-# 1. 停止 core，整个恢复期间保持停止。不要用 dc start core：它会启动现有的（新版本）容器并重跑新迁移
+# 1. 停止 core，整个恢复期间保持停止。不要用 dc start core：它会直接启动现有的（新版本）容器，
+#    绕过 migrate 的依赖顺序；也不要运行 migrate（会对恢复库重跑新版本迁移）
 dc stop core
 
 # 2. 建空库（属主为迁移角色），把备份恢复进去；任何错误都中止且不留半成品
@@ -184,9 +187,9 @@ dc exec -T postgres psql -v ON_ERROR_STOP=1 -U postgres \
   -c 'alter database bafang_restore rename to bafang'
 
 # 5. 回滚时把 .env.production 的 BAFANG_CORE_TAG 改回备份对应的旧标签；
-#    用 up 重新创建容器（标签变化时会替换容器），启动时的迁移不会有新内容
+#    用 up 重新创建容器（标签变化时会替换 migrate 与 core），旧版本的 migrate 不会有新迁移
 dc up -d --no-build core
-dc ps core                       # 镜像为旧标签、状态 healthy
+dc ps -a migrate core            # 两者镜像均为旧标签；migrate Exited (0)，core healthy
 curl -fsS https://<CORE_DOMAIN>/v1/health
 
 # 6. 确认无误后删除留存库

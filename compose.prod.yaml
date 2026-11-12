@@ -27,6 +27,25 @@ services:
       timeout: 5s
       retries: 10
 
+  # 一次性迁移：与 core 同一镜像，用迁移角色（库 owner）执行迁移后退出。
+  # 迁移凭据只交给这个服务；`up core` 会先运行它，迁移失败则 core 不启动。
+  migrate:
+    image: ${BAFANG_CORE_IMAGE:-bafang-core}:${BAFANG_CORE_TAG:-latest}
+    build: .
+    command: ['migrate']
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGUSER: ${PG_MIGRATION_USER:-bafang_owner}
+      PGPASSWORD: ${PG_MIGRATION_PASSWORD:?PG_MIGRATION_PASSWORD 必填}
+      PGDATABASE: ${PGDATABASE:-bafang}
+      PGSCHEMA: ${PGSCHEMA:-public}
+
   core:
     # 镜像名与标签可由环境变量指定，便于 CD 用 docker save | docker load 推送同一标签后切换。
     image: ${BAFANG_CORE_IMAGE:-bafang-core}:${BAFANG_CORE_TAG:-latest}
@@ -35,7 +54,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     # 只把下面列出的配置传给 core；空值等同未配置（见 .env.production.example）。
+    # 这里没有迁移凭据：长期运行的容器（含 Docker 健康检查进程）只有运行角色。
     environment:
       NODE_ENV: production
       PORT: '3000'
@@ -45,9 +67,6 @@ services:
       PGUSER: ${PGUSER:-bafang_app}
       PGPASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
       PGDATABASE: ${PGDATABASE:-bafang}
-      # 迁移角色（库 owner）：入口脚本只在启动迁移时使用，启动服务前从环境中移除。
-      PG_MIGRATION_USER: ${PG_MIGRATION_USER:-bafang_owner}
-      PG_MIGRATION_PASSWORD: ${PG_MIGRATION_PASSWORD:?PG_MIGRATION_PASSWORD 必填}
       PGSCHEMA: ${PGSCHEMA:-public}
       SETTLEMENT_ROUNDS: ${SETTLEMENT_ROUNDS:-21:30,22:30,23:30}
       RESEND_API_KEY: ${RESEND_API_KEY:-}

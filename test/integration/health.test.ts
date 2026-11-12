@@ -362,6 +362,21 @@ describe('GET /v1/health over in-process HTTP against a real PostgreSQL test dat
         await app.request('/v1/funds/000001/nav');
         expect((await health(app)).upstreams.eastmoney.lastSuccessAt).toBeNull();
       });
+
+      it.each(['2026-99-99', '2026-02-30'])(
+        'keeps eastmoney at null for a NAV row dated %s, which is not a calendar date',
+        async (date) => {
+          const app = createApp({ db: createHealthProbe(db.pool), upstream, clock });
+          upstream.use(() =>
+            JSON.stringify({
+              ErrCode: 0,
+              Data: { LSJZList: [{ FSRQ: date, DWJZ: '1.2345', LJJZ: '1.2345', JZZZL: '0.10' }] },
+            }),
+          );
+          await app.request('/v1/funds/000001/nav');
+          expect((await health(app)).upstreams.eastmoney.lastSuccessAt).toBeNull();
+        },
+      );
     });
 
     it('does not refresh the time when a request is answered from cache', async () => {

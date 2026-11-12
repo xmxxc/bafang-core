@@ -185,12 +185,21 @@ export async function fetchNavPage(
   return points;
 }
 
+/** 日期必须是真实的日历日期（解析后 ISO 往返一致），单位净值必须是有限正数。 */
 function isWellFormedNav(point: UpstreamNavPoint): boolean {
+  const unitNav = Number(point.unitNav);
   return (
-    /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+    isCalendarDate(point.date) &&
     /^\d+(\.\d+)?$/.test(point.unitNav) &&
-    Number(point.unitNav) > 0
+    Number.isFinite(unitNav) &&
+    unitNav > 0
   );
+}
+
+function isCalendarDate(text: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const parsed = new Date(`${text}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
 }
 
 /**
