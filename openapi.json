@@ -351,35 +351,49 @@
             "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
           },
           "quote": {
-            "type": "object",
-            "nullable": true,
+            "type": [
+              "object",
+              "null"
+            ],
             "properties": {
               "price": {
-                "type": "string",
-                "nullable": true,
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^-?\\d+\\.\\d{2}$"
               },
               "prevClose": {
-                "type": "string",
-                "nullable": true,
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^-?\\d+\\.\\d{2}$"
               },
               "change": {
-                "type": "string",
-                "nullable": true,
+                "type": [
+                  "string",
+                  "null"
+                ],
                 "pattern": "^-?\\d+\\.\\d{2}$"
               },
               "changePercent": {
-                "type": "number",
-                "nullable": true
+                "type": [
+                  "number",
+                  "null"
+                ]
               },
               "tradeDate": {
-                "type": "string",
-                "nullable": true
+                "type": [
+                  "string",
+                  "null"
+                ]
               },
               "quoteTime": {
-                "type": "string",
-                "nullable": true
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -392,8 +406,10 @@
             ]
           },
           "quoteSource": {
-            "type": "string",
-            "nullable": true,
+            "type": [
+              "string",
+              "null"
+            ],
             "enum": [
               "tencent",
               "ths",
