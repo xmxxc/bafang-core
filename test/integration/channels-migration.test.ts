@@ -1,33 +1,11 @@
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { WeChatLoginResponse } from '../../src/routes/auth';
+import { migrationFolderThrough } from '../support/migrations';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
-
-async function migrationFolderThrough(maxIdx: number): Promise<string> {
-  const folder = await mkdtemp(join(tmpdir(), `channels-migrations-${maxIdx}-`));
-  const sourceMeta = join(MIGRATIONS_FOLDER, 'meta');
-  await mkdir(join(folder, 'meta'));
-  const journal = JSON.parse(await readFile(join(sourceMeta, '_journal.json'), 'utf8')) as {
-    entries: { idx: number; tag: string }[];
-  };
-  journal.entries = journal.entries.filter((entry) => entry.idx <= maxIdx);
-  await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
-  for (const entry of journal.entries) {
-    await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(folder, `${entry.tag}.sql`));
-  }
-  for (const name of await readdir(sourceMeta)) {
-    if (name.endsWith('.json') && name !== '_journal.json') {
-      const snapshot = Number(name.slice(0, 4));
-      if (snapshot <= maxIdx) await copyFile(join(sourceMeta, name), join(folder, 'meta', name));
-    }
-  }
-  return folder;
-}
 
 // 旧版 schema 上用微信登录建立会话：它只用 0003 起已有的表，不依赖后续迁移新增的验证码列。
 const fakeWeChat = { openid: async (code: string) => `openid-${code}` };
@@ -50,21 +28,10 @@ async function loggedInApp(db: TestSchema) {
 }
 
 it('preserves existing users preset order when upgrading from migration 0003, observed over HTTP', async () => {
-  const folder = await mkdtemp(join(tmpdir(), 'channels-migrations-'));
+  const folder = await migrationFolderThrough(3);
   let db: TestSchema | undefined;
   try {
     // 只准备旧版迁移环境，所有业务状态仍由 HTTP 创建、观察。
-    const journal = JSON.parse(
-      await readFile(join(MIGRATIONS_FOLDER, 'meta/_journal.json'), 'utf8'),
-    ) as {
-      entries: { idx: number; tag: string }[];
-    };
-    journal.entries = journal.entries.filter((entry) => entry.idx <= 3);
-    await mkdir(join(folder, 'meta'));
-    await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
-    for (const entry of journal.entries) {
-      await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(folder, `${entry.tag}.sql`));
-    }
     db = await createTestSchema(folder);
     const app = createApp({ database: createDb(db.pool), wechat: fakeWeChat });
     const headers = await wechatLogin(app);

@@ -11,7 +11,7 @@ import {
   parseFixed,
   rescale,
   subtract,
-} from './decimal';
+} from '../fixed-point';
 import type { PositionValuation } from './service';
 
 export interface PositionGains {
