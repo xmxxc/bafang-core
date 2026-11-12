@@ -1,5 +1,5 @@
 import { shanghaiDate } from '../clock';
-import { add, divide, formatFixed, multiply, parseFixed, type Fixed } from '../positions/decimal';
+import { add, divide, formatFixed, multiply, parseFixed, type Fixed } from '../fixed-point';
 import { fetchLinkedEtfCode, fetchVerifiedEtfCode } from './eastmoney';
 import type { EstimateServiceDeps } from './estimates';
 import type { SourceEstimate } from './estimate-sources';

@@ -1,4 +1,4 @@
-import { divide, fixedFromDb, formatFixed, rescale, type Fixed } from './decimal';
+import { divide, fixedFromDb, formatFixed, rescale, type Fixed } from '../fixed-point';
 import type { PositionView } from './service';
 
 export interface PositionSummary {
