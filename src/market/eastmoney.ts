@@ -63,14 +63,16 @@ export async function searchFunds(
     SearchResponseSchema,
     await upstream.fetchText({ url: url.href, referer: REFERER }),
   );
-  upstream.recordSuccess?.('eastmoney');
-  return (body.Datas ?? [])
+  const hits = (body.Datas ?? [])
     .filter((item) => item.CATEGORY === FUND_CATEGORY && /^\d{6}$/.test(item.CODE))
     .map((item) => ({
       code: item.CODE,
       name: item.NAME,
       type: item.FundBaseInfo?.FTYPE ?? null,
     }));
+  // 无匹配是合法空结果：不算失败，但也没有证明接口给出了可用数据，不刷新成功时间。
+  if (hits.some((hit) => hit.name.trim() !== '')) upstream.recordSuccess?.('eastmoney');
+  return hits;
 }
 
 export async function fetchFundBaseInfo(
@@ -87,9 +89,10 @@ export async function fetchFundBaseInfo(
     BaseInfoResponseSchema,
     await upstream.fetchText({ url: url.href, referer: REFERER }),
   );
-  upstream.recordSuccess?.('eastmoney');
   const data = body.Datas;
+  // 基金不存在（Datas 为空）是合法空结果，不刷新成功时间。
   if (!data) return null;
+  if (data.FCODE === code && data.SHORTNAME.trim() !== '') upstream.recordSuccess?.('eastmoney');
   return {
     code: data.FCODE,
     name: data.SHORTNAME,
@@ -171,13 +174,23 @@ export async function fetchNavPage(
     NavResponseSchema,
     await upstream.fetchText({ url: url.href, referer: NAV_REFERER }),
   );
-  upstream.recordSuccess?.('eastmoney');
-  return (body.Data?.LSJZList ?? []).map((item) => ({
+  const points = (body.Data?.LSJZList ?? []).map((item) => ({
     date: item.FSRQ,
     unitNav: item.DWJZ,
     cumulativeNav: item.LJJZ ?? null,
     dailyChange: parsePercent(item.JZZZL),
   }));
+  // 空页是合法空结果；只有每一行的日期与单位净值都合法时才算成功。
+  if (points.length > 0 && points.every(isWellFormedNav)) upstream.recordSuccess?.('eastmoney');
+  return points;
+}
+
+function isWellFormedNav(point: UpstreamNavPoint): boolean {
+  return (
+    /^\d{4}-\d{2}-\d{2}$/.test(point.date) &&
+    /^\d+(\.\d+)?$/.test(point.unitNav) &&
+    Number(point.unitNav) > 0
+  );
 }
 
 /**

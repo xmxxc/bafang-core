@@ -179,6 +179,9 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
                 await trySource('sina', () => fetchSinaEstimates(deps.upstream, rest, today)),
               )
             : new Map<string, SourceEstimate>();
+        // 只有估值通过行格式、数值、当日与基准核对、被实际采纳时，才算该来源成功。
+        if (primary.size > 0) deps.upstream.recordSuccess?.('tiantian');
+        if (secondary.size > 0) deps.upstream.recordSuccess?.('sina');
 
         const closeAt = new Date(`${today}T15:00:00+08:00`).getTime();
         const nextOpenMs = nextMarketOpen(now, deps.calendar).getTime();

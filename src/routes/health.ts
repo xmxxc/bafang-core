@@ -5,7 +5,8 @@ const UpstreamStatusSchema = z
   .object({
     lastSuccessAt: z.string().nullable().openapi({
       format: 'date-time',
-      description: '本进程最近一次从该上游取到并通过校验的时间；启动以来从未成功为 null。',
+      description:
+        '本进程最近一次从该上游取到、通过全部校验并被采用的数据的时间；坏数据、合法空结果与缓存命中都不刷新。启动以来从未成功为 null。',
     }),
   })
   .openapi('UpstreamStatus');
