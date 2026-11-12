@@ -175,6 +175,45 @@ describe('GET /v1/openapi over in-process HTTP against a real PostgreSQL test da
     }
   });
 
+  it('documents the overview query, provenance, completeness and both session types', async () => {
+    const doc = (await (await createApp().request('/v1/openapi')).json()) as OpenApiDoc;
+    const operation = doc.paths['/v1/overview']?.get;
+    expect(operation?.security).toEqual([{ SessionCookie: [] }, { SessionBearer: [] }]);
+    expect(Object.keys(operation?.responses ?? {}).sort()).toEqual([
+      '200',
+      '400',
+      '401',
+      '404',
+      '500',
+      '503',
+    ]);
+    expect(JSON.stringify(operation)).toContain('channelId');
+    for (const name of ['Overview', 'OverviewSummary', 'OverviewPosition', 'OverviewQuote']) {
+      expect(doc.components.schemas[name]).toBeDefined();
+    }
+    const overview = doc.components.schemas.Overview as { properties: Record<string, unknown> };
+    expect(Object.keys(overview.properties)).toEqual([
+      'summary',
+      'positions',
+      'indices',
+      'time',
+      'referenceOnly',
+    ]);
+    const quote = doc.components.schemas.OverviewQuote as { properties: Record<string, unknown> };
+    for (const field of [
+      'type',
+      'direction',
+      'changePercent',
+      'source',
+      'sourceName',
+      'time',
+      'date',
+    ]) {
+      expect(quote.properties[field]).toBeDefined();
+    }
+    expect(JSON.stringify(doc.components.schemas.OverviewSummary)).toContain('PositionSummary');
+  });
+
   it('documents trade operations, status codes, session requirements and schemas', async () => {
     const app = createApp({ db: createHealthProbe(db.pool) });
     const doc = (await (await app.request('/v1/openapi')).json()) as OpenApiDoc;

@@ -59,7 +59,7 @@ export interface EstimateBatch {
 
 export interface EstimateService {
   /** 批量估值；codes 已去重，顺序即返回顺序。 */
-  batch(codes: readonly string[]): Promise<EstimateBatch>;
+  batch(codes: readonly string[], asOf?: Date): Promise<EstimateBatch>;
 }
 
 export interface EstimateServiceDeps {
@@ -101,8 +101,8 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
   const cache = new Map<string, CacheEntry>();
   const calendarKnown = new DailyCache<boolean>();
 
-  async function fundCalendar(code: string): Promise<TradingCalendar | null> {
-    const today = shanghaiDate(deps.clock.now());
+  async function fundCalendar(code: string, asOf: Date): Promise<TradingCalendar | null> {
+    const today = shanghaiDate(asOf);
     let known = calendarKnown.get(today, code);
     if (known === undefined) {
       try {
@@ -132,8 +132,8 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
   }
 
   return {
-    async batch(codes) {
-      const now = deps.clock.now();
+    async batch(codes, asOf) {
+      const now = asOf ?? deps.clock.now();
       const status = marketStatus(now, deps.calendar);
       const time = now.toISOString();
       if (deps.calendar.hasCoverage?.(now) !== true) {
@@ -149,7 +149,7 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
 
       const nowMs = now.getTime();
       const resolved = new Map<string, Estimate | null>();
-      const verify = baseVerifier(deps.nav, fundCalendar);
+      const verify = baseVerifier(deps.nav, fundCalendar, now);
       const cachedSources = new Map<string, SourceEstimate>();
       for (const code of codes) {
         const entry = cache.get(code);
@@ -236,7 +236,8 @@ function toEstimate(source: SourceEstimate, name: EstimateSource, fallback: bool
  */
 function baseVerifier(
   nav: NavService,
-  fundCalendar: (code: string) => Promise<TradingCalendar | null>,
+  fundCalendar: (code: string, asOf: Date) => Promise<TradingCalendar | null>,
+  asOf: Date,
 ) {
   const lookups = new Map<string, Promise<{ date: string; unitNav: string } | null>>();
 
@@ -244,7 +245,7 @@ function baseVerifier(
     const key = `${code}:${date}`;
     let lookup = lookups.get(key);
     if (!lookup) {
-      lookup = nav.latestBefore(code, date).catch((error: unknown) => {
+      lookup = nav.latestBefore(code, date, asOf).catch((error: unknown) => {
         if (!(error instanceof UpstreamError)) throw error;
         console.warn('[bafang-core] estimate base unavailable', code, error.kind, error.message);
         return null;
@@ -264,7 +265,7 @@ function baseVerifier(
     const precedingDate = previousTradingDate(previousDate, calendar);
     if (!precedingDate) return null;
     try {
-      const history = (await nav.history(code, '1m'))?.filter((point) => point.date < date);
+      const history = (await nav.history(code, '1m', asOf))?.filter((point) => point.date < date);
       if (!history?.some((point) => point.date === precedingDate)) return null;
       if (history.some((point) => formatNav(point.unitNav) === null)) return null;
       const matches = history.filter((point) => formatNav(point.unitNav) === source.base.unitNav);
@@ -282,7 +283,7 @@ function baseVerifier(
     const checked = await Promise.all(
       [...candidates].map(async ([code, source]) => {
         const date = shanghaiDate(source.time);
-        const calendar = await fundCalendar(code);
+        const calendar = await fundCalendar(code, asOf);
         const previousDate = calendar ? previousTradingDate(date, calendar) : null;
         const expected = previousDate ? await expectedBase(code, date) : null;
         const baseDate =
