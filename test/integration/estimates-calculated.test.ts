@@ -517,9 +517,9 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
     },
   );
 
-  describe('holding quotes observed after the fixed estimate instant', () => {
-    // Holdings judge each quote when it is observed; a calculated estimate additionally
-    // requires every participating quote to be no later than the batch request instant.
+  describe('quotes are judged when they are observed, not at the request start', () => {
+    // Holding and parent ETF quotes follow the holdings rule: a quote may not be later than
+    // the moment it was returned, and session/freshness rules apply at that moment.
     function slowTencent(observedAt: string, quoteTime?: string) {
       const replay = control.replay;
       control.replay = (url) => {
@@ -529,9 +529,16 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
         return quoteTime ? result.replaceAll('20261106100000', quoteTime) : result;
       };
     }
+    /** Shanghai wall clock as Tencent's YYYYMMDDhhmmss quote time. */
+    function tencentTime(iso: string) {
+      return new Date(new Date(iso).getTime() + 8 * 3600_000)
+        .toISOString()
+        .slice(0, 19)
+        .replace(/\D/g, '');
+    }
 
-    it('keeps quotes from before the request instant when the quote fetch returns late', async () => {
-      slowTencent(`${day}T02:00:40.000Z`);
+    it('keeps a snapshot newer than the request start when the quote fetch returns late', async () => {
+      slowTencent(`${day}T02:00:40.000Z`, '20261106100030');
       const response = await app().request('/v1/funds/estimates?codes=000001');
       const body = (await response.json()) as EstimateBatchResponse;
       expect(body.time).toBe('2026-11-06T02:00:00.000Z');
@@ -539,30 +546,34 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
         status: 'estimated',
         estimate: {
           source: 'calculated',
-          time: '2026-11-06T02:00:00.000Z',
-          calculation: { quoteTimeEnd: '2026-11-06T02:00:00.000Z' },
+          time: '2026-11-06T02:00:30.000Z',
+          calculation: { quoteTimeEnd: '2026-11-06T02:00:30.000Z' },
         },
       });
     });
 
-    it('rejects quotes stamped after the request instant even though holdings accept them', async () => {
+    it('keeps a late parent ETF snapshot for an ETF feeder', async () => {
+      control.fund = 'etf';
       slowTencent(`${day}T02:00:40.000Z`, '20261106100030');
-      expect(await current()).toEqual({ code: '000001', status: 'unavailable', estimate: null });
-
-      // The holdings endpoint starts at 10:00:40, so the same 10:00:30 snapshot is current there.
-      const holdings = await app().request('/v1/funds/000001/holdings');
-      expect(holdings.status).toBe(200);
-      const items = (
-        (await holdings.json()) as { items: { quote: { quoteTime: string } | null }[] }
-      ).items;
-      const quoted = items.filter((item) => item.quote !== null);
-      expect(quoted.length).toBeGreaterThan(0);
-      expect(quoted.every((item) => item.quote!.quoteTime === '2026-11-06T02:00:30.000Z')).toBe(
-        true,
-      );
+      expect(await current(app(), '110020')).toMatchObject({
+        status: 'estimated',
+        estimate: { source: 'calculated', time: '2026-11-06T02:00:30.000Z' },
+      });
     });
 
-    it('rejects a slow fetch whose quotes became stale only after the request instant', async () => {
+    it('rejects quotes stamped after the moment they were returned', async () => {
+      slowTencent(`${day}T02:00:40.000Z`, '20261106100100');
+      expect(await current()).toEqual({ code: '000001', status: 'unavailable', estimate: null });
+
+      control.fund = 'etf';
+      expect(await current(app(), '110020')).toEqual({
+        code: '110020',
+        status: 'unavailable',
+        estimate: null,
+      });
+    });
+
+    it('rejects a slow fetch whose quotes are stale by the time they return', async () => {
       // 10:04:30 quotes are fresh at a 10:09:00 request, but the fetch returns at 10:09:40,
       // more than five minutes after the quotes: holdings drop them, so no estimate is formed.
       control.now = `${day}T02:09:00.000Z`;
@@ -578,6 +589,44 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
       control.replay = replay;
       slowTencent(`${day}T02:09:40.000Z`, '20261106100430');
       expect((await current()).status).toBe('unavailable');
+    });
+
+    it('is available during trading when both sources fail and quotes carry their fetch time', async () => {
+      // Every upstream call takes 1.5 s, and Tencent stamps each snapshot with the time it
+      // answers, as it does during continuous trading; the request starts at 10:15:00.
+      control.now = `${day}T02:15:00.000Z`;
+      const replay = control.replay;
+      control.replay = (url) => {
+        control.now = new Date(new Date(control.now).getTime() + 1500).toISOString();
+        const result = replay(url);
+        return url.hostname === 'qt.gtimg.cn' && typeof result === 'string'
+          ? result.replaceAll('20261106100000', tencentTime(control.now))
+          : result;
+      };
+      const item = await current();
+      expect(item).toMatchObject({ status: 'estimated', estimate: { source: 'calculated' } });
+      expect(Date.parse(item.estimate!.time)).toBeGreaterThan(Date.parse(`${day}T02:15:00.000Z`));
+
+      control.fund = 'etf';
+      expect(await current(app(), '110020')).toMatchObject({
+        status: 'estimated',
+        estimate: { source: 'calculated' },
+      });
+    });
+
+    it('includes intraday labels up to the moment the series were returned', async () => {
+      control.report = report();
+      const replay = control.replay;
+      control.replay = (url) => {
+        if (url.hostname === 'd.10jqka.com.cn') control.now = `${day}T02:01:10.000Z`;
+        return replay(url);
+      };
+      const body = await history();
+      expect(body.points.map((point) => point.time)).toEqual([
+        '2026-11-06T01:30:00.000Z',
+        '2026-11-06T02:00:00.000Z',
+        '2026-11-06T02:01:00.000Z',
+      ]);
     });
   });
 });

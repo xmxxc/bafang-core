@@ -151,9 +151,11 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
             error.message,
           );
         }
+        // Like holding quotes, a snapshot is judged when it is observed, not at the request start.
+        const observedAt = deps.clock.now();
         for (const item of model.items) {
           let quote = quotes.get(item.symbol) ?? null;
-          if (quote && stale(quote, asOf, deps.calendar)) quote = null;
+          if (quote && stale(quote, observedAt, deps.calendar)) quote = null;
           const quoteSource: 'tencent' | 'ths' = quote ? 'tencent' : 'ths';
           if (!quote) {
             quote = await fetchThsQuote(
@@ -167,12 +169,15 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
           item.quoteSource = quote ? quoteSource : undefined;
         }
       }
+      // Recheck every participating quote once all are in: none may be later than this moment,
+      // and each must still satisfy the session and freshness rules now.
+      const doneAt = deps.clock.now();
       if (
         model.items.some(
           (item) =>
             !item.quote ||
-            stale(item.quote, asOf, deps.calendar) ||
-            item.quote.tradeDate !== shanghaiDate(asOf),
+            stale(item.quote, doneAt, deps.calendar) ||
+            item.quote.tradeDate !== shanghaiDate(doneAt),
         )
       )
         return null;
@@ -224,17 +229,24 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
       if (!model) return result;
       const base = await deps.nav.latestBefore(code, result.tradeDate, asOf);
       if (!base) return result;
-      const series = await Promise.all(
+      const fetched = await Promise.all(
         model.items.map(async (item) => {
           const symbol = item.symbol.replace(/^sh/, 'hs_').replace(/^sz/, 'sz_');
-          return new Map(
-            (await fetchThsIntraday(deps.upstream, symbol))
+          return fetchThsIntraday(deps.upstream, symbol);
+        }),
+      );
+      // Points up to the moment the series were observed are real; later labels are not.
+      const observedAt = deps.clock.now();
+      const series = fetched.map(
+        (points) =>
+          new Map(
+            points
               .filter(
-                (point) => point.time <= asOf && shanghaiDate(point.time) === result.tradeDate,
+                (point) =>
+                  point.time <= observedAt && shanghaiDate(point.time) === result.tradeDate,
               )
               .map((point) => [point.time.getTime(), point]),
-          );
-        }),
+          ),
       );
       const labels = new Set(series.flatMap((points) => [...points.keys()]));
       for (const at of [...labels].sort((a, b) => a - b)) {

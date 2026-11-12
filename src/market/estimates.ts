@@ -132,6 +132,12 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
     return known ? deps.calendar : null;
   }
 
+  /** Loads a source and records when its result was observed (returned or failed). */
+  async function observed<T>(load: () => Promise<T>): Promise<[T, Date]> {
+    const result = await load();
+    return [result, deps.clock.now()];
+  }
+
   function remember(code: string, entry: CacheEntry): void {
     cache.delete(code);
     cache.set(code, entry);
@@ -166,7 +172,8 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
           cachedSources.set(code, entry.source);
         }
       }
-      const checkedCache = await verify(cachedSources);
+      // A cached source was observed when it was written, before this lookup.
+      const checkedCache = await verify(cachedSources, deps.clock.now());
       for (const code of codes) {
         const entry = cache.get(code);
         if (entry && entry.expiresAt > nowMs) {
@@ -179,13 +186,17 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
       if (missing.length > 0) {
         const today = shanghaiDate(now);
         const primary = await verify(
-          await trySource('tiantian', () => fetchTiantianEstimates(deps.upstream, missing, today)),
+          ...(await observed(() =>
+            trySource('tiantian', () => fetchTiantianEstimates(deps.upstream, missing, today)),
+          )),
         );
         const rest = missing.filter((code) => !primary.has(code));
         const secondary =
           rest.length > 0
             ? await verify(
-                await trySource('sina', () => fetchSinaEstimates(deps.upstream, rest, today)),
+                ...(await observed(() =>
+                  trySource('sina', () => fetchSinaEstimates(deps.upstream, rest, today)),
+                )),
               )
             : new Map<string, SourceEstimate>();
 
@@ -194,7 +205,11 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
           if (primary.has(code) || secondary.has(code)) continue;
           try {
             const candidate = await calculatedService.current(code, now);
-            if (candidate && (await verify(new Map([[code, candidate]]))).has(code))
+            // Every participating quote was observed before calculation finished.
+            if (
+              candidate &&
+              (await verify(new Map([[code, candidate]]), deps.clock.now())).has(code)
+            )
               calculated.set(code, candidate);
           } catch (error) {
             // A missing report or quote is an unavailable estimate. Upstream adapters normally
@@ -345,7 +360,10 @@ function baseVerifier(
     }
   }
 
-  return async (candidates: Map<string, SourceEstimate>): Promise<Map<string, SourceEstimate>> => {
+  return async (
+    candidates: Map<string, SourceEstimate>,
+    observedAt: Date,
+  ): Promise<Map<string, SourceEstimate>> => {
     const checked = await Promise.all(
       [...candidates].map(async ([code, source]) => {
         const date = shanghaiDate(source.time);
@@ -358,7 +376,7 @@ function baseVerifier(
             : source.base.date;
         const matches =
           calendar !== null &&
-          sourceUsable(source.time, asOf, calendar) &&
+          sourceUsable(source.time, observedAt, calendar) &&
           expected !== null &&
           expected.date === previousDate &&
           formatNav(expected.unitNav) === source.base.unitNav &&
@@ -373,8 +391,9 @@ function baseVerifier(
 }
 
 /**
- * 来源估值必须能在固定请求时刻成立：不能来自未来、盘前或休市；盘中沿用行情的
- * 五分钟预算，午休允许沿用 11:30 的午前快照，收盘后保留已完成的收盘点。
+ * 来源估值按它被取回（观察到）的时刻判定，与重仓股报价同一口径：不能晚于取回时刻，
+ * 不能来自盘前或休市；盘中沿用行情的五分钟预算，午休允许沿用 11:30 的午前快照，
+ * 收盘后保留已完成的收盘点。取回慢不会让当时有效的估值被当成未来数据。
  */
 function sourceUsable(sourceTime: Date, asOf: Date, calendar: TradingCalendar): boolean {
   if (

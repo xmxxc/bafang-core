@@ -300,6 +300,63 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       const body = await get(app(), '000001');
       expect(body.items).toEqual([{ code: '000001', status: 'unavailable', estimate: null }]);
     });
+
+    describe('judges each source at the moment it returns', () => {
+      /** The source answers at `returnedAt`; the request itself started at 10:00:30. */
+      function returnsAt(returnedAt: string, replay: Replay): Replay {
+        return (url) => {
+          clock.set(returnedAt);
+          return replay(url);
+        };
+      }
+      const late = '2026-11-06T02:01:10.000Z'; // 10:01:10
+
+      it('keeps a Tiantian estimate newer than the request start when it returns late', async () => {
+        clock.set('2026-11-06T02:00:30.000Z');
+        upstream.use(
+          samples({
+            tiantian: returnsAt(late, tiantianWith('110020', { GZTIME: '2026-11-06 10:01' })),
+          }),
+        );
+        const body = await get(app(), '110020');
+        expect(body.time).toBe('2026-11-06T02:00:30.000Z');
+        expect(body.items[0]?.estimate).toEqual({
+          ...TIANTIAN_110020,
+          time: '2026-11-06T02:01:00.000Z',
+        });
+      });
+
+      it('keeps a Sina estimate newer than the request start when it returns late', async () => {
+        clock.set('2026-11-06T02:00:30.000Z');
+        upstream.use(
+          samples({
+            tiantian: upstreamDown(),
+            sina: returnsAt(
+              late,
+              () =>
+                'var hq_str_fu_000001="华夏成长混合A,10:01:00,0.9843,1.0000,3.5730,0,-1.5738,2026-11-06,0.9805,-1.9459";',
+            ),
+          }),
+        );
+        const body = await get(app(), '000001');
+        expect(body.items[0]?.estimate).toEqual({
+          ...SINA_000001,
+          time: '2026-11-06T02:01:00.000Z',
+        });
+      });
+
+      it('rejects a Tiantian estimate later than the moment it returned', async () => {
+        clock.set('2026-11-06T02:00:30.000Z');
+        upstream.use(
+          samples({
+            tiantian: returnsAt(late, tiantianWith('110020', { GZTIME: '2026-11-06 10:02' })),
+            sina: upstreamDown(),
+          }),
+        );
+        const body = await get(app(), '110020');
+        expect(body.items).toEqual([{ code: '110020', status: 'unavailable', estimate: null }]);
+      });
+    });
   });
 
   describe('unavailable', () => {
