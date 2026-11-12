@@ -19,7 +19,8 @@
 #   5. 在容器内轮询 /v1/health，按墙钟截止时间判断：部署检查默认 180 秒，单次请求最多 5 秒且不超过剩余时间
 #   6. 通过：把新镜像名、标签写回 .env.production，之后手动执行 Compose 也用新版本
 #      core 创建/启动失败或健康检查不过：打印日志，停止 core，用 <镜像名>:rollback 重建容器并复检（默认 120 秒），
-#      然后以非零退出
+#      通过后把 .env.production 写成 <镜像名>:rollback，然后以非零退出
+#   成功部署和成功回滚后都核对：.env.production 展开出的镜像 ID 必须等于运行中 core 的镜像 ID
 # 自动回滚只换镜像、不恢复数据库：新版本的迁移已经执行，旧版本与新结构不兼容时按部署文档手动恢复备份。
 # 每次结果追加到部署目录的 deploy-history.log。
 #
@@ -92,6 +93,21 @@ persist() {
 
 # 先让 postgres 运行并通过健康检查，再以超级用户 postgres 备份业务库（容器内的 BAFANG_DATABASE，取自 PGDATABASE）。
 # 不用 core 的运行角色或迁移角色：备份要完整包含属主、授权与默认权限。
+# .env.production 里 KEY 的值（persist 保证每个 KEY 只有一行）。
+env_value() { sed -n "s/^$1=//p" .env.production | tail -n 1; }
+
+# 核对持久配置：.env.production 展开出的 core 镜像必须与实际运行的 core 容器是同一个镜像 ID，
+# 否则之后手动执行 `dc up` 会换成别的镜像。只比较 ID，不比较标签名。
+check_persisted() {
+  target_ref="$(env_value BAFANG_CORE_IMAGE):$(env_value BAFANG_CORE_TAG)"
+  target_id=$(docker image inspect -f '{{.Id}}' "$target_ref" </dev/null 2>/dev/null || true)
+  running_id=$(docker inspect -f '{{.Image}}' "$(dc ps -q core)" </dev/null 2>/dev/null || true)
+  if [ -z "$running_id" ] || [ "$target_id" != "$running_id" ]; then
+    fail ".env.production 指向 $target_ref（${target_id:-不存在}），与运行中的 core 镜像 ${running_id:-（无）} 不一致，请手动修正"
+  fi
+  log ".env.production 指向 $target_ref，与运行中的 core 镜像一致（$running_id）"
+}
+
 backup_database() {
   log "确保 postgres 运行并健康（最多 ${DB_READY_TIMEOUT}s）"
   dc up -d --no-build --wait --wait-timeout "$DB_READY_TIMEOUT" postgres ||
@@ -166,6 +182,7 @@ main() {
     if wait_healthy "$health_timeout"; then
       persist BAFANG_CORE_IMAGE "$image"
       persist BAFANG_CORE_TAG "$tag"
+      check_persisted
       record "$image:$tag" deployed
       log "健康检查通过，已部署 $image:$tag"
       return 0
@@ -183,13 +200,11 @@ main() {
   log "回滚到 $rollback_ref（$prev_id，只换镜像，不恢复数据库），复检上限 ${rollback_timeout}s"
   if switch_to "$image" rollback && wait_healthy "$rollback_timeout"; then
     record "$prev_ref@$prev_id" rolled-back
-    # .env.production 仍写着旧标签。旧标签已被同名新镜像覆盖时改写为回滚标签，
-    # 避免之后手动执行 Compose 又起坏镜像。
-    if [ "$(docker image inspect -f '{{.Id}}' "$prev_ref" </dev/null 2>/dev/null || true)" != "$prev_id" ]; then
-      persist BAFANG_CORE_IMAGE "$image"
-      persist BAFANG_CORE_TAG rollback
-      log "旧标签 $prev_ref 已指向别的镜像，.env.production 改为 $rollback_ref"
-    fi
+    # 回滚成功后始终把 .env.production 写成实际运行的回滚身份：原来写的标签可能已被
+    # 同名新镜像覆盖（包括前几次失败部署留下的情况），之后手动执行 Compose 会起坏镜像。
+    persist BAFANG_CORE_IMAGE "$image"
+    persist BAFANG_CORE_TAG rollback
+    check_persisted
     fail "部署 $image:$tag 失败，已回滚到原镜像 $prev_id（原标签 $prev_ref，现以 $rollback_ref 运行）并通过健康检查"
   fi
   record "$prev_ref@$prev_id" rollback-failed
