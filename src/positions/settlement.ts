@@ -15,7 +15,7 @@ import {
   parseFixed,
   subtract,
   type Fixed,
-} from './decimal';
+} from '../fixed-point';
 
 const CALCULATION_SCALE = 18;
 export const SETTLEMENT_RUN_MINUTES = 21 * 60 + 30;

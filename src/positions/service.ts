@@ -17,7 +17,7 @@ import {
   parseFixed,
   subtract,
   type Fixed,
-} from './decimal';
+} from '../fixed-point';
 
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
 type PositionRow = typeof positions.$inferSelect;

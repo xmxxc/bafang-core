@@ -1,24 +1,15 @@
-import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { WeChatLoginResponse } from '../../src/routes/auth';
+import { migrationFolderThrough } from '../support/migrations';
 import { createTestSchema, dropTestSchema } from '../support/test-db';
 
 it('upgrades 0000–0011 to 0012, preserves the existing user and delivers their web session over HTTP', async () => {
-  const prior = await mkdtemp(join(tmpdir(), 'qr-migrations-'));
+  const prior = await migrationFolderThrough(11);
   let database: Awaited<ReturnType<typeof createTestSchema>> | undefined;
   try {
-    await mkdir(join(prior, 'meta'));
-    const journal = JSON.parse(
-      await readFile(join(MIGRATIONS_FOLDER, 'meta/_journal.json'), 'utf8'),
-    ) as { entries: { idx: number; tag: string }[] };
-    journal.entries = journal.entries.filter((entry) => entry.idx <= 11);
-    await writeFile(join(prior, 'meta/_journal.json'), JSON.stringify(journal));
-    for (const entry of journal.entries)
-      await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(prior, `${entry.tag}.sql`));
     database = await createTestSchema(prior);
     const app = createApp({
       database: createDb(database.pool),

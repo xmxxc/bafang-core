@@ -4,7 +4,7 @@ import { channels, positions, switches, trades, users } from '../db/schema';
 import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { FundService } from '../market/funds';
 import type { TradingCalendar } from '../trading-calendar';
-import { fixedFromDb, formatFixed, parseFixed, subtract } from './decimal';
+import { fixedFromDb, formatFixed, parseFixed, subtract } from '../fixed-point';
 import { PositionError } from './service';
 
 type Transaction = Parameters<Parameters<Db['transaction']>[0]>[0];
