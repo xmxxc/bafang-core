@@ -68,6 +68,7 @@ export async function fetchTiantianEstimates(
   if (!body.success || (body.errorCode ?? 0) !== 0) {
     throw new UpstreamError('bad_response', `tiantian returned errorCode ${body.errorCode}`);
   }
+  upstream.recordSuccess?.('tiantian');
   const wanted = new Set(codes);
   const result = new Map<string, SourceEstimate>();
   for (const raw of body.data ?? []) {
@@ -103,6 +104,7 @@ export async function fetchSinaEstimates(
   if (lines.length === 0) {
     throw new UpstreamError('bad_response', 'sina response contained no fund lines');
   }
+  upstream.recordSuccess?.('sina');
   const wanted = new Set(codes);
   const result = new Map<string, SourceEstimate>();
   for (const [, code, content] of lines) {

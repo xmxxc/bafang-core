@@ -49,6 +49,7 @@ export async function fetchThsQuote(
   ]);
   const realhead = parseJsonp(RealheadSchema, realheadText).items;
   const time = parseJsonp(TimeSchema, timeText)[symbol];
+  upstream.recordSuccess?.('ths');
   if (!time) return null;
 
   const dateMatch = /^(\d{4})(\d{2})(\d{2})$/.exec(time.date ?? '');

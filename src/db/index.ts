@@ -21,7 +21,7 @@ export const MIGRATIONS_FOLDER = path.resolve(
 );
 
 export function createPool(config: DbConfig): Pool {
-  return new Pool({
+  const pool = new Pool({
     host: config.host,
     port: config.port,
     user: config.user,
@@ -29,6 +29,12 @@ export function createPool(config: DbConfig): Pool {
     database: config.database,
     options: config.schema ? `-c search_path=${config.schema}` : undefined,
   });
+  // 数据库重启或断网时，空闲连接会在连接池上触发 'error'；没有监听器会让整个进程崩溃。
+  // 记录后丢弃该连接，后续查询按需重连，健康检查据此如实返回 503。
+  pool.on('error', (error) => {
+    console.error('[bafang-core] idle database connection error', error.message);
+  });
+  return pool;
 }
 
 export function createDb(pool: Pool) {

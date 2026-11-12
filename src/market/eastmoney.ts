@@ -63,6 +63,7 @@ export async function searchFunds(
     SearchResponseSchema,
     await upstream.fetchText({ url: url.href, referer: REFERER }),
   );
+  upstream.recordSuccess?.('eastmoney');
   return (body.Datas ?? [])
     .filter((item) => item.CATEGORY === FUND_CATEGORY && /^\d{6}$/.test(item.CODE))
     .map((item) => ({
@@ -86,6 +87,7 @@ export async function fetchFundBaseInfo(
     BaseInfoResponseSchema,
     await upstream.fetchText({ url: url.href, referer: REFERER }),
   );
+  upstream.recordSuccess?.('eastmoney');
   const data = body.Datas;
   if (!data) return null;
   return {
@@ -169,6 +171,7 @@ export async function fetchNavPage(
     NavResponseSchema,
     await upstream.fetchText({ url: url.href, referer: NAV_REFERER }),
   );
+  upstream.recordSuccess?.('eastmoney');
   return (body.Data?.LSJZList ?? []).map((item) => ({
     date: item.FSRQ,
     unitNav: item.DWJZ,
