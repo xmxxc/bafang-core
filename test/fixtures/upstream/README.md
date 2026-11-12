@@ -54,3 +54,83 @@
 | `ths/time-hk_HSI-stale-pre.jsonp` | 同花顺分时 `hk_HSI`                                                          | 实录的陈旧 CDN 响应：分时点是当天的，`pre` 却是几个月前的 26361.07；用来验证交叉校验会拒绝它，不给出假的涨跌 |
 
 腾讯请求的 Referer 是 `https://gu.qq.com/`，同花顺是 `https://stockpage.10jqka.com.cn/`（同花顺还要求浏览器 User-Agent）。同花顺对同一地址偶尔返回空响应体或陈旧数据，录制时需要多取几次并核对昨收。
+
+## #6 基金重仓股真实样本（2026-11-09 采集，Asia/Shanghai）
+
+| 文件                             | 请求                                                                                                                                                    | 说明                                                                                                                                                                   |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `eastmoney/holdings-000001.json` | `https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=000001&topline=10&year=&month=&rt=1`，Referer `https://fundf10.eastmoney.com/`     | 东方财富 F10 原始脚本响应；`content` 内 HTML 表格，截止日 `2026-09-30`，表格列含股票代码、股票名称、占净值比例                                                         |
+| `tencent/holdings-000001.txt`    | `https://qt.gtimg.cn/q=sz300308,sz002371,sh600519`，Referer `https://gu.qq.com/`                                                                        | 腾讯原始报价响应；`v_<symbol>` 行，价格/昨收/时间字段沿用 `src/market/tencent.ts`                                                                                      |
+| `sina/holdings-000001.json`      | `https://stock.finance.sina.com.cn/fundInfo/api/openapi.php/FdFundService.getTopHold?format=json&symbol=000001`，Referer `https://finance.sina.com.cn/` | 采集时返回 `result.status.code=0` 且 `result.data=[]`（部分请求超时）；该文件保留为真实空响应证据。未取得可证明的股票行字段，core 不将资产配置或合成边界数据当作重仓股 |
+
+| `sina/holdings-000001-success.json` | 同一新浪 `FdFundService.getTopHold` URL 的真实非空响应（审查采集 2026-11-10） | `result.data.heavy_stock`，真实返回 5 只股票；`zcpz` 为资产配置，解析器不混用 |
+| `ths/realhead-sz_300308-holdings.jsonp` / `ths/time-sz_300308-holdings.jsonp` | 同花顺 `realhead/time/sz_300308/last.js` 真实 pair | 真实深市股票备用报价回放 |
+
+### Holdings r5 evidence and boundary cases
+
+The following files are verbatim copies of the independent review's first-party
+captures, under `docs/agents/work/ai-coding/p1-core/reports/6-review/evidence-r1/`
+in the main checkout (capture metadata: `official-fetch.json`,
+`official-fetch-second.json`, `official-fetch-hk.json`):
+
+- `sina/holdings-000001-page.txt`: decoded UTF-8 official page,
+  https://finance.sina.com.cn/fund/quotes/000001/bc.shtml,
+  captured 2026-11-10 05:11:56 UTC (`sina-page-utf8.txt`). Its
+  `sdzc_blk` / `fund_sdzc_table` contains ten stocks and a quarter date;
+  the separately preserved JSON API contains only five and is not the full fallback.
+- `eastmoney/holdings-005827.txt`, `eastmoney/holdings-110011.txt`:
+  https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=005827&topline=10&year=&month=&rt=1
+  (respectively `code=110011`), captured 2026-11-10 05:14:29 UTC.
+  Each raw script contains several quarters, including five-digit HK stock codes.
+- `ths/realhead-hs_600519-holdings.jsonp` and
+  `ths/time-hs_600519-holdings.jsonp`: original official
+  https://d.10jqka.com.cn/v6/realhead/hs_600519/last.js and
+  https://d.10jqka.com.cn/v6/time/hs_600519/last.js, captured
+  2026-11-10 05:11:08 / 05:11:11 UTC. Along with the previously copied
+  `sz_300308` pair, tests replay these at 13:12 Shanghai and again at 14:00
+  to verify fresh fallback and stale rejection with the same raw bytes.
+
+`eastmoney/holdings-000009-empty.txt` was captured in this implementation
+session on 2026-11-10 UTC using the production `HttpUpstreamFetcher`, URL
+https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=000009&topline=10&year=&month=&rt=1
+and the F10 Referer. The successful response is exactly
+`var apidata={ content:"",arryear:[],curyear:2026};`.
+A second request for 000198 independently returned the same successful empty
+shape. This recognized protocol means no available stock report (404), not a
+transport or parsing failure (502). A plain curl request first returned 404;
+that transport error was not used as evidence of an empty report.
+
+Inline HTML/script/quote builders in `holdings.test.ts` are **synthetic**,
+protocol-shaped mutations for error, field, date, price and time boundaries.
+They are not live upstream success captures. The original Tencent fixture is
+GBK and contains lunch-stamped snapshots at 12:05 on 2026-11-10; its prices are
+asserted at 12:06 and the same bytes must become unavailable at 14:00.
+
+### Holdings r6: original three-character stock identifier
+
+`eastmoney/holdings-040046.txt` is a verbatim copy of the review's first-party
+`evidence-r2/spec-source/040046.txt`. URL:
+https://fundf10.eastmoney.com/FundArchivesDatas.aspx?type=jjcc&code=040046&topline=10&year=&month=&rt=1
+(F10 Referer); HTTP 200, UTF-8, captured 2026-11-10 05:52:54.056023 UTC.
+SHA256: `a5897bd2f9dedadbb941b2a0632a4c76d151f47013f875362fbe2908f123f527`.
+Metadata and independently extracted rows remain in the read-only review
+`040046-metadata.json` / `040046-extracted.json`.
+
+The latest displayed source block is dated **2022-12-08**, with ten overseas
+stocks including `PEP` / 百事 / 1.61%. This is evidence of the source's identifier
+and report contents, not a claim of current-year holdings. HTTP replay preserves
+all ten identifiers, names, weights and dates with unsupported quotes null.
+Replacing PEP with PEPX is explicitly a synthetic length control. Additional
+single-letter / punctuation-bearing identifiers and concurrent cache reports or
+quotes are synthetic boundary controls, not first-party market authenticity
+claims. Identifier syntax does not establish an exchange or supported quote.
+
+### Holdings r9: Sina fallback lists only A shares (D33)
+
+Captured in this implementation session with `curl` and the
+`https://finance.sina.com.cn/` Referer; HTTP 200, UTF-8 pages saved verbatim.
+
+| File                            | URL                                                     | Captured (UTC)      | SHA256                                                             | Notes                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------- | ------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sina/holdings-005827-page.txt` | https://finance.sina.com.cn/fund/quotes/005827/bc.shtml | 2026-11-12 04:16:51 | `13f897bad9faae8a671fc608b34487e8448b26a417fdfd7f01f0ef2cf28e5452` | `sdzc_blk` dated 2026-09-30 lists only six A shares (`codelist="sh600519,sz000568,sh600809,sz000858,sh600674,sz300502"`); EastMoney's same quarter has ten, including HK |
+| `sina/holdings-110011-page.txt` | https://finance.sina.com.cn/fund/quotes/110011/bc.shtml | 2026-11-12 04:17:21 | `12b40b9170b1a6230152e4ee7ddcb2de7aac26716503d49986712986363a7fed` | No `sdzc_blk` section at all (only the tab label), so the fallback is unavailable (502)                                                                                  |

@@ -298,6 +298,138 @@
         ],
         "description": "状态为 estimated 时给出；unavailable、pre_market、holiday 时为 null"
       },
+      "FundHoldings": {
+        "type": "object",
+        "properties": {
+          "reportDate": {
+            "type": "string"
+          },
+          "holdingsSource": {
+            "type": "string",
+            "enum": [
+              "eastmoney",
+              "sina"
+            ],
+            "description": "重仓名单来源：eastmoney 为东方财富 F10（主）；sina 为新浪基金页面（东方财富失败时的备用）"
+          },
+          "holdingsFallback": {
+            "type": "boolean",
+            "description": "为 true 表示名单来自新浪回退：新浪官方表只列 A 股持仓，港股等境外持仓会缺失，不保证是完整的前十大重仓；新浪页面没有重仓区块时返回 502"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FundTopHolding"
+            }
+          }
+        },
+        "required": [
+          "reportDate",
+          "holdingsSource",
+          "holdingsFallback",
+          "items"
+        ]
+      },
+      "FundTopHolding": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "pattern": "^(?!0+$)[A-Za-z0-9][A-Za-z0-9.-]*$",
+            "description": "上游股票标识；格式不代表市场真实性，无法可靠映射时 quote 为 null"
+          },
+          "weight": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "reportDate": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "quote": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "price": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "prevClose": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "change": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "pattern": "^-?\\d+\\.\\d{2}$"
+              },
+              "changePercent": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "tradeDate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "quoteTime": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "price",
+              "prevClose",
+              "change",
+              "changePercent",
+              "tradeDate",
+              "quoteTime"
+            ]
+          },
+          "quoteSource": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "tencent",
+              "ths",
+              null
+            ]
+          },
+          "quoteFallback": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "code",
+          "weight",
+          "reportDate",
+          "quote",
+          "quoteSource",
+          "quoteFallback"
+        ]
+      },
       "FundDetail": {
         "allOf": [
           {
@@ -1880,6 +2012,80 @@
           },
           "500": {
             "description": "内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/funds/{code}/holdings": {
+      "get": {
+        "tags": [
+          "market"
+        ],
+        "summary": "基金前十大重仓股",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^\\d{6}$",
+              "example": "000001",
+              "description": "6 位基金代码"
+            },
+            "required": true,
+            "description": "6 位基金代码",
+            "name": "code",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "最新季报前十大重仓股。东方财富为主；回退新浪时 holdingsFallback 为 true，名单只含 A 股持仓，不保证是完整前十大",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FundHoldings"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "上游成功确认无股票季报（空内容及空报告年份列表）",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "限流",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "上游不可用",
             "content": {
               "application/json": {
                 "schema": {
