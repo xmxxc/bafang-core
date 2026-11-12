@@ -800,29 +800,81 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
   );
   it('caches a slow quote from its return time rather than the request start', async () => {
     replay.stamp = '20261109140010';
-    let tencentCalls = 0;
+    let slow = true;
     const target = app({
       upstream: {
         async fetchText(request) {
           const text = await replay.fetchText(request);
-          if (request.url.includes('qt.gtimg.cn')) {
-            tencentCalls++;
+          if (slow && request.url.includes('qt.gtimg.cn')) {
+            slow = false;
             replay.now = new Date('2026-11-09T06:00:15Z');
           }
           return text;
         },
       },
     });
-    expect((await get(target)).items[0]!.quoteSource).toBe('tencent');
-    // Sampled at 06:00:15 with a ten-second TTL: still cached at 06:00:20, refreshed at 06:00:25.
+    expect((await get(target)).items[0]!.quote).toMatchObject({
+      price: '100.00',
+      quoteTime: '2026-11-09T06:00:10.000Z',
+    });
+    // Upstream moves on, but the quote returned at 06:00:15 keeps a ten-second TTL.
+    replay.price = '102.00';
+    replay.stamp = '20261109140018';
     replay.now = new Date('2026-11-09T06:00:20Z');
-    expect((await get(target)).items[0]!.quoteSource).toBe('tencent');
-    expect(tencentCalls).toBe(1);
+    expect((await get(target)).items[0]).toMatchObject({
+      quoteSource: 'tencent',
+      quote: { price: '100.00', quoteTime: '2026-11-09T06:00:10.000Z' },
+    });
     replay.now = new Date('2026-11-09T06:00:25Z');
-    replay.stamp = '20261109140020';
-    await get(target);
-    expect(tencentCalls).toBe(2);
+    expect((await get(target)).items[0]).toMatchObject({
+      quoteSource: 'tencent',
+      quote: { price: '102.00', quoteTime: '2026-11-09T06:00:18.000Z' },
+    });
   });
+  it.each([
+    ['a later return', '2026-11-09T06:00:05Z'],
+    ['the same return time', '2026-11-09T06:00:01Z'],
+  ])(
+    'keeps the later-started equal snapshot when the earlier request completes at %s',
+    async (_label, lateReturn) => {
+      const aStarted = gate(),
+        aRelease = gate();
+      let first = true;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            if (request.url.includes('qt.gtimg.cn')) {
+              if (first) {
+                first = false;
+                aStarted.open();
+                await aRelease.promise;
+                return qt('sh600519', '100.00', '20261109140000');
+              }
+              return qt('sh600519', '101.00', '20261109140000');
+            }
+            return replay.fetchText(request);
+          },
+        },
+      });
+      const a = get(target);
+      await aStarted.promise;
+      replay.now = new Date('2026-11-09T06:00:01Z');
+      let aBody: Body;
+      try {
+        expect((await get(target)).items[0]!.quote).toMatchObject({ price: '101.00' });
+        replay.now = new Date(lateReturn);
+      } finally {
+        aRelease.open();
+        aBody = await a;
+      }
+      expect(aBody.items[0]!.quote).toMatchObject({ price: '100.00' });
+      // B (started later) is still valid until 06:00:11 and must not be rolled back by A.
+      expect((await get(target)).items[0]!.quote).toMatchObject({
+        price: '101.00',
+        quoteTime: '2026-11-09T06:00:00.000Z',
+      });
+    },
+  );
   it.each([
     ['before', '2026-11-09T15:59:59Z', ['2026-11-09', '2026-11-09']],
     ['after', '2026-11-10T02:00:00Z', [undefined, undefined]],

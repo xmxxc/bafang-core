@@ -44,7 +44,15 @@ export function createHoldingsService(deps: {
   let cachedReportDay: string | undefined;
   const quotes = new Map<
     string,
-    { value: ResolvedQuote; expiresAt: number; sampledAt: number; requestId: number }
+    {
+      value: ResolvedQuote;
+      /** When the quote returned: drives freshness, cache eligibility and expiry. */
+      sampledAt: number;
+      expiresAt: number;
+      /** Request start and sequence: orders concurrent writes, independent of completion. */
+      requestedAt: number;
+      requestId: number;
+    }
   >();
   let lastRequestId = 0;
   return {
@@ -158,13 +166,14 @@ export function createHoldingsService(deps: {
               quote && previousQuote && quote.time.getTime() !== previousQuote.time.getTime()
                 ? quote.time.getTime() > previousQuote.time.getTime()
                 : !existing ||
-                  sampledAt.getTime() > existing.sampledAt ||
-                  (sampledAt.getTime() === existing.sampledAt && requestId > existing.requestId);
+                  asOf.getTime() > existing.requestedAt ||
+                  (asOf.getTime() === existing.requestedAt && requestId > existing.requestId);
             if (newer)
               quotes.set(symbol, {
                 value,
                 expiresAt: quoteExpiry(sampledAt, deps.calendar, quote),
                 sampledAt: sampledAt.getTime(),
+                requestedAt: asOf.getTime(),
                 requestId,
               });
           }
