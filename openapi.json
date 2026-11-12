@@ -71,7 +71,7 @@
               "tencent",
               "ths"
             ],
-            "description": "各行情上游的最近成功时间（进程内记录，重启清空）：eastmoney 东方财富（搜索、基础信息、净值），tiantian 天天基金估值，sina 新浪估值，tencent 腾讯指数行情，ths 同花顺指数行情。"
+            "description": "各行情上游的最近成功时间（进程内记录，重启清空）：eastmoney 东方财富（搜索、基础信息、净值、重仓股名单、联接基金的相关 ETF），tiantian 天天基金估值，sina 新浪（估值、备用重仓股名单），tencent 腾讯行情（指数、重仓股、母 ETF），ths 同花顺行情（备用报价、分时）。交易所 ETF 名录（上交所、深交所）不在此列。"
           },
           "time": {
             "type": "string",
