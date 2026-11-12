@@ -13,7 +13,8 @@
 #   DEPLOY_PATH                 VPS 上的部署目录，默认 /srv/bafang-core
 #   DEPLOY_SSH_KEY_FILE         私钥文件；不设时用 ssh 默认配置
 #   DEPLOY_SSH_KNOWN_HOSTS_FILE known_hosts 文件；不设时用 ssh 默认配置。始终严格校验主机密钥
-#   DEPLOY_HEALTH_TIMEOUT       健康检查超时秒数，默认 180
+#   DEPLOY_HEALTH_TIMEOUT       部署后健康检查的总上限（秒，墙钟），默认 180
+#   DEPLOY_ROLLBACK_TIMEOUT     回滚后复检的总上限（秒，墙钟），默认 120
 set -euo pipefail
 
 fail() {
@@ -32,13 +33,16 @@ tag=$DEPLOY_TAG
 port=${DEPLOY_SSH_PORT:-22}
 path=${DEPLOY_PATH:-/srv/bafang-core}
 timeout=${DEPLOY_HEALTH_TIMEOUT:-180}
+rollback_timeout=${DEPLOY_ROLLBACK_TIMEOUT:-120}
 
 # 这些值会拼进远端命令行，只接受常规字符，避免远端 shell 解释。
 [[ "$image" =~ ^[A-Za-z0-9._/-]+$ ]] || fail "DEPLOY_IMAGE 含非法字符"
 [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || fail "DEPLOY_TAG 含非法字符"
+[[ "$tag" != rollback ]] || fail "标签 rollback 保留给回滚目标"
 [[ "$path" =~ ^/[A-Za-z0-9._/-]*$ ]] || fail "DEPLOY_PATH 必须是只含常规字符的绝对路径"
 [[ "$port" =~ ^[0-9]+$ ]] || fail "DEPLOY_SSH_PORT 必须是数字"
-[[ "$timeout" =~ ^[0-9]+$ ]] || fail "DEPLOY_HEALTH_TIMEOUT 必须是数字"
+[[ "$timeout" =~ ^[1-9][0-9]*$ ]] || fail "DEPLOY_HEALTH_TIMEOUT 必须是正整数"
+[[ "$rollback_timeout" =~ ^[1-9][0-9]*$ ]] || fail "DEPLOY_ROLLBACK_TIMEOUT 必须是正整数"
 
 docker image inspect "$image:$tag" >/dev/null 2>&1 || fail "本机没有镜像 $image:$tag"
 
@@ -51,4 +55,4 @@ echo "[deploy] 传输镜像 $image:$tag 到 VPS（docker save | ssh docker load�
 docker save "$image:$tag" | gzip -1 | "${ssh_cmd[@]}" docker load
 
 echo "[deploy] 在 VPS 的 $path 切换版本"
-"${ssh_cmd[@]}" sh -s -- "$path" "$image" "$tag" "$timeout" <"$(dirname "$0")/remote-update.sh"
+"${ssh_cmd[@]}" sh -s -- "$path" "$image" "$tag" "$timeout" "$rollback_timeout" <"$(dirname "$0")/remote-update.sh"
