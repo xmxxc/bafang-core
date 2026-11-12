@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { formatFixed, parseFixed, rescale, type Fixed } from '../positions/decimal';
+import { formatFixed, parseFixed, rescale, type Fixed } from '../fixed-point';
 import { UpstreamError, type UpstreamFetcher } from './upstream';
 
 /**
