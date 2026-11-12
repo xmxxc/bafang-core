@@ -1,36 +1,15 @@
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { rm } from 'node:fs/promises';
 import { expect, it } from 'vitest';
 import { createApp } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { WeChatLoginResponse } from '../../src/routes/auth';
 import { eastmoneySamples, estimateSamples, RecordedUpstream } from '../support/recorded-upstream';
+import { migrationFolderThrough } from '../support/migrations';
 import { createTestSchema, dropTestSchema } from '../support/test-db';
 import { loadTradingCalendar } from '../../src/trading-calendar';
 import { importHolidays } from '../../src/trading-calendar/holidays';
 import { tradingHolidays } from '../../src/db/schema';
 import cn2026 from '../../data/holidays/2026.json';
-
-async function migrationFolderThrough(maxIdx: number): Promise<string> {
-  const folder = await mkdtemp(join(tmpdir(), `positions-migrations-${maxIdx}-`));
-  const sourceMeta = join(MIGRATIONS_FOLDER, 'meta');
-  await mkdir(join(folder, 'meta'));
-  const journal = JSON.parse(await readFile(join(sourceMeta, '_journal.json'), 'utf8')) as {
-    entries: { idx: number; tag: string }[];
-  };
-  journal.entries = journal.entries.filter((entry) => entry.idx <= maxIdx);
-  await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
-  for (const entry of journal.entries) {
-    await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(folder, `${entry.tag}.sql`));
-  }
-  for (const name of await readdir(sourceMeta)) {
-    if (name.endsWith('.json') && name !== '_journal.json' && Number(name.slice(0, 4)) <= maxIdx) {
-      await copyFile(join(sourceMeta, name), join(folder, 'meta', name));
-    }
-  }
-  return folder;
-}
 
 it('upgrades a schema migrated through 0007 and then creates positions over HTTP', async () => {
   const prior = await migrationFolderThrough(7);
