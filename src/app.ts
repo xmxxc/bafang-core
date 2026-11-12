@@ -323,6 +323,8 @@ export function createApp(deps: AppDeps = {}): App {
       return c.json(
         {
           reportDate: result.reportDate,
+          holdingsSource: result.holdingsSource,
+          holdingsFallback: result.holdingsFallback,
           items: result.items.map((item) => ({
             ...item,
             quote: item.quote

@@ -15,12 +15,20 @@ export interface TopHolding {
   quoteSource: 'tencent' | 'ths' | null;
   quoteFallback: boolean;
 }
+export type HoldingsSource = 'eastmoney' | 'sina';
 type Report = {
   reportDate: string;
+  /** Cached with the list: a Sina list holds only A shares and may not be the full top ten. */
+  source: HoldingsSource;
   items: Omit<TopHolding, 'quote' | 'quoteSource' | 'quoteFallback'>[];
 };
 export interface HoldingsService {
-  get(code: string): Promise<{ reportDate: string; items: TopHolding[] } | null>;
+  get(code: string): Promise<{
+    reportDate: string;
+    holdingsSource: HoldingsSource;
+    holdingsFallback: boolean;
+    items: TopHolding[];
+  } | null>;
 }
 
 type ResolvedQuote = Pick<TopHolding, 'quote' | 'quoteSource' | 'quoteFallback'>;
@@ -163,7 +171,12 @@ export function createHoldingsService(deps: {
           return { ...item, ...value };
         }),
       );
-      return { reportDate: parsed.reportDate, items };
+      return {
+        reportDate: parsed.reportDate,
+        holdingsSource: parsed.source,
+        holdingsFallback: parsed.source === 'sina',
+        items,
+      };
     },
   };
 }
@@ -203,10 +216,10 @@ function holding(
   if (!Number.isFinite(weight) || weight > 100) bad('holding weight out of range');
   return { code, name, weight, reportDate };
 }
-function report(reportDate: string, items: Report['items']): Report {
+function report(source: HoldingsSource, reportDate: string, items: Report['items']): Report {
   if (!items.length || new Set(items.map((item) => item.code)).size !== items.length)
     bad('holdings rows empty or duplicated');
-  return { reportDate, items: items.slice(0, 10) };
+  return { reportDate, source, items: items.slice(0, 10) };
 }
 function parseEastmoney(text: string, asOfDay: string): Report | null {
   // Decode the string without executing upstream JavaScript. Arbitrary HTML is not this protocol.
@@ -241,7 +254,7 @@ function parseEastmoney(text: string, asOfDay: string): Report | null {
     // The F10 stock table has rank, code, name, quote, change, links, allocation.
     items.push(holding(cells[1] ?? '', cells[2] ?? '', cells[6] ?? '', latest.date));
   }
-  return report(latest.date, items);
+  return report('eastmoney', latest.date, items);
 }
 function parseSina(text: string, asOfDay: string): Report {
   const section = /<div\b[^>]*\bid=["']sdzc_blk["'][^>]*>([\s\S]*?<\/table>)/i.exec(text)?.[1];
@@ -267,7 +280,7 @@ function parseSina(text: string, asOfDay: string): Report {
     items.push(holding(symbol.replace(/^(?:sh|sz|hk)/, ''), cells[0] ?? '', cells[3] ?? '', date));
   }
   if (items.length !== symbols.length || items.length > 10) bad('sina holdings incomplete table');
-  return report(date, items);
+  return report('sina', date, items);
 }
 
 /** Judges a quote against the clock reading taken when it was returned (`asOf`). */

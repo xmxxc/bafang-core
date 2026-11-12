@@ -124,3 +124,13 @@ Replacing PEP with PEPX is explicitly a synthetic length control. Additional
 single-letter / punctuation-bearing identifiers and concurrent cache reports or
 quotes are synthetic boundary controls, not first-party market authenticity
 claims. Identifier syntax does not establish an exchange or supported quote.
+
+### Holdings r9: Sina fallback lists only A shares (D33)
+
+Captured in this implementation session with `curl` and the
+`https://finance.sina.com.cn/` Referer; HTTP 200, UTF-8 pages saved verbatim.
+
+| File                            | URL                                                     | Captured (UTC)      | SHA256                                                             | Notes                                                                                                                                                                    |
+| ------------------------------- | ------------------------------------------------------- | ------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sina/holdings-005827-page.txt` | https://finance.sina.com.cn/fund/quotes/005827/bc.shtml | 2026-11-12 04:16:51 | `13f897bad9faae8a671fc608b34487e8448b26a417fdfd7f01f0ef2cf28e5452` | `sdzc_blk` dated 2026-09-30 lists only six A shares (`codelist="sh600519,sz000568,sh600809,sz000858,sh600674,sz300502"`); EastMoney's same quarter has ten, including HK |
+| `sina/holdings-110011-page.txt` | https://finance.sina.com.cn/fund/quotes/110011/bc.shtml | 2026-11-12 04:17:21 | `12b40b9170b1a6230152e4ee7ddcb2de7aac26716503d49986712986363a7fed` | No `sdzc_blk` section at all (only the tab label), so the fallback is unavailable (502)                                                                                  |

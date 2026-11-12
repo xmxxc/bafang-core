@@ -74,6 +74,8 @@ class Replay implements UpstreamFetcher {
 const endpoint = '/v1/funds/000001/holdings';
 interface Body {
   reportDate: string;
+  holdingsSource: 'eastmoney' | 'sina';
+  holdingsFallback: boolean;
   items: Array<{
     code: string;
     name: string;
@@ -121,6 +123,7 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
     replay.sinaDown = false;
     const body = await get();
     expect(body.reportDate).toBe('2026-09-30');
+    expect(body).toMatchObject({ holdingsSource: 'sina', holdingsFallback: true });
     expect(body.items.map(({ code }) => code)).toEqual([
       '300308',
       '688361',
@@ -177,6 +180,7 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       replay.em = fixture(`eastmoney/holdings-${code}.txt`);
       const body = await get(app(), `/v1/funds/${code}/holdings`);
       expect(body.reportDate).toBe('2026-09-30');
+      expect(body).toMatchObject({ holdingsSource: 'eastmoney', holdingsFallback: false });
       expect(body.items.map((item) => item.code)).toEqual(codes);
       expect(body.items.every((item) => item.reportDate === '2026-09-30')).toBe(true);
       expect(
@@ -190,6 +194,51 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       });
     },
   );
+  it('labels the real 005827 Sina fallback that lists only its A-share holdings', async () => {
+    replay.emDown = true;
+    replay.sinaDown = false;
+    replay.sina = fixture('sina/holdings-005827-page.txt');
+    const body = await get(app(), '/v1/funds/005827/holdings');
+    expect(body).toMatchObject({
+      reportDate: '2026-09-30',
+      holdingsSource: 'sina',
+      holdingsFallback: true,
+    });
+    expect(body.items.map((item) => [item.code, item.weight])).toEqual([
+      ['600519', 6.37],
+      ['000568', 4.58],
+      ['600809', 2.89],
+      ['000858', 2.79],
+      ['600674', 2.55],
+      ['300502', 2.33],
+    ]);
+  });
+  it('returns 502 when the real 110011 Sina page has no holdings section', async () => {
+    replay.emDown = true;
+    replay.sinaDown = false;
+    replay.sina = fixture('sina/holdings-110011-page.txt');
+    const response = await app().request('/v1/funds/110011/holdings');
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { code: 'upstream_unavailable', message: '行情上游暂不可用' },
+    });
+  });
+  it('keeps the Sina label on the cached daily list until the next Shanghai day', async () => {
+    replay.emDown = true;
+    replay.sinaDown = false;
+    const target = app();
+    expect(await get(target)).toMatchObject({ holdingsSource: 'sina', holdingsFallback: true });
+    replay.emDown = false;
+    replay.now = new Date('2026-11-09T06:00:10Z');
+    const cached = await get(target);
+    expect(cached).toMatchObject({ holdingsSource: 'sina', holdingsFallback: true });
+    expect(cached.items).toHaveLength(10);
+    replay.now = new Date('2026-11-10T06:00:00Z');
+    replay.stamp = '20261110140000';
+    const next = await get(target);
+    expect(next).toMatchObject({ holdingsSource: 'eastmoney', holdingsFallback: false });
+    expect(next.items.map((item) => item.code)).toEqual(['600519']);
+  });
   it('ignores future EM quarters and selects the latest report no later than asOf', async () => {
     replay.em = script(
       block('2026-09-30', row('600519', '旧季股票')) +
