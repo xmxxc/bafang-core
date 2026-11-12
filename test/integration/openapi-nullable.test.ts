@@ -88,6 +88,15 @@ describe('OpenAPI 3.1 nullable contracts over HTTP with real PostgreSQL', () => 
         'holdingGain',
         'holdingGainRate',
       ],
+      OverviewQuote: [
+        'direction',
+        'value',
+        'changePercent',
+        'date',
+        'time',
+        'source',
+        'sourceName',
+      ],
       Trade: ['positionId', 'amount', 'shares', 'confirmedNav', 'confirmedShares', 'switchId'],
       EmailLoginResult: ['token'],
     };
@@ -97,6 +106,8 @@ describe('OpenAPI 3.1 nullable contracts over HTTP with real PostgreSQL', () => 
     refs.push(
       '#/components/schemas/EstimateItem/properties/estimate',
       '#/components/schemas/FundPositionSummary/allOf/1/properties/unitPrice',
+      '#/components/schemas/OverviewPosition/allOf/1/properties/fundName',
+      '#/components/schemas/OverviewPosition/allOf/1/properties/channelName',
     );
     for (const ref of refs) {
       const parsed = consumer(doc, { $ref: ref }).safeParse(null);
@@ -175,6 +186,8 @@ describe('OpenAPI 3.1 nullable contracts over HTTP with real PostgreSQL', () => 
     const cases: [string, unknown, unknown][] = [
       ['MarketIndex/properties/source', 'tencent', 'other'],
       ['MarketIndex/properties/point', '3649.18', '3649.123'],
+      ['OverviewQuote/properties/direction', 'up', 'sideways'],
+      ['OverviewQuote/properties/source', 'eastmoney', 'tencent'],
       ['MarketIndex/properties/quoteTime', '2026-11-06T02:00:00Z', 'invalid'],
       ['Trade/properties/positionId', '550e8400-e29b-41d4-a716-446655440000', 'invalid'],
       [
