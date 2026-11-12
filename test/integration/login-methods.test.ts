@@ -1,10 +1,9 @@
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createApp, type AppDeps } from '../../src/app';
 import { createDb, migrateSchema, MIGRATIONS_FOLDER } from '../../src/db';
 import type { GitHubOAuth } from '../../src/auth/github';
+import { migrationFolderThrough } from '../support/migrations';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
 import { eastmoneySamples, RecordedUpstream } from '../support/recorded-upstream';
 
@@ -113,30 +112,6 @@ describe('login method management over HTTP', () => {
   }
   async function errorCode(response: Response) {
     return ((await response.json()) as { error: { code: string } }).error.code;
-  }
-
-  async function migrationFolderThrough(maxIdx: number) {
-    const folder = await mkdtemp(join(tmpdir(), `login-methods-migrations-${maxIdx}-`));
-    const sourceMeta = join(MIGRATIONS_FOLDER, 'meta');
-    await mkdir(join(folder, 'meta'));
-    const journal = JSON.parse(await readFile(join(sourceMeta, '_journal.json'), 'utf8')) as {
-      entries: { idx: number; tag: string }[];
-    };
-    journal.entries = journal.entries.filter((entry) => entry.idx <= maxIdx);
-    await writeFile(join(folder, 'meta/_journal.json'), JSON.stringify(journal));
-    for (const entry of journal.entries) {
-      await copyFile(join(MIGRATIONS_FOLDER, `${entry.tag}.sql`), join(folder, `${entry.tag}.sql`));
-    }
-    for (const name of await readdir(sourceMeta)) {
-      if (
-        name.endsWith('.json') &&
-        name !== '_journal.json' &&
-        Number(name.slice(0, 4)) <= maxIdx
-      ) {
-        await copyFile(join(sourceMeta, name), join(folder, 'meta', name));
-      }
-    }
-    return folder;
   }
 
   it('lists safe display information and associates GitHub and email', async () => {

@@ -3,7 +3,7 @@ import { shanghaiDate } from '../clock';
 import type { createChannelService } from '../channels/service';
 import type { FundService } from '../market/funds';
 import type { IndexService } from '../market/indices';
-import { fixedFromDb } from './decimal';
+import { fixedFromDb } from '../fixed-point';
 import type { PositionService } from './service';
 import { summarizePositions } from './summary';
 

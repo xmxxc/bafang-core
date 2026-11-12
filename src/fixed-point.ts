@@ -1,6 +1,6 @@
 /**
- * 持仓用的定点小数：值是放大 10^scale 的 bigint，计算全程不经过二进制浮点。
- * 舍入与 `src/market/quote.ts` 一致：四舍五入、远离零。
+ * 共享的定点小数：值是放大 10^scale 的 bigint，计算全程不经过二进制浮点。
+ * 持仓与行情报价共用；舍入一律为四舍五入、远离零。
  */
 export type Fixed = { value: bigint; scale: number };
 
@@ -8,7 +8,7 @@ const POW10 = (n: number) => 10n ** BigInt(n);
 const DECIMAL = /^(-?)(\d+)(?:\.(\d+))?$/;
 
 /** 整数除法，按「四舍五入、远离零」舍入。 */
-function divRound(numerator: bigint, denominator: bigint): bigint {
+export function divRound(numerator: bigint, denominator: bigint): bigint {
   if (denominator === 0n) throw new RangeError('除数不能为零');
   const negative = numerator < 0n !== denominator < 0n;
   const n = numerator < 0n ? -numerator : numerator;
