@@ -145,8 +145,11 @@ export function createHoldingsService(deps: {
         if (batch.length === 0) break;
         for (const symbol of batch) hits.delete(symbol);
       }
+      // Source of each quote fetched by this request (cache hits stay null); success is
+      // reported only for those still adopted after the final recheck below.
+      const fetched: ('tencent' | 'ths' | null)[] = parsed.items.map(() => null);
       const items = await Promise.all(
-        parsed.items.map(async (item) => {
+        parsed.items.map(async (item, index) => {
           const symbol = symbolFor(item.code);
           const hit = symbol ? hits.get(symbol) : undefined;
           if (hit) return { ...item, ...hit.value };
@@ -154,8 +157,6 @@ export function createHoldingsService(deps: {
           let quote = observed?.quote ?? null;
           let sampledAt = observed?.at ?? lookupAt;
           if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
-          // A parsed quote that is fresh when observed counts as that upstream's success.
-          if (quote) deps.upstream.recordSuccess?.('tencent');
           let source: 'tencent' | 'ths' | null = quote ? 'tencent' : null;
           const fallback = !quote && symbol !== null;
           if (fallback) {
@@ -177,9 +178,9 @@ export function createHoldingsService(deps: {
             // the short TTL of an unavailable result.
             sampledAt = deps.clock.now();
             if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
-            if (quote) deps.upstream.recordSuccess?.('ths');
             source = quote ? 'ths' : null;
           }
+          fetched[index] = source;
           const value = { quote, quoteSource: source, quoteFallback: fallback };
           if (symbol) {
             const existing = quotes.get(symbol);
@@ -207,15 +208,18 @@ export function createHoldingsService(deps: {
       // A slow backup for one stock can end after a session boundary that another stock's
       // already observed quote no longer satisfies; such quotes are reported as unavailable.
       const doneAt = deps.clock.now();
+      const adopted = items.map((item) =>
+        item.quote && stale(item.quote, doneAt, deps.calendar)
+          ? { ...item, quote: null, quoteSource: null }
+          : item,
+      );
+      for (const source of new Set(adopted.flatMap((item, i) => (item.quote ? fetched[i] : null))))
+        if (source) deps.upstream.recordSuccess?.(source);
       return {
         reportDate: parsed.reportDate,
         holdingsSource: parsed.source,
         holdingsFallback: parsed.source === 'sina',
-        items: items.map((item) =>
-          item.quote && stale(item.quote, doneAt, deps.calendar)
-            ? { ...item, quote: null, quoteSource: null }
-            : item,
-        ),
+        items: adopted,
       };
     },
   };

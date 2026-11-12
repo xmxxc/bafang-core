@@ -212,8 +212,12 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
             if (
               candidate &&
               (await verify(new Map([[code, candidate]]), deps.clock.now())).has(code)
-            )
+            ) {
               calculated.set(code, candidate);
+              // Quotes fetched for the calculation count only once the estimate is adopted.
+              for (const source of candidate.fetchedQuoteSources)
+                deps.upstream.recordSuccess?.(source);
+            }
           } catch (error) {
             // A missing report or quote is an unavailable estimate. Upstream adapters normally
             // expose UpstreamError; defensive handling keeps a broken optional fallback isolated.

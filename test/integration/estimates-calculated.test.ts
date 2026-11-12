@@ -694,6 +694,31 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
       expect((await upstreams(target)).eastmoney).toBe(expected);
     });
 
+    it('does not record fresh parent ETF quotes when the estimate fails base verification', async () => {
+      control.fund = 'etf';
+      // The NAV base is two trading days old: the calculation runs, verification rejects it.
+      control.navDate = '2026-11-04';
+      const target = app();
+      expect((await current(target, '110020')).status).toBe('unavailable');
+      expect(await upstreams(target)).toMatchObject({ tencent: null, ths: null });
+      // Control: with the expected base the same quote is adopted and reported.
+      control.navDate = '2026-11-05';
+      const adopted = app();
+      expect((await current(adopted, '110020')).status).toBe('estimated');
+      expect((await upstreams(adopted)).tencent).toBe(T);
+    });
+
+    it('does not record THS series whose points are all omitted', async () => {
+      control.report = report();
+      control.series.hs_600519 = '0930,101,0,0,0';
+      control.series.sz_300308 = '1000,101,0,0,0';
+      const target = app();
+      const body = await history(target);
+      expect(body.points).toEqual([]);
+      expect(body.coverage).toEqual({ returnedPoints: 0, omittedPoints: 2 });
+      expect((await upstreams(target)).ths).toBeNull();
+    });
+
     it('records THS for an intraday series with points, not for an empty or failed one', async () => {
       control.report = report();
       const target = app();
