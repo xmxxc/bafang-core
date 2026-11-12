@@ -227,7 +227,7 @@ export const positionDeleteRoute = createRoute({
   },
 });
 
-const SummarySchema = z
+export const SummarySchema = z
   .object({
     ...gainFields,
     previousMarketValue: z.string().nullable().openapi({

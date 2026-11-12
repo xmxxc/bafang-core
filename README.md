@@ -63,7 +63,7 @@ docker compose up -d
 
 ### 基金估值的基准验证
 
-`GET /v1/funds/estimates` 只采纳同时有基准日期和单位净值、且与估值日期之前最近一期已公布净值相符的来源。该日期还必须是适用日历的上一个交易日；估值日或向前检索经过的年度缺少完整导入证明时，逐只返回 `unavailable`。缓存命中也重新核对，来源时间保持原值。可识别的境内基金使用 A 股日历；QDII 尚无可靠境外日历映射，返回 `unavailable`。新浪当前只提供基准净值、不提供基准日期，即使相邻日期的净值相等也无法核实，因此不采纳；有明确上一交易日基准日期的天天基金估值仍可用。今日收益相应保持 `unavailable` 和 `null`，当天官方净值已公布后的确认收益保持现有规则。
+`GET /v1/funds/estimates` 只采纳基准日期和单位净值可核实、且与估值日期之前最近一期已公布净值相符的来源。该日期还必须是适用日历的上一个交易日；估值日或向前检索经过的年度缺少完整导入证明时，逐只返回 `unavailable`。缓存命中也重新核对，来源时间保持原值。可识别的境内基金使用 A 股日历；QDII 尚无可靠境外日历映射，返回 `unavailable`。新浪等无基准日期的来源使用近 1 月的估值日前历史核实：必须包含上一交易日及其前一适用交易日，基准单位净值在窗口内只能匹配一次，且匹配日必须是上一交易日。重复净值、历史不足、查询失败或所需日历覆盖未知时返回 `unavailable`。唯一性只在该 1 月窗口内判断；有明确 `PDATE` 的天天基金沿用日期与净值双重核验。缓存保留原始无日期来源，每次重新检查历史唯一性。今日收益相应保持 `unavailable` 和 `null`，当天官方净值已公布后的确认收益保持现有规则。
 
 覆盖未知不改变市场状态接口的兼容判断，因此同一响应可能出现 `marketStatus: trading`、基金 `status: unavailable`。仅在估值日覆盖已知后，盘前/休市才返回 `pre_market` / `holiday`。
 
@@ -168,6 +168,15 @@ docker compose up -d
 - `totalAssets` 是可取得净值的市值合计；缺净值的持仓不计入总资产和持有收益，已实现收益仍全部相加；累计收益为可用持有收益合计加全部已实现收益，全部净值缺失时为 `null`，`valuationComplete: false`。`totalCost` 仍包含全部持仓；汇总持有收益率仅使用净值可用持仓的成本作分母。
 - 不可用的今日收益及其上一市值均不计入今日收益与收益率汇总，`todayGainComplete: false`。`isComplete` 仅在两个完整性字段都为 true 时为 true。汇总状态仅看可计入部分：全为估算是 `estimated`，全为确认是 `confirmed`，两者并存是 `mixed`，无可用收益是 `unavailable`，没有可计算的持仓是 `none`。
 - 有持仓但对应数据全部缺失时，该项合计为 `null`；空持仓的金额合计为 `0.00`（上一市值 `0.00`）、收益率为 `null`、状态为 `none`，完整性为 true。
+
+### 今日概览
+
+`GET /v1/overview?channelId=` 需要网页 Cookie 或小程序 Bearer 会话，一次返回 `summary`、`positions`、`indices`、`time` 与 `referenceOnly: true`（仅供参考）。`channelId` 可选，只筛选自己的持仓与汇总；不影响大盘指数。渠道不属于自己或不存在返回 404，格式错误返回 400。
+
+- `summary` 复用 `PositionSummary` 的金额、收益类型、收益率与完整性口径，包含已清仓的历史已实现收益；另含 `risingCount` / `fallingCount`。涨跌只数按有已确认份额的基金去重，同基金跨渠道只计一次，平盘、行情不可用和只有在途加仓的零份额持仓不计入。
+- `positions` 隐藏已清仓，按创建顺序逐笔展示，含原持仓字段、`fundName`、`channelName` 与 `quote`。基金名称暂不可用时为 `null`，基金代码仍保留。`quote.type` 为 `estimate`、`nav` 或 `unavailable`，并提供单位水平、百分数涨跌幅、所属日期、来源、来源名称、是否回退及数据时间。`quote.direction` 按未舍入的行情判断 `up` / `down` / `flat`，不可用为 `null`；涨跌只数使用此方向，微小的净值变动即使展示为 `0.00%` 也会计入。行情与今日收益使用同一轮计算的数据；净值只有日期精度，`quote.time` 返回 `YYYY-MM-DD`，估值时间为来源的 ISO 时间。
+- 估值不可用时，`quote` 的数值、来源、日期和时间均为 `null`，今日收益为 `null`；该持仓和分母不计入今日收益合计，`todayGainComplete=false`。缺净值另使 `valuationComplete=false`；`isComplete` 为两者合取。盘前、休市不沿用昨日涨跌。
+- `indices` 复用大盘指数响应，逐项给出市场状态、来源、时间及可用性；全部来源失败时仍返回四个 `available=false` 的指数，概览保持 200。
 
 ### 加仓与交易记录
 

@@ -99,6 +99,8 @@ import {
 } from './routes/positions';
 import { PositionError, createPositionService } from './positions/service';
 import { summarizePositions, summarizeByFund } from './positions/summary';
+import { overviewRoute } from './routes/overview';
+import { todayOverview } from './positions/overview';
 
 import { createTradeService } from './positions/trades';
 import {
@@ -201,7 +203,27 @@ export function createApp(deps: AppDeps = {}): App {
   const app = new OpenAPIHono({
     defaultHook: (result, c) => {
       if (!result.success) {
-        return c.json(errorBody('validation_error', result.error.message), 400);
+        const messages = result.error.issues.map((issue) => {
+          let message = issue.message?.trim() || '请求参数不合法';
+          // Default Zod explanations can contain schema patterns or submitted object keys.
+          if (
+            issue.code === 'invalid_format' &&
+            issue.format === 'regex' &&
+            issue.pattern &&
+            message.includes(issue.pattern)
+          ) {
+            message = '格式不合法';
+          } else if (issue.code === 'unrecognized_keys') {
+            message = '包含不支持的字段';
+          }
+          const path = issue.path.map(String).join('.');
+          return path && (issue.path.length > 1 || result.error.issues.length > 1)
+            ? `${path}：${message}`
+            : message;
+        });
+        // Set preserves validation order while removing repeated explanations at the same path.
+        const message = [...new Set(messages)].join('；') || '请求参数不合法';
+        return c.json(errorBody('validation_error', message), 400);
       }
       return undefined;
     },
@@ -382,8 +404,28 @@ export function createApp(deps: AppDeps = {}): App {
       })
     : null;
   const requireLogin = auth ? requireAuth(auth) : null;
-
   const channels = resolved.database ? createChannelService(resolved.database) : null;
+
+  app.use('/v1/overview', async (c, next) => {
+    if (!requireLogin) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    return requireLogin(c, next);
+  });
+  app.openapi(overviewRoute, async (c) => {
+    if (!positions || !channels)
+      return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
+    const asOf = resolved.clock.now();
+    const { channelId } = c.req.valid('query');
+    return c.json(
+      await todayOverview(
+        { positions, channels, funds, indices, clock: resolved.clock },
+        getAuth(c).userId,
+        channelId,
+        asOf,
+      ),
+      200,
+    );
+  });
+
   app.use('/v1/channels/*', async (c, next) => {
     if (!requireLogin) return c.json(errorBody('database_unavailable', '数据库不可用'), 503);
     return requireLogin(c, next);
