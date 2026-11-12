@@ -40,7 +40,6 @@ export async function fetchTencentQuotes(
   if (!recognized) {
     throw new UpstreamError('bad_response', 'tencent quote response has no recognizable lines');
   }
-  upstream.recordSuccess?.('tencent');
   const quotes = new Map<string, Quote | null>();
   for (const symbol of symbols) {
     const fields = rows.get(symbol);

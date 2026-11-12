@@ -10,14 +10,19 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    # 超级用户 postgres 只用于首次初始化与运维；core 用下面两个非超级用户角色（见 docker/postgres/initdb）。
     environment:
-      POSTGRES_USER: ${PGUSER:-bafang}
-      POSTGRES_PASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
-      POSTGRES_DB: ${PGDATABASE:-bafang}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必填}
+      BAFANG_DATABASE: ${PGDATABASE:-bafang}
+      BAFANG_MIGRATION_USER: ${PG_MIGRATION_USER:-bafang_owner}
+      BAFANG_MIGRATION_PASSWORD: ${PG_MIGRATION_PASSWORD:?PG_MIGRATION_PASSWORD 必填}
+      BAFANG_APP_USER: ${PGUSER:-bafang_app}
+      BAFANG_APP_PASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d "$$BAFANG_DATABASE"']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -36,9 +41,13 @@ services:
       PORT: '3000'
       PGHOST: postgres
       PGPORT: '5432'
-      PGUSER: ${PGUSER:-bafang}
+      # 长期运行角色：非超级用户，只有表数据权限。
+      PGUSER: ${PGUSER:-bafang_app}
       PGPASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
       PGDATABASE: ${PGDATABASE:-bafang}
+      # 迁移角色（库 owner）：入口脚本只在启动迁移时使用，启动服务前从环境中移除。
+      PG_MIGRATION_USER: ${PG_MIGRATION_USER:-bafang_owner}
+      PG_MIGRATION_PASSWORD: ${PG_MIGRATION_PASSWORD:?PG_MIGRATION_PASSWORD 必填}
       PGSCHEMA: ${PGSCHEMA:-public}
       SETTLEMENT_ROUNDS: ${SETTLEMENT_ROUNDS:-21:30,22:30,23:30}
       RESEND_API_KEY: ${RESEND_API_KEY:-}

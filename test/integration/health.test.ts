@@ -4,7 +4,9 @@ import { loadConfig, toDbConfig } from '../../src/config';
 import { createHealthProbe, createPool } from '../../src/db';
 import type { HealthResponse } from '../../src/routes/health';
 import type { ErrorResponse } from '../../src/errors';
+import type { Pool } from 'pg';
 import { createTestSchema, dropTestSchema, type TestSchema } from '../support/test-db';
+import { PgFaultProxy } from '../support/pg-fault-proxy';
 import { UpstreamError } from '../../src/market/upstream';
 import { loadTradingCalendar } from '../../src/trading-calendar';
 import { importHolidays } from '../../src/trading-calendar/holidays';
@@ -15,8 +17,28 @@ import {
   hostDown,
   quoteSamples,
   RecordedUpstream,
+  sample,
+  tiantianSamples,
   upstreamDown,
+  type Replay,
 } from '../support/recorded-upstream';
+
+/** 健康检查在数据库无响应时的返回期限（连接 2 秒 + 探针查询 2 秒，留出余量）。 */
+const DB_PROBE_BUDGET_MS = 5_000;
+
+/**
+ * 盘中样子的天天基金样本：录制样本取自当晚，110020 的基准已是当天净值；还原成 2026-11-05 的
+ * 基准（与录制的东方财富净值一致），估值才会通过基准核对被采纳。
+ */
+function intradayTiantian(): Replay {
+  const body = JSON.parse(sample('tiantian/valuation-000001-110020-040046-999999.json')) as {
+    data: Record<string, unknown>[];
+  };
+  body.data = body.data.map((row) =>
+    row.FCODE === '110020' ? { ...row, PDATE: '2026-11-05', NAV: 1.703 } : row,
+  );
+  return tiantianSamples(JSON.stringify(body));
+}
 
 const NEVER = {
   eastmoney: { lastSuccessAt: null },
@@ -85,20 +107,73 @@ describe('GET /v1/health over in-process HTTP against a real PostgreSQL test dat
     expect(typeof body.error.message).toBe('string');
   });
 
-  it('keeps serving and reports 503 after an idle database connection errors', async () => {
-    const pool = createPool(toDbConfig(loadConfig()));
-    try {
-      const app = createApp({ db: createHealthProbe(pool) });
-      expect((await app.request('/v1/health')).status).toBe(200);
-      // pg emits this when the server terminates an idle connection (e.g. PostgreSQL restarts).
-      expect(() => pool.emit('error', new Error('terminating connection'))).not.toThrow();
-      await pool.end();
-      const res = await app.request('/v1/health');
-      expect(res.status).toBe(503);
-      expect(((await res.json()) as ErrorResponse).error.code).toBe('database_unavailable');
-    } finally {
-      if (!pool.ended) await pool.end();
+  describe('database faults injected outside the process', () => {
+    let proxy: PgFaultProxy;
+    let pool: Pool;
+    let app: ReturnType<typeof createApp>;
+
+    async function status(path: string): Promise<{ status: number; ms: number; code?: string }> {
+      const started = Date.now();
+      const res = await app.request(path);
+      const body = (await res.json()) as Partial<ErrorResponse>;
+      return { status: res.status, ms: Date.now() - started, code: body.error?.code };
     }
+
+    beforeEach(async () => {
+      const config = toDbConfig(loadConfig());
+      proxy = new PgFaultProxy({ host: config.host, port: config.port });
+      await proxy.start();
+      // 本用例的临时 schema，连接经过可控代理。
+      pool = createPool({ ...config, host: '127.0.0.1', port: proxy.port, schema: db.schema });
+      app = createApp({ db: createHealthProbe(pool), clock: { now: () => new Date() } });
+    });
+
+    afterEach(async () => {
+      await proxy.stop();
+      await pool.end();
+    });
+
+    it('keeps serving when PostgreSQL drops its connections, reports 503 while it is down and reconnects after it returns', async () => {
+      expect((await status('/v1/health')).status).toBe(200);
+
+      // 断开池里的空闲连接并拒绝新连接，等同数据库重启期间。
+      await proxy.refuse();
+      const down = await status('/v1/health');
+      expect(down).toMatchObject({ status: 503, code: 'database_unavailable' });
+      // 进程仍在服务不依赖数据库的接口。
+      expect((await app.request('/v1/openapi')).status).toBe(200);
+
+      await proxy.restore();
+      expect((await status('/v1/health')).status).toBe(200);
+
+      // 只终止现有连接（不拒绝新连接）：下一次检查重新连上。
+      proxy.cut();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect((await status('/v1/health')).status).toBe(200);
+    });
+
+    it('answers 503 within a few seconds when new connections hang', async () => {
+      await proxy.refuse();
+      proxy.stall();
+      await proxy.restore();
+      proxy.stall();
+      const result = await status('/v1/health');
+      expect(result).toMatchObject({ status: 503, code: 'database_unavailable' });
+      expect(result.ms).toBeLessThan(DB_PROBE_BUDGET_MS);
+    }, 15_000);
+
+    it('answers 503 within a few seconds when an open connection stops responding', async () => {
+      expect((await status('/v1/health')).status).toBe(200);
+      proxy.stall();
+      const result = await status('/v1/health');
+      expect(result).toMatchObject({ status: 503, code: 'database_unavailable' });
+      expect(result.ms).toBeLessThan(DB_PROBE_BUDGET_MS);
+
+      proxy.cut();
+      await proxy.refuse();
+      await proxy.restore();
+      expect((await status('/v1/health')).status).toBe(200);
+    }, 15_000);
   });
 
   it('returns the unified 500 error when the injected clock throws', async () => {
@@ -193,7 +268,7 @@ describe('GET /v1/health over in-process HTTP against a real PostgreSQL test dat
       const tradingCalendar = await loadTradingCalendar(db.pool);
       // Friday 2026-11-06 10:00 Asia/Shanghai — trading.
       clock.set('2026-11-06T02:00:00.000Z');
-      upstream.use(estimateSamples());
+      upstream.use(estimateSamples({ tiantian: intradayTiantian() }));
       const app = createApp({ db: createHealthProbe(db.pool), upstream, clock, tradingCalendar });
       await call(app, '/v1/funds/estimates?codes=110020');
       let body = await health(app);
@@ -206,6 +281,114 @@ describe('GET /v1/health over in-process HTTP against a real PostgreSQL test dat
       expect(body.upstreams.tiantian.lastSuccessAt).toBe('2026-11-06T02:00:00.000Z');
       expect(body.upstreams.sina.lastSuccessAt).toBe('2026-11-06T02:01:00.000Z');
       expect(body.upstreams.eastmoney.lastSuccessAt).not.toBeNull();
+    });
+
+    describe('bad data does not count as success', () => {
+      const primaryDown = (url: URL) =>
+        url.hostname === 'qt.gtimg.cn'
+          ? new UpstreamError('timeout', 'primary unavailable')
+          : thsInconsistent(url);
+      const thsInconsistent: Replay = (url) => {
+        if (url.pathname.includes('/realhead/'))
+          return 'callback({"items":{"10":"3000","6":"2900"}})';
+        const symbol = url.pathname.split('/')[3]!;
+        return `callback(${JSON.stringify({ [symbol]: { pre: '2800', date: '20261106', data: '1500,3000,100,3000,100' } })})`;
+      };
+
+      it.each([
+        [
+          'tencent',
+          'non-empty malformed quote lines',
+          (url: URL) =>
+            url.hostname === 'qt.gtimg.cn'
+              ? 'v_sh000001="garbage";'
+              : new UpstreamError('timeout', 'backup unavailable'),
+        ],
+        ['ths', 'snapshot and minutes that disagree', primaryDown],
+      ] as const)(
+        'keeps %s at null after %s leave every index unavailable',
+        async (source, _what, replay) => {
+          upstream.use(replay);
+          const app = createApp({ db: createHealthProbe(db.pool), upstream, clock });
+          const res = await app.request('/v1/market/indices');
+          expect(res.status).toBe(200);
+          const body = (await res.json()) as { items: { available: boolean }[] };
+          expect(body.items.every((item) => !item.available)).toBe(true);
+          expect((await health(app)).upstreams[source].lastSuccessAt).toBeNull();
+        },
+      );
+
+      it.each([
+        [
+          'tiantian',
+          {
+            tiantian: () =>
+              '{"success":true,"errorCode":0,"data":[{"FCODE":"000001","GSZ":"garbage"}]}',
+            sina: upstreamDown(),
+          },
+        ],
+        ['sina', { tiantian: upstreamDown(), sina: () => 'var hq_str_fu_000001="garbage";' }],
+      ] as const)(
+        'keeps %s at null after a malformed estimate row leaves the fund unavailable',
+        async (source, overrides) => {
+          await importHolidays(db.pool, cn2026.year, cn2026.holidays);
+          const tradingCalendar = await loadTradingCalendar(db.pool);
+          clock.set('2026-11-06T02:00:00.000Z');
+          upstream.use(estimateSamples(overrides));
+          const app = createApp({
+            db: createHealthProbe(db.pool),
+            upstream,
+            clock,
+            tradingCalendar,
+          });
+          const res = await app.request('/v1/funds/estimates?codes=000001');
+          expect(res.status).toBe(200);
+          expect(((await res.json()) as { items: unknown[] }).items).toEqual([
+            { code: '000001', status: 'unavailable', estimate: null },
+          ]);
+          expect((await health(app)).upstreams[source].lastSuccessAt).toBeNull();
+        },
+      );
+
+      it('keeps eastmoney at null for malformed NAV rows and for legal empty results', async () => {
+        const app = createApp({ db: createHealthProbe(db.pool), upstream, clock });
+        // 合法空结果：搜索无匹配、基金不存在。上游正常应答但没有给出可用数据，不算成功也不算失败。
+        await call(app, '/v1/funds/search?q=~~');
+        await call(app, '/v1/funds/999999', 404);
+        upstream.use(
+          () =>
+            '{"ErrCode":0,"Data":{"LSJZList":[{"FSRQ":"garbage","DWJZ":"n/a","LJJZ":null,"JZZZL":null}]}}',
+        );
+        await app.request('/v1/funds/000001/nav');
+        expect((await health(app)).upstreams.eastmoney.lastSuccessAt).toBeNull();
+      });
+    });
+
+    it('does not refresh the time when a request is answered from cache', async () => {
+      const app = createApp({ db: createHealthProbe(db.pool), upstream, clock });
+      upstream.use(quoteSamples);
+      await call(app, '/v1/market/indices');
+      clock.set('2026-11-06T13:01:00.000Z');
+      await call(app, '/v1/market/indices');
+      upstream.use(eastmoneySamples);
+      await call(app, '/v1/funds/search?q=000001');
+      clock.set('2026-11-06T13:02:00.000Z');
+      await call(app, '/v1/funds/search?q=000001');
+      const body = await health(app);
+      expect(body.upstreams.tencent.lastSuccessAt).toBe('2026-11-06T13:00:00.000Z');
+      expect(body.upstreams.eastmoney.lastSuccessAt).toBe('2026-11-06T13:01:00.000Z');
+    });
+
+    it('does not refresh estimate sources when estimates are answered from cache', async () => {
+      await importHolidays(db.pool, cn2026.year, cn2026.holidays);
+      const tradingCalendar = await loadTradingCalendar(db.pool);
+      clock.set('2026-11-06T02:00:00.000Z');
+      upstream.use(estimateSamples({ tiantian: intradayTiantian() }));
+      const app = createApp({ db: createHealthProbe(db.pool), upstream, clock, tradingCalendar });
+      await call(app, '/v1/funds/estimates?codes=110020');
+      clock.set('2026-11-06T02:00:10.000Z');
+      await call(app, '/v1/funds/estimates?codes=110020');
+      expect((await health(app)).upstreams.tiantian.lastSuccessAt).toBe('2026-11-06T02:00:00.000Z');
     });
 
     it('still answers 503 when the database is unavailable, even after upstream successes', async () => {
