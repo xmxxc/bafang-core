@@ -5,7 +5,7 @@ import type { EstimateServiceDeps } from './estimates';
 import type { SourceEstimate } from './estimate-sources';
 import { stale } from './holdings';
 import { fetchTencentQuotes } from './tencent';
-import { fetchThsIntraday } from './ths';
+import { fetchThsIntraday, type ThsIntradayPoint } from './ths';
 import { fetchThsQuote } from './ths';
 import type { Quote } from './quote';
 import { formatNav } from './estimate-sources';
@@ -100,7 +100,15 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
       };
     }
     const report = await deps.holdings.get(code, asOf);
-    if (!report || !validReport(report.reportDate, asOf) || !report.items.length) return null;
+    // Only a list proven to be the complete disclosure can back the model. The Sina fallback
+    // lists A shares only, so disclosed holdings it omits would wrongly count as undisclosed.
+    if (
+      !report ||
+      report.holdingsSource !== 'eastmoney' ||
+      !validReport(report.reportDate, asOf) ||
+      !report.items.length
+    )
+      return null;
     const items: Component[] = [];
     let total = { value: 0n, scale: 4 };
     for (const item of report.items) {
@@ -164,6 +172,8 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
                 ? `hs_${item.symbol.slice(2)}`
                 : `sz_${item.symbol.slice(2)}`,
             );
+            // The backup snapshot is judged when its own call returns.
+            if (quote && stale(quote, deps.clock.now(), deps.calendar)) quote = null;
           }
           item.quote = quote ?? undefined;
           item.quoteSource = quote ? quoteSource : undefined;
@@ -229,25 +239,31 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
       if (!model) return result;
       const base = await deps.nav.latestBefore(code, result.tradeDate, asOf);
       if (!base) return result;
-      const fetched = await Promise.all(
+      // Each series is judged at the moment it was observed: its own labels may not be later
+      // than that moment, and it must still be the request's Shanghai day. Another, slower
+      // series never extends this bound.
+      const observed = await Promise.all(
         model.items.map(async (item) => {
           const symbol = item.symbol.replace(/^sh/, 'hs_').replace(/^sz/, 'sz_');
-          return fetchThsIntraday(deps.upstream, symbol);
-        }),
-      );
-      // Points up to the moment the series were observed are real; later labels are not.
-      const observedAt = deps.clock.now();
-      const series = fetched.map(
-        (points) =>
-          new Map(
+          const points = await fetchThsIntraday(deps.upstream, symbol);
+          const observedAt = deps.clock.now();
+          if (shanghaiDate(observedAt) !== result.tradeDate) return null;
+          return new Map(
             points
               .filter(
                 (point) =>
                   point.time <= observedAt && shanghaiDate(point.time) === result.tradeDate,
               )
               .map((point) => [point.time.getTime(), point]),
-          ),
+          );
+        }),
       );
+      // A series observed after the Shanghai date changed belongs to a previous day: no points,
+      // and the old day's NAV base is not re-applied to it.
+      const series = observed.filter(
+        (points): points is Map<number, ThsIntradayPoint> => points !== null,
+      );
+      if (series.length !== observed.length) return result;
       const labels = new Set(series.flatMap((points) => [...points.keys()]));
       for (const at of [...labels].sort((a, b) => a - b)) {
         if (!series.every((points) => points.has(at))) {

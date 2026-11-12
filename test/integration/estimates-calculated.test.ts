@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { setImmediate as immediate } from 'node:timers/promises';
 import { createApp } from '../../src/app';
 import { createHealthProbe } from '../../src/db';
 import { UpstreamError } from '../../src/market/upstream';
@@ -627,6 +628,198 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
         '2026-11-06T02:00:00.000Z',
         '2026-11-06T02:01:00.000Z',
       ]);
+    });
+  });
+});
+
+describe('calculated estimate review r5 boundaries over HTTP', () => {
+  let db: TestSchema, calendar: TradingCalendar, control: ReplayControls;
+  /** Per THS symbol: the moment its pair returns. Others return at the current clock. */
+  let thsReturns: Record<string, string>;
+  beforeEach(async () => {
+    db = await createTestSchema();
+    await importHolidays(db.pool, cn2026.year, cn2026.holidays);
+    calendar = await loadTradingCalendar(db.pool);
+    control = new ReplayControls();
+    thsReturns = {};
+  });
+  afterEach(async () => dropTestSchema(db));
+  function app() {
+    return createApp({
+      db: createHealthProbe(db.pool),
+      upstream: {
+        async fetchText(request) {
+          const url = new URL(request.url);
+          const symbol = /\/v6\/(?:realhead|time)\/([^/]+)\//.exec(url.pathname)?.[1];
+          const returnsAt = symbol ? thsReturns[symbol] : undefined;
+          if (url.hostname === 'd.10jqka.com.cn' && returnsAt) {
+            // Let faster calls resolve and read the clock first, then answer late.
+            await immediate();
+            control.now = returnsAt;
+          }
+          const result = control.replay(url);
+          if (result instanceof UpstreamError) throw result;
+          return result;
+        },
+      },
+      clock: { now: () => new Date(control.now) },
+      tradingCalendar: calendar,
+    });
+  }
+  async function intraday(code = '000001') {
+    const response = await app().request(`/v1/funds/${code}/estimates/intraday`);
+    expect(response.status).toBe(200);
+    return (await response.json()) as IntradayEstimate;
+  }
+  async function current(target = app(), code = '000001') {
+    const response = await target.request(`/v1/funds/estimates?codes=${code}`);
+    expect(response.status).toBe(200);
+    return ((await response.json()) as EstimateBatchResponse).items[0]!;
+  }
+  const at = (hhmm: string) => `${day}T${hhmm}:00.000Z`;
+
+  describe('SP-R5-1: each intraday series is judged at its own observation', () => {
+    beforeEach(() => {
+      control.report = report();
+      control.series.hs_600519 = '1000,101,0,0,0;1001,101,0,0,0';
+      control.series.sz_300308 = '1000,101,0,0,0;1001,101,0,0,0';
+    });
+
+    it('returns only 10:00 when both series return at 10:00', async () => {
+      const body = await intraday();
+      expect(body.points.map((point) => point.time)).toEqual([at('02:00')]);
+      expect(body.coverage).toEqual({ returnedPoints: 1, omittedPoints: 0 });
+    });
+
+    it('returns 10:00 and 10:01 when both series return at 10:02', async () => {
+      thsReturns = { hs_600519: at('02:02'), sz_300308: at('02:02') };
+      const body = await intraday();
+      expect(body.points.map((point) => point.time)).toEqual([at('02:00'), at('02:01')]);
+    });
+
+    it('drops a future label of a fast series even when a slower series returns later', async () => {
+      // 600519 returns at 10:00 carrying 10:01; 300308 returns at 10:02 with the same label.
+      thsReturns = { sz_300308: at('02:02') };
+      const body = await intraday();
+      expect(body.points.map((point) => point.time)).toEqual([at('02:00')]);
+      expect(body.coverage).toEqual({ returnedPoints: 1, omittedPoints: 1 });
+    });
+
+    it('counts a label only the slower series has as omitted', async () => {
+      control.series.hs_600519 = '1000,101,0,0,0';
+      thsReturns = { sz_300308: at('02:02') };
+      const body = await intraday();
+      expect(body.points.map((point) => point.time)).toEqual([at('02:00')]);
+      expect(body.coverage).toEqual({ returnedPoints: 1, omittedPoints: 1 });
+    });
+
+    it.each(['domestic', 'etf'])(
+      'returns no previous-day %s series once the Shanghai date changes during the fetch',
+      async (fund) => {
+        control.fund = fund;
+        control.now = '2026-11-06T15:59:59.000Z'; // Friday 23:59:59
+        for (const symbol of ['hs_600519', 'sz_300308', 'hs_510310']) {
+          control.series[symbol] = '1500,101,0,0,0';
+          thsReturns[symbol] = '2026-11-06T16:00:01.000Z'; // Saturday 00:00:01
+        }
+        const body = await intraday(fund === 'etf' ? '110020' : '000001');
+        expect(body).toMatchObject({ tradeDate: day, status: 'unavailable', points: [] });
+
+        // Control: the same series returned before midnight are Friday's closing points.
+        control.now = '2026-11-06T15:59:59.000Z';
+        thsReturns = {};
+        expect((await intraday(fund === 'etf' ? '110020' : '000001')).status).toBe('estimated');
+      },
+    );
+
+    it.each(['domestic', 'etf'])(
+      'rejects a %s current estimate whose quotes return after Shanghai midnight',
+      async (fund) => {
+        control.fund = fund;
+        control.report = report();
+        control.now = '2026-11-06T15:59:59.000Z'; // Friday 23:59:59
+        const replay = control.replay;
+        control.replay = (url) => {
+          const result = replay(url);
+          if (url.hostname !== 'qt.gtimg.cn' || typeof result !== 'string') return result;
+          control.now = '2026-11-06T16:00:01.000Z';
+          return result.replaceAll('20261106100000', '20261106150000');
+        };
+        const code = fund === 'etf' ? '110020' : '000001';
+        expect(await current(app(), code)).toEqual({ code, status: 'unavailable', estimate: null });
+      },
+    );
+  });
+
+  describe('SP-R5-2: the Sina A-share subset never backs a calculated model', () => {
+    const thursday = '2026-11-12';
+    function sinaSubsetDay(emDown: () => boolean, quoteDay: string) {
+      const replay = control.replay;
+      control.replay = (url) => {
+        if (url.hostname === 'fundf10.eastmoney.com')
+          return emDown() ? new UpstreamError('timeout', 'synthetic EM outage') : control.report;
+        if (url.hostname === 'finance.sina.com.cn') return sample('sina/holdings-005827-page.txt');
+        const result = replay(url);
+        return url.hostname === 'qt.gtimg.cn' && typeof result === 'string'
+          ? result.replaceAll('20261106100000', `${quoteDay.replaceAll('-', '')}100000`)
+          : result;
+      };
+    }
+
+    it('keeps the full Eastmoney list unavailable while it has unquoted HK holdings', async () => {
+      control.now = `${thursday}T02:00:00.000Z`;
+      control.navDate = '2026-11-11';
+      control.seriesDate = '20261112';
+      control.report = sample('eastmoney/holdings-005827.txt');
+      sinaSubsetDay(() => false, thursday);
+      expect((await current(app(), '005827')).status).toBe('unavailable');
+      expect((await intraday('005827')).status).toBe('unavailable');
+    });
+
+    it('is unavailable from a Sina list, stays so for the cached day, and recovers with Eastmoney the next day', async () => {
+      let emDown = true;
+      const original = control.replay;
+      control.now = `${thursday}T02:00:00.000Z`;
+      control.navDate = '2026-11-11';
+      control.seriesDate = '20261112';
+      control.report = report(); // synthetic complete A-share disclosure for the recovery day
+      sinaSubsetDay(() => emDown, thursday);
+      const target = app();
+
+      const holdings = await target.request('/v1/funds/005827/holdings');
+      expect(await holdings.json()).toMatchObject({
+        holdingsSource: 'sina',
+        holdingsFallback: true,
+      });
+      expect(await current(target, '005827')).toEqual({
+        code: '005827',
+        status: 'unavailable',
+        estimate: null,
+      });
+      const history = await target.request('/v1/funds/005827/estimates/intraday');
+      expect(((await history.json()) as IntradayEstimate).status).toBe('unavailable');
+
+      // Eastmoney recovers the same day, but the day's cached list is still the Sina subset.
+      emDown = false;
+      control.now = `${thursday}T02:01:00.000Z`;
+      expect((await current(target, '005827')).status).toBe('unavailable');
+      const cached = await target.request('/v1/funds/005827/estimates/intraday');
+      expect(((await cached.json()) as IntradayEstimate).status).toBe('unavailable');
+
+      // Next trading day: the list is fetched again from Eastmoney.
+      const friday = '2026-11-13';
+      control.now = `${friday}T02:00:00.000Z`;
+      control.navDate = thursday;
+      control.seriesDate = '20261113';
+      control.replay = original;
+      control.report = report();
+      sinaSubsetDay(() => false, friday);
+      expect(await current(target, '005827')).toMatchObject({
+        status: 'estimated',
+        estimate: { source: 'calculated', calculation: { method: 'top_holdings' } },
+      });
+      const recovered = await target.request('/v1/funds/005827/estimates/intraday');
+      expect(((await recovered.json()) as IntradayEstimate).status).toBe('estimated');
     });
   });
 });
