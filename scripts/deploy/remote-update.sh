@@ -11,11 +11,15 @@
 #      不用标签字符串：同一标签重新 docker load 后会指向新镜像，旧容器却还在用原来的镜像
 #   2. 确保 postgres 运行并健康，以超级用户 postgres 备份业务库到 backups/pre-deploy-<时间>-<标签>.dump；
 #      数据库起不来或备份失败都拒绝部署，core 不切换
-#   3. 用环境变量覆盖 BAFANG_CORE_IMAGE / BAFANG_CORE_TAG 执行 `up -d --no-build core`；数据库迁移随之执行
-#      （一次性 migrate 服务先跑完，或旧形态下 core 启动时自己迁移）
-#   4. 在容器内轮询 /v1/health，按墙钟截止时间判断：部署检查默认 180 秒，单次请求最多 5 秒且不超过剩余时间
-#   5. 通过：把新镜像名、标签写回 .env.production，之后手动执行 Compose 也用新版本
-#      未通过：打印新容器日志，停止 core，用 <镜像名>:rollback 重建容器并复检（默认 120 秒），然后以非零退出
+#   3. 先用新镜像单独跑一次性迁移服务 migrate（`run --rm migrate`），以它的退出码为准。
+#      迁移失败：旧 core 容器没有动过、继续服务，记录失败并以非零退出，不回滚。
+#      不能直接 `up core` 了事：Compose 会先删掉旧 core、建好新容器，再跑 migrate，迁移失败时旧版本已经停了
+#   4. 迁移成功后用环境变量覆盖 BAFANG_CORE_IMAGE / BAFANG_CORE_TAG 执行 `up -d --no-build core`
+#      （Compose 会再跑一次 migrate，已执行过的迁移不会重跑）
+#   5. 在容器内轮询 /v1/health，按墙钟截止时间判断：部署检查默认 180 秒，单次请求最多 5 秒且不超过剩余时间
+#   6. 通过：把新镜像名、标签写回 .env.production，之后手动执行 Compose 也用新版本
+#      core 创建/启动失败或健康检查不过：打印日志，停止 core，用 <镜像名>:rollback 重建容器并复检（默认 120 秒），
+#      然后以非零退出
 # 自动回滚只换镜像、不恢复数据库：新版本的迁移已经执行，旧版本与新结构不兼容时按部署文档手动恢复备份。
 # 每次结果追加到部署目录的 deploy-history.log。
 #
@@ -49,9 +53,8 @@ show_logs() {
   dc logs --no-color --tail 80 ${services:-core} || true
 }
 
-# 切换到 <镜像名>:<标签>：Compose 发现镜像变化会删除旧容器、用该镜像新建 core 容器。
-# compose 里有一次性迁移服务（core depends_on migrate: service_completed_successfully）时，
-# up core 会先用同一镜像跑完迁移；迁移失败则 up 失败、core 不切换，同样进入回滚。
+# 切换到 <镜像名>:<标签>：Compose 发现镜像变化会删除旧容器、用该镜像新建 core 容器；
+# core depends_on 一次性迁移服务 migrate，up 会先用同一镜像跑完迁移。
 switch_to() {
   BAFANG_CORE_IMAGE=$1 BAFANG_CORE_TAG=$2 dc up -d --no-build core
 }
@@ -145,7 +148,20 @@ main() {
 
   backup_database
 
-  log "切换到 $image:$tag（执行数据库迁移后启动），健康检查上限 ${health_timeout}s"
+  # 先单独迁移：失败时旧 core 不受影响，继续服务。
+  if dc config --services | grep -qx migrate; then
+    log "用 $image:$tag 执行数据库迁移（旧版本 core 继续服务）"
+    migrate_status=0
+    BAFANG_CORE_IMAGE=$image BAFANG_CORE_TAG=$tag dc run --rm -T migrate || migrate_status=$?
+    if [ "$migrate_status" -ne 0 ]; then
+      record "$image:$tag" migrate-failed
+      state=
+      [ -n "$cid" ] && state=$(docker inspect -f '{{.State.Status}}' "$cid" </dev/null 2>/dev/null || echo 已不存在)
+      fail "迁移失败（migrate 退出码 $migrate_status），未切换；旧 core 容器 ${prev_ref:-（无）}：${state:-（无）}"
+    fi
+  fi
+
+  log "切换到 $image:$tag，健康检查上限 ${health_timeout}s"
   if switch_to "$image" "$tag"; then
     if wait_healthy "$health_timeout"; then
       persist BAFANG_CORE_IMAGE "$image"
@@ -156,7 +172,7 @@ main() {
     fi
     log "新版本 $image:$tag 在 ${health_timeout}s 内未通过健康检查，最近日志："
   else
-    log "切换到 $image:$tag 失败（迁移未成功或容器未能创建），最近日志："
+    log "切换到 $image:$tag 失败（core 未能创建或启动），最近日志："
   fi
   show_logs
   record "$image:$tag" failed

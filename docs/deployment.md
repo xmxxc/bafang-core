@@ -235,16 +235,17 @@ $L down -v   # 用完删除容器和数据卷
 3. 经 SSH 在 VPS 的部署目录执行 `scripts/deploy/remote-update.sh`（脚本经 stdin 传过去，不需要事先放到 VPS 上）：
    - 记录当前 core 容器实际运行的**镜像 ID**，打上本地标签 `bafang-core:rollback` 作为回滚目标。不按标签记：同一提交重新部署时，`docker load` 会让同名标签指向新构建的镜像，旧容器却还在用原来的镜像；
    - 先确保 postgres 运行并健康（已停止的会被启动，最多等 120 秒），再以超级用户 `postgres` 把业务库备份到 `backups/pre-deploy-<UTC 时间>-<标签>.dump`。数据库起不来或备份失败都拒绝部署，core 不切换；
-   - 以新标签执行 `up -d --no-build core`，数据库迁移随之执行；
+   - 先用新镜像单独执行一次性迁移服务（`run --rm migrate`），以它的退出码为准。**迁移失败时旧 core 容器没有动过、继续服务**：记录 `migrate-failed`，workflow 失败，不回滚。之所以单独先跑：直接 `up core` 时 Compose 会先删掉旧 core、建好新容器，再执行 migrate，迁移失败时旧版本已经停了；
+   - 迁移成功后以新标签执行 `up -d --no-build core`（Compose 会再跑一次 migrate，已执行过的迁移不会重跑）；
    - 在容器内轮询 `/v1/health`，按实际经过的时间计算上限：默认 180 秒，单次请求最多 5 秒且不超过剩余时间。通过后把 `BAFANG_CORE_IMAGE`、`BAFANG_CORE_TAG` 写回 `.env.production`，之后手动执行 `dc` 也是新版本；
-   - 切换失败（例如迁移出错）或健康检查不过：打印 core 与迁移日志，停止 core，用 `bafang-core:rollback` 以 `up -d --no-build core` 重建容器，复检上限默认 120 秒，然后让 workflow 失败。原标签已被同名新镜像占用时，`.env.production` 改写为 `rollback` 标签，避免之后手动执行 `dc` 又起坏镜像。
-4. 每次结果追加到部署目录的 `deploy-history.log`（`deployed` / `failed` / `rolled-back` / `rollback-failed`，回滚行记"原标签@镜像 ID"）。
+   - 新 core 未能创建、启动，或健康检查不过：打印 core 与迁移日志，停止 core，用 `bafang-core:rollback` 以 `up -d --no-build core` 重建容器，复检上限默认 120 秒，然后让 workflow 失败。原标签已被同名新镜像占用时，`.env.production` 改写为 `rollback` 标签，避免之后手动执行 `dc` 又起坏镜像。
+4. 每次结果追加到部署目录的 `deploy-history.log`（`deployed` / `migrate-failed` / `failed` / `rolled-back` / `rollback-failed`，回滚行记"原标签@镜像 ID"）。
 
 标签 `rollback` 保留给回滚目标，不能用作部署标签。VPS 上需要 Docker Compose v2.17 及以上（`up --wait-timeout`）和 `timeout` 命令（coreutils 或 busybox，常见发行版自带）。
 
-自动回滚只换回旧镜像，**不恢复数据库**：新版本的迁移已经执行过，旧版本要在新结构上运行。新版本的迁移与旧版本不兼容时，用这次的部署前备份按"数据库备份与恢复"的**恢复**流程处理：core 全程停止，恢复到新的空库、核验后改名切换，最后用旧标签 `up -d --no-build core`。
+自动回滚（迁移成功、新 core 不健康时）只换回旧镜像，**不恢复数据库**：新版本的迁移已经执行过，旧版本要在新结构上运行。新版本的迁移与旧版本不兼容时，用这次的部署前备份按"数据库备份与恢复"的**恢复**流程处理：core 全程停止，恢复到新的空库、核验后改名切换，最后用旧标签 `up -d --no-build core`。
 
-CD 只更新镜像，不同步部署目录里的 `compose.prod.yaml`、`docker/postgres/initdb/`、`docker/caddy/Caddyfile` 与 `.env.production`。升级到改动了这些文件或新增配置的版本（例如数据库角色拆分新增的 `POSTGRES_PASSWORD`、`PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`）之前，先在 VPS 上把文件和配置同步好，并按该版本文档做好一次性的准备，再合并或触发 CD；否则新镜像会以旧配置启动，迁移或健康检查不过就自动回滚。同步文件同"首次部署"第 2 步：
+CD 只更新镜像，不同步部署目录里的 `compose.prod.yaml`、`docker/postgres/initdb/`、`docker/caddy/Caddyfile` 与 `.env.production`。升级到改动了这些文件或新增配置的版本（例如数据库角色拆分新增的 `POSTGRES_PASSWORD`、`PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`）之前，先在 VPS 上把文件和配置同步好，并按该版本文档做好一次性的准备，再合并或触发 CD；否则新镜像会以旧配置运行：迁移失败时停在旧版本，迁移通过但健康检查不过时自动回滚。同步文件同"首次部署"第 2 步：
 
 ```bash
 rsync -R compose.prod.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.production.example vps:/srv/bafang-core/
