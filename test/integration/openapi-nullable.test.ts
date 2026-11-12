@@ -99,6 +99,7 @@ describe('OpenAPI 3.1 nullable contracts over HTTP with real PostgreSQL', () => 
       ],
       Trade: ['positionId', 'amount', 'shares', 'confirmedNav', 'confirmedShares', 'switchId'],
       EmailLoginResult: ['token'],
+      UpstreamStatus: ['lastSuccessAt'],
     };
     const refs = Object.entries(fields).flatMap(([name, names]) =>
       names.map((field) => `#/components/schemas/${name}/properties/${field}`),
@@ -189,6 +190,7 @@ describe('OpenAPI 3.1 nullable contracts over HTTP with real PostgreSQL', () => 
       ['OverviewQuote/properties/direction', 'up', 'sideways'],
       ['OverviewQuote/properties/source', 'eastmoney', 'tencent'],
       ['MarketIndex/properties/quoteTime', '2026-11-06T02:00:00Z', 'invalid'],
+      ['UpstreamStatus/properties/lastSuccessAt', '2026-11-06T02:00:00Z', 'invalid'],
       ['Trade/properties/positionId', '550e8400-e29b-41d4-a716-446655440000', 'invalid'],
       [
         'EstimateItem/properties/estimate',
