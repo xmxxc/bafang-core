@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { formatFixed, parseFixed, rescale, type Fixed } from '../positions/decimal';
 import { UpstreamError, type UpstreamFetcher } from './upstream';
 
 /**
@@ -131,12 +132,12 @@ function toEstimate(
   base: SourceEstimate['base'],
 ): SourceEstimate | null {
   const change = toFiniteNumber(changeRaw);
-  const value = toFiniteNumber(valueRaw);
-  if (change === null || value === null || value <= 0) return null;
+  const value = formatNav(valueRaw);
+  if (change === null || value === null) return null;
   if (date !== today || !time || !/^\d{2}:\d{2}(:\d{2})?$/.test(time)) return null;
   const at = new Date(`${date}T${time.length === 5 ? `${time}:00` : time}+08:00`);
   if (Number.isNaN(at.getTime())) return null;
-  return { changePercent: change, value: value.toFixed(4), time: at, base };
+  return { changePercent: change, value, time: at, base };
 }
 
 /** 是否为真实存在的 YYYY-MM-DD 日期。 */
@@ -146,10 +147,30 @@ function isIsoDate(value: string): boolean {
   return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
-/** 把单位净值规整成 4 位小数字符串；缺失、不可解析或不为正时返回 null。 */
+/**
+ * 把单位净值（或估值）规整成 4 位小数字符串：保留上游的十进制文本，用定点四舍五入（远离零），
+ * 不经过二进制浮点。缺失、不可解析，或舍入后不为正时返回 null。
+ */
 export function formatNav(raw: unknown): string | null {
-  const nav = toFiniteNumber(raw);
-  return nav !== null && nav > 0 ? nav.toFixed(4) : null;
+  const parsed = toDecimal(raw);
+  if (!parsed) return null;
+  const nav = rescale(parsed, 4);
+  return nav.value > 0n ? formatFixed(nav) : null;
+}
+
+/**
+ * 上游数值的精确十进制定点表示。字符串按原文解析；JSON 数字取其最短十进制文本，即上游写下的数。
+ * 两者都可能是指数形式（如 `1e-7`），只把指数折进 scale，不做浮点运算。
+ */
+function toDecimal(raw: unknown): Fixed | null {
+  if (typeof raw === 'number' && !Number.isFinite(raw)) return null;
+  if (typeof raw !== 'number' && typeof raw !== 'string') return null;
+  const match = /^\+?([^eE]+)(?:[eE]([+-]?\d{1,3}))?$/.exec(String(raw).trim());
+  if (!match) return null;
+  const [, mantissa = '', exponent = '0'] = match;
+  const scale = mantissa.split('.')[1]?.length ?? 0;
+  const parsed = parseFixed(mantissa, scale);
+  return parsed && { value: parsed.value, scale: scale - Number(exponent) };
 }
 
 function toFiniteNumber(raw: unknown): number | null {

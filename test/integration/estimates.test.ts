@@ -359,6 +359,54 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
     });
   });
 
+  describe('decimal rounding of upstream values', () => {
+    // 构造边界数据，不是录制样本。估值与基准净值保留上游的十进制文本，用定点四舍五入（远离零）
+    // 到 4 位；括号里是 Number(...).toFixed(4) 会给出的错值。
+    it.each<[string, string | number, string]>([
+      ['a positive half value as text', '10.00005', '10.0001'], // toFixed: 10.0000
+      ['a positive half value as a JSON number', 10.00005, '10.0001'], // toFixed: 10.0000
+      ['a value just below half', '1.00004999999999999999', '1.0000'], // toFixed: 1.0001
+      ['a value with more than 4 decimals', '1.678450000000000000001', '1.6785'], // toFixed: 1.6784
+      ['an exponent value', '1.678450000000000000001e0', '1.6785'],
+    ])('rounds %s of the Tiantian estimate away from zero', async (_name, GSZ, value) => {
+      upstream.use(samples({ tiantian: tiantianWith('110020', { GSZ }) }));
+      expect((await get(app(), '110020')).items).toEqual([
+        { code: '110020', status: 'estimated', estimate: { ...TIANTIAN_110020, value } },
+      ]);
+    });
+
+    it.each<[string, string | number]>([
+      ['a negative half value', '-0.00005'],
+      ['a positive value that rounds to zero', '0.00004'],
+    ])('rejects %s and falls back to Sina', async (_name, GSZ) => {
+      upstream.use(samples({ tiantian: tiantianWith('110020', { GSZ }) }));
+      expect((await get(app(), '110020')).items).toEqual([
+        { code: '110020', status: 'estimated', estimate: SINA_110020 },
+      ]);
+    });
+
+    it.each<[string, string | number]>([
+      ['a half value as text', '1.70295'], // toFixed: 1.7029, would fail the base check
+      ['a half value as a JSON number', 1.70295], // toFixed: 1.7029
+      ['a value with more than 4 decimals', '1.702950000000000000001'], // toFixed: 1.7029
+    ])('rounds %s of the Tiantian base NAV before checking it', async (_name, NAV) => {
+      upstream.use(samples({ tiantian: tiantianWith('110020', { NAV }) }));
+      expect((await get(app(), '110020')).items).toEqual([
+        { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
+      ]);
+    });
+
+    it('rounds the Sina estimate and base NAV the same way', async () => {
+      const row = sample('sina/fu-000001-110020-040046-999999.txt')
+        .replace(/,16:0[23]:00,/g, ',10:00:00,')
+        .replace(',1.6800,1.7030,', ',1.680049999999999999999,1.70295,'); // toFixed: 1.6801, 1.7029
+      upstream.use(samples({ tiantian: upstreamDown(), sina: sinaSamples(row) }));
+      expect((await get(app(), '110020')).items).toEqual([
+        { code: '110020', status: 'estimated', estimate: SINA_110020 },
+      ]);
+    });
+  });
+
   describe('unavailable', () => {
     it.each<[string, Replay]>([
       ['both sources time out', upstreamDown()],
