@@ -87,11 +87,14 @@ export function createHoldingsService(deps: {
       const symbols = parsed.items
         .map((i) => symbolFor(i.code))
         .filter((x): x is string => x !== null);
+      // Quote freshness is judged by the clock when quotes are looked up or returned, never
+      // by the request start: a slow report fetch must not turn current snapshots into "future".
+      const lookupAt = deps.clock.now().getTime();
       // Capture eligible entries before any await: another request may advance the cache.
       const hits = new Map(
         symbols.flatMap((symbol) => {
           const entry = quotes.get(symbol);
-          return entry && entry.sampledAt <= asOf.getTime() && entry.expiresAt > asOf.getTime()
+          return entry && entry.sampledAt <= lookupAt && entry.expiresAt > lookupAt
             ? [[symbol, entry.value] as const]
             : [];
         }),
@@ -106,13 +109,16 @@ export function createHoldingsService(deps: {
           console.warn('[bafang-core] tencent holdings quotes failed', error.kind, error.message);
         }
       }
+      // One sample time for the whole Tencent batch keeps its stocks on the same market date.
+      const primaryAt = deps.clock.now();
       const items = await Promise.all(
         parsed.items.map(async (item) => {
           const symbol = symbolFor(item.code);
           const hit = symbol ? hits.get(symbol) : undefined;
           if (hit) return { ...item, ...hit };
           let quote = symbol ? (primary.get(symbol) ?? null) : null;
-          if (quote && stale(quote, asOf, deps.calendar)) quote = null;
+          let sampledAt = primaryAt;
+          if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
           let source: 'tencent' | 'ths' | null = quote ? 'tencent' : null;
           const fallback = !quote && symbol !== null;
           if (fallback) {
@@ -121,7 +127,8 @@ export function createHoldingsService(deps: {
                 deps.upstream,
                 symbol!.startsWith('sh') ? `hs_${item.code}` : `sz_${item.code}`,
               );
-              if (quote && stale(quote, asOf, deps.calendar)) quote = null;
+              sampledAt = deps.clock.now();
+              if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
               source = quote ? 'ths' : null;
             } catch (error) {
               if (!(error instanceof UpstreamError)) throw error;
@@ -143,13 +150,13 @@ export function createHoldingsService(deps: {
               quote && previousQuote && quote.time.getTime() !== previousQuote.time.getTime()
                 ? quote.time.getTime() > previousQuote.time.getTime()
                 : !existing ||
-                  asOf.getTime() > existing.sampledAt ||
-                  (asOf.getTime() === existing.sampledAt && requestId > existing.requestId);
+                  sampledAt.getTime() > existing.sampledAt ||
+                  (sampledAt.getTime() === existing.sampledAt && requestId > existing.requestId);
             if (newer)
               quotes.set(symbol, {
                 value,
-                expiresAt: quoteExpiry(asOf, deps.calendar, quote),
-                sampledAt: asOf.getTime(),
+                expiresAt: quoteExpiry(sampledAt, deps.calendar, quote),
+                sampledAt: sampledAt.getTime(),
                 requestId,
               });
           }
@@ -263,6 +270,7 @@ function parseSina(text: string, asOfDay: string): Report {
   return report(date, items);
 }
 
+/** Judges a quote against the clock reading taken when it was returned (`asOf`). */
 function stale(quote: Quote, asOf: Date, calendar: TradingCalendar): boolean {
   const day = shanghaiDate(asOf);
   const minute = shanghaiMinutesOfDay(asOf);

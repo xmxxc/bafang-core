@@ -713,19 +713,90 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       ).items[0]!.quote,
     ).toMatchObject({ tradeDate: '2026-11-06' });
   });
-  it('keeps one asOf for every stock when upstream work crosses Shanghai midnight', async () => {
-    replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
-    replay.stamp = '20261109150000';
-    let samples = 0;
-    const body = await get(
-      app({
-        clock: {
-          now: () => new Date(++samples <= 2 ? '2026-11-09T15:59:59Z' : '2026-11-10T02:00:00Z'),
+  it.each([
+    ['a slow report fetch', 'FundArchivesDatas', '20261109140010', true],
+    ['a slow quote fetch', 'qt.gtimg.cn', '20261109140012', true],
+    [
+      'a slow quote fetch with a snapshot after the return time',
+      'qt.gtimg.cn',
+      '20261109140016',
+      false,
+    ],
+  ])(
+    'judges quote freshness at the return time after %s',
+    async (_label, slowUrl, stamp, available) => {
+      replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
+      replay.stamp = stamp;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            const text = await replay.fetchText(request);
+            // The upstream call takes 15 seconds; Tencent snapshots are newer than request start.
+            if (request.url.includes(slowUrl)) replay.now = new Date('2026-11-09T06:00:15Z');
+            return text;
+          },
         },
-      }),
-    );
-    expect(body.items.map((item) => item.quote?.tradeDate)).toEqual(['2026-11-09', '2026-11-09']);
+      });
+      const body = await get(target);
+      for (const item of body.items) {
+        if (available)
+          expect(item).toMatchObject({
+            quote: { price: '100.00' },
+            quoteSource: 'tencent',
+            quoteFallback: false,
+          });
+        else expect(item).toMatchObject({ quote: null, quoteSource: null, quoteFallback: true });
+      }
+    },
+  );
+  it('caches a slow quote from its return time rather than the request start', async () => {
+    replay.stamp = '20261109140010';
+    let tencentCalls = 0;
+    const target = app({
+      upstream: {
+        async fetchText(request) {
+          const text = await replay.fetchText(request);
+          if (request.url.includes('qt.gtimg.cn')) {
+            tencentCalls++;
+            replay.now = new Date('2026-11-09T06:00:15Z');
+          }
+          return text;
+        },
+      },
+    });
+    expect((await get(target)).items[0]!.quoteSource).toBe('tencent');
+    // Sampled at 06:00:15 with a ten-second TTL: still cached at 06:00:20, refreshed at 06:00:25.
+    replay.now = new Date('2026-11-09T06:00:20Z');
+    expect((await get(target)).items[0]!.quoteSource).toBe('tencent');
+    expect(tencentCalls).toBe(1);
+    replay.now = new Date('2026-11-09T06:00:25Z');
+    replay.stamp = '20261109140020';
+    await get(target);
+    expect(tencentCalls).toBe(2);
   });
+  it.each([
+    ['before', '2026-11-09T15:59:59Z', ['2026-11-09', '2026-11-09']],
+    ['after', '2026-11-10T02:00:00Z', [undefined, undefined]],
+  ])(
+    'judges one Tencent batch at one sample time when it returns %s Shanghai midnight',
+    async (_label, returnedAt, tradeDates) => {
+      replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
+      replay.stamp = '20261109150000';
+      replay.now = new Date('2026-11-09T15:59:58Z');
+      const body = await get(
+        app({
+          upstream: {
+            async fetchText(request) {
+              const text = await replay.fetchText(request);
+              if (request.url.includes('qt.gtimg.cn')) replay.now = new Date(returnedAt);
+              return text;
+            },
+          },
+        }),
+      );
+      expect(body.items.map((item) => item.quote?.tradeDate)).toEqual(tradeDates);
+    },
+  );
   it.each([
     ['maintenance HTML', '<html><h1>maintenance</h1>' + block() + '</html>'],
     ['invalid date', script(block('2026-99-99'))],
