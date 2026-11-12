@@ -190,7 +190,9 @@ $L down -v   # 用完删除容器和数据卷
 
 ## 持续部署
 
-`.github/workflows/cd.yml` 在 main 上的 CI 成功后自动部署，也可以在 Actions 页面选 CD → Run workflow 手动触发（只能选 main）。流程：
+`.github/workflows/cd.yml` 在 main 上的 CI 成功后自动部署，也可以在 Actions 页面选 CD → Run workflow 手动触发（只能选 main）。
+
+总开关是仓库变量 `CD_ENABLED`：不等于 `true` 时，CD 的 `gate` job 只写一条"CD 未开通"提示（notice 与运行摘要），`deploy` job 跳过，运行结果不是失败；手动触发也一样。开通后流程：
 
 1. 在 Actions runner 上按该提交构建镜像 `bafang-core:<提交前 12 位>`。
 2. `docker save | gzip | ssh … docker load` 把镜像传到 VPS。VPS 不访问 GitHub 或任何镜像仓库。
@@ -228,7 +230,7 @@ CD 只更新 core 镜像，不同步 `compose.prod.yaml`、`docker/caddy/Caddyfi
 
    SSH 端口不是 22 时，`ssh-keyscan` 输出的主机名形如 `[地址]:端口`，原样保留。
 
-4. **配置 Actions secrets**（仓库 Settings → Secrets and variables → Actions，或用 `gh`）：
+4. **配置 Actions secrets**（仓库 Settings → Secrets and variables → Actions 的 Secrets 页，或用 `gh`）。另有一个仓库变量 `CD_ENABLED` 作为开关，在第 5 步设置：
 
    | Secret                   | 必填 | 说明                                         |
    | ------------------------ | ---- | -------------------------------------------- |
@@ -246,9 +248,17 @@ CD 只更新 core 镜像，不同步 `compose.prod.yaml`、`docker/caddy/Caddyfi
    gh secret set DEPLOY_SSH_KNOWN_HOSTS < bafang-core-cd.known_hosts
    ```
 
-   配置完删除本地私钥文件。缺少任一必填 secret 时，CD 在第一步以"CD 未开通"失败，不构建、不连接 VPS；在开通之前，main 上每次 CI 成功后的 CD 运行都会这样失败。
+   配置完删除本地私钥文件。
 
-5. **首次运行。** Actions → CD → Run workflow，看 Deploy 步骤日志依次出现"当前版本""已备份数据库""健康检查通过"，再按"首次部署"第 7 步从公网验证。
+5. **打开开关。** secrets 配齐后设置仓库变量（Settings → Secrets and variables → Actions 的 Variables 页，不是 Secrets）：
+
+   ```bash
+   gh variable set CD_ENABLED --body true
+   ```
+
+   `CD_ENABLED=true` 但缺少任一必填 secret 时，CD 在 `deploy` 第一步以"CD 缺少 secrets"失败并列出缺少的名称，不构建、不连接 VPS。要暂停自动部署，把变量改成 `false` 或删除（`gh variable delete CD_ENABLED`）。
+
+6. **首次运行。** Actions → CD → Run workflow，看 Deploy 步骤日志依次出现"当前版本""已备份数据库""健康检查通过"，再按"首次部署"第 7 步从公网验证。
 
 ### 手动回滚
 

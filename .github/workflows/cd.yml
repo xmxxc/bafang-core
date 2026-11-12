@@ -1,6 +1,7 @@
 # CD：main 上的 CI 成功后把 core 部署到 VPS，也可以手动触发（#26）。
 # 镜像在 Actions 里构建，用 docker save | ssh docker load 传到 VPS，VPS 不访问 GitHub 或境外镜像仓库。
-# 切换、健康检查与回滚在 scripts/deploy/ 里；需要的 secrets 与开通步骤见 docs/deployment.md 的"持续部署"。
+# 仓库变量 CD_ENABLED=true 才部署，否则只给出"CD 未开通"提示、不算失败。
+# 切换、健康检查与回滚在 scripts/deploy/ 里；需要的变量、secrets 与开通步骤见 docs/deployment.md 的"持续部署"。
 name: CD
 
 on:
@@ -19,14 +20,42 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
-    name: deploy
-    # 只部署本仓库 main 上 push 触发且成功的 CI；手动触发时在下面的步骤里检查分支。
+  # 开关：仓库变量 CD_ENABLED 不等于 true 时只写提示、跳过 deploy，workflow 不算失败。
+  gate:
+    name: gate
+    # 只处理本仓库 main 上 push 触发且成功的 CI；手动触发时在 deploy 的第一步检查分支。
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check CD_ENABLED
+        id: check
+        env:
+          CD_ENABLED: ${{ vars.CD_ENABLED }}
+        run: |
+          if [ "$CD_ENABLED" = true ]; then
+            echo "enabled=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=false" >>"$GITHUB_OUTPUT"
+          message="CD 未开通：设置仓库变量 CD_ENABLED=true 并配置 secrets 后生效（见 docs/deployment.md 的「持续部署」）。本次未部署。"
+          echo "::notice title=CD 未开通::$message"
+          {
+            echo "### CD 未开通"
+            echo
+            echo "$message"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: deploy
+    needs: gate
+    if: needs.gate.outputs.enabled == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
@@ -53,11 +82,11 @@ jobs:
           [ "$HAS_KEY" = true ] || missing="$missing DEPLOY_SSH_KEY"
           [ "$HAS_KNOWN_HOSTS" = true ] || missing="$missing DEPLOY_SSH_KNOWN_HOSTS"
           if [ -n "$missing" ]; then
-            echo "::error title=CD 未开通::缺少 Actions secrets:$missing。未部署任何内容；开通步骤见 docs/deployment.md 的「持续部署」。"
+            echo "::error title=CD 缺少 secrets::CD_ENABLED=true，但缺少 Actions secrets:$missing。未部署任何内容；开通步骤见 docs/deployment.md 的「持续部署」。"
             {
-              echo "### CD 未开通"
+              echo "### CD 缺少 secrets"
               echo
-              echo "缺少 Actions secrets:$missing，未部署任何内容。开通步骤见 \`docs/deployment.md\` 的「持续部署」。"
+              echo "CD_ENABLED=true，但缺少 Actions secrets:$missing，未部署任何内容。开通步骤见 \`docs/deployment.md\` 的「持续部署」。"
             } >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
