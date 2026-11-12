@@ -287,7 +287,7 @@ it('upgrades deployed 0013 with legacy holidays to 0014 without guessing coverag
                 FCODE: '000001',
                 GSZ: '1.0100',
                 GSZZL: 1,
-                GZTIME: '2026-11-06 15:00',
+                GZTIME: '2026-11-06 10:00',
                 PDATE: '2026-11-05',
                 NAV: '1.0000',
               },
@@ -352,7 +352,7 @@ it('upgrades deployed 0013 with legacy holidays to 0014 without guessing coverag
         items: [
           {
             status: 'estimated',
-            estimate: { source: 'tiantian', time: '2026-11-06T07:00:00.000Z' },
+            estimate: { source: 'tiantian', time: '2026-11-06T02:00:00.000Z' },
           },
         ],
       },

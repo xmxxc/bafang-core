@@ -48,7 +48,9 @@ describe('今日收益与持仓汇总（HTTP）', () => {
         data: Record<string, unknown>[];
       };
       body.data = body.data.map((row) =>
-        row.FCODE === '110020' ? { ...row, PDATE: '2026-11-05', NAV: 1.703 } : row,
+        row.FCODE === '110020'
+          ? { ...row, PDATE: '2026-11-05', NAV: 1.703, GZTIME: '2026-11-06 10:00' }
+          : row,
       );
       return tiantianSamples(JSON.stringify(body))(url);
     }

@@ -66,8 +66,7 @@ export function createNavService(deps: NavServiceDeps): NavService {
   const historyPoll = new PollCache<NavPoint[]>(NAV_PUBLISH_POLL_MS);
 
   const service: NavService = {
-    async latest(code, asOf) {
-      const now = asOf ?? deps.clock.now();
+    async latest(code, now = deps.clock.now()) {
       const expectedDate = expectedPublishDate(now, deps.calendar);
       const cached = latestCache.get(expectedDate, code) ?? latestPoll.get(code, now.getTime());
       if (cached) return cached;
@@ -88,8 +87,7 @@ export function createNavService(deps: NavServiceDeps): NavService {
       return latest;
     },
 
-    async history(code, range, asOf) {
-      const now = asOf ?? deps.clock.now();
+    async history(code, range, now = deps.clock.now()) {
       const expectedDate = expectedPublishDate(now, deps.calendar);
       const startDate = addMonths(shanghaiDate(now), -RANGE_MONTHS[range]);
       const cacheKey = `${code}:${range}:${startDate}`;
@@ -113,7 +111,7 @@ export function createNavService(deps: NavServiceDeps): NavService {
       return points;
     },
 
-    async latestBefore(code, date, asOf) {
+    async latestBefore(code, date, asOf = deps.clock.now()) {
       const latest = await service.latest(code, asOf);
       if (!latest) return null;
       if (latest.navDate < date) return { date: latest.navDate, ...pick(latest) };

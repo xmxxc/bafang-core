@@ -18,6 +18,7 @@ import {
   quoteSamples,
   RecordedUpstream,
   sample,
+  sinaSamples,
   tiantianSamples,
   upstreamDown,
   type Replay,
@@ -28,16 +29,26 @@ const DB_PROBE_BUDGET_MS = 5_000;
 
 /**
  * 盘中样子的天天基金样本：录制样本取自当晚，110020 的基准已是当天净值；还原成 2026-11-05 的
- * 基准（与录制的东方财富净值一致），估值才会通过基准核对被采纳。
+ * 基准（与录制的东方财富净值一致），估值时间改为请求时刻 10:00（晚于取回时刻的估值不采纳），
+ * 估值才会通过核对被采纳。
  */
 function intradayTiantian(): Replay {
   const body = JSON.parse(sample('tiantian/valuation-000001-110020-040046-999999.json')) as {
     data: Record<string, unknown>[];
   };
   body.data = body.data.map((row) =>
-    row.FCODE === '110020' ? { ...row, PDATE: '2026-11-05', NAV: 1.703 } : row,
+    row.FCODE === '110020'
+      ? { ...row, PDATE: '2026-11-05', NAV: 1.703, GZTIME: '2026-11-06 10:00' }
+      : row,
   );
   return tiantianSamples(JSON.stringify(body));
+}
+
+/** 盘中样子的新浪样本：录制于 16:0x，估值时间改为 10:00，与 estimates 测试的做法一致。 */
+function intradaySina(): Replay {
+  return sinaSamples(
+    sample('sina/fu-000001-110020-040046-999999.txt').replace(/,16:0[23]:00,/g, ',10:00:00,'),
+  );
 }
 
 const NEVER = {
@@ -275,7 +286,7 @@ describe('GET /v1/health over in-process HTTP against a real PostgreSQL test dat
       expect(body.upstreams.tiantian.lastSuccessAt).toBe('2026-11-06T02:00:00.000Z');
 
       clock.set('2026-11-06T02:01:00.000Z');
-      upstream.use(estimateSamples({ tiantian: upstreamDown() }));
+      upstream.use(estimateSamples({ tiantian: upstreamDown(), sina: intradaySina() }));
       await call(app, '/v1/funds/estimates?codes=000001');
       body = await health(app);
       expect(body.upstreams.tiantian.lastSuccessAt).toBe('2026-11-06T02:00:00.000Z');

@@ -23,8 +23,8 @@ export const OverviewQuoteSchema = z
       description:
         '估值为来源给出的 ISO 时间；净值只提供日期 YYYY-MM-DD，不虚构发布时间；不可用为 null',
     }),
-    source: z.enum(['tiantian', 'sina', 'eastmoney']).nullable().openapi({
-      description: '行情来源：天天基金 / 新浪财经 / 东方财富净值；不可用为 null',
+    source: z.enum(['tiantian', 'sina', 'calculated', 'eastmoney']).nullable().openapi({
+      description: '行情来源：天天基金 / 新浪财经 / 自算估值 / 东方财富净值；不可用为 null',
     }),
     sourceName: z.string().nullable().openapi({ description: '来源展示名；不可用为 null' }),
     fallback: z.boolean().openapi({ description: '估值是否使用备用来源；净值与不可用时为 false' }),

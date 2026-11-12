@@ -1,0 +1,23 @@
+{
+  "url": "https://d.10jqka.com.cn/v6/realhead/hs_510310/last.js",
+  "time": "2026-11-10T10:32:53.459866+00:00",
+  "status": 200,
+  "headers": {
+    "Server": "openresty",
+    "Date": "Tue, 10 Nov 2026 10:32:53 GMT",
+    "Content-Type": "application/javascript",
+    "Transfer-Encoding": "chunked",
+    "Connection": "close",
+    "Vary": "Accept-Encoding",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Origin, X-Requested-With, Content-Type, Accept",
+    "Age": "60;",
+    "Last-Modified": "Tue, 10 Nov 2026 10:32:53 GMT",
+    "Cache-Control": "max-age=60",
+    "Expires": "Tue, 10 Nov 2026 10:33:53 GMT",
+    "ETag": "e8c9c184e424c593172f89f0757e7b10",
+    "host": "hwy-east-hqd-35-245"
+  },
+  "bytes": 1198,
+  "sha256": "2d1759926512688b182630228608271c382714aebcf5aaa0d456c616fa1531ff"
+}

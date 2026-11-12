@@ -71,6 +71,79 @@ export async function fetchThsQuote(
   return buildQuote(last.price, time.pre, `${year}-${month}-${day}`, at);
 }
 
+export interface ThsIntradayPoint {
+  time: Date;
+  changePercent: number;
+}
+
+/** 读取同花顺当日真实分时点；不插值、不前向填充。 */
+export async function fetchThsIntraday(
+  upstream: UpstreamFetcher,
+  symbol: string,
+): Promise<ThsIntradayPoint[]> {
+  const [text, snapshotText] = await Promise.all([
+    upstream.fetchText({ url: `${BASE_URL}/time/${symbol}/last.js`, referer: REFERER }),
+    upstream.fetchText({ url: `${BASE_URL}/realhead/${symbol}/last.js`, referer: REFERER }),
+  ]);
+  const time = parseJsonp(TimeSchema, text)[symbol];
+  const snapshot = parseJsonp(RealheadSchema, snapshotText).items;
+  if (!time?.date) throw new UpstreamError('bad_response', 'ths time response missing date');
+  if (time.data === null || time.data === undefined)
+    throw new UpstreamError('bad_response', 'ths time response missing data');
+  const match = /^(\d{4})(\d{2})(\d{2})$/.exec(time.date);
+  const pre = parseDecimal(time.pre);
+  if (!match) throw new UpstreamError('bad_response', 'ths time response has an invalid date');
+  if (pre === null || pre <= 0n)
+    throw new UpstreamError('bad_response', 'ths time response has an invalid previous close');
+  if (parseDecimal(snapshot['6']) !== pre)
+    throw new UpstreamError('bad_response', 'ths time and realhead previous close disagree');
+  const [, year, month, day] = match;
+  const date = `${year}-${month}-${day}`;
+  const check = new Date(`${date}T00:00:00Z`);
+  if (!Number.isFinite(check.getTime()) || check.toISOString().slice(0, 10) !== date)
+    throw new UpstreamError('bad_response', 'ths time response has an impossible date');
+  if (time.data === '') return [];
+  const points = new Map<number, ThsIntradayPoint>();
+  const rawPrices = new Map<number, bigint>();
+  for (const raw of time.data.split(';')) {
+    const [hhmm, price] = raw.split(',');
+    if (!hhmm || !/^\d{4}$/.test(hhmm) || !price)
+      throw new UpstreamError('bad_response', 'ths time response contains a malformed point');
+    const hour = Number(hhmm.slice(0, 2)),
+      minute = Number(hhmm.slice(2));
+    const label = hour * 60 + minute;
+    if (minute > 59 || hour > 23)
+      throw new UpstreamError('bad_response', 'ths time response contains an invalid clock label');
+    const rawPrice = parseDecimal(price);
+    if (rawPrice === null || rawPrice <= 0n)
+      throw new UpstreamError('bad_response', 'ths time response contains an invalid price');
+    // Validate attached rows too, then filter non-trading labels without erasing the day.
+    if (!((label >= 570 && label <= 690) || (label >= 780 && label <= 900))) continue;
+    const at = shanghaiTime(year!, month!, day!, hhmm.slice(0, 2), hhmm.slice(2)).getTime();
+    const previousPrice = rawPrices.get(at);
+    if (previousPrice !== undefined && previousPrice !== rawPrice)
+      throw new UpstreamError(
+        'bad_response',
+        'ths time response contains conflicting duplicate labels',
+      );
+    rawPrices.set(at, rawPrice);
+    const parsed = buildQuote(price, time.pre, date, new Date(at));
+    if (!parsed)
+      throw new UpstreamError('bad_response', 'ths time response contains an invalid price');
+    points.set(at, { time: parsed.time, changePercent: parsed.changePercent });
+  }
+  const sorted = [...points.values()].sort((a, b) => a.time.getTime() - b.time.getTime());
+  const last = lastMinute(time.data);
+  const price = last ? parseDecimal(last.price) : null;
+  const current = parseDecimal(snapshot['10']);
+  if (price === null || current === null || current <= 0n)
+    throw new UpstreamError('bad_response', 'ths time response cannot validate its latest price');
+  const drift = price > current ? price - current : current - price;
+  if (drift * PRICE_TOLERANCE_DIVISOR > pre)
+    throw new UpstreamError('bad_response', 'ths time and realhead prices disagree');
+  return sorted;
+}
+
 /** 分时数据是 `HHMM,价格,成交额,均价,成交量;…`，取最后一个点。 */
 function lastMinute(data: string | null | undefined): { hhmm: string; price: string } | null {
   const points = (data ?? '').split(';').filter((point) => point.trim() !== '');
