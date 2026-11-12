@@ -516,4 +516,68 @@ describe('calculated estimates and intraday over HTTP with real isolated Postgre
       expect((await current(app(), '110020')).status).toBe('unavailable');
     },
   );
+
+  describe('holding quotes observed after the fixed estimate instant', () => {
+    // Holdings judge each quote when it is observed; a calculated estimate additionally
+    // requires every participating quote to be no later than the batch request instant.
+    function slowTencent(observedAt: string, quoteTime?: string) {
+      const replay = control.replay;
+      control.replay = (url) => {
+        const result = replay(url);
+        if (url.hostname !== 'qt.gtimg.cn' || typeof result !== 'string') return result;
+        control.now = observedAt;
+        return quoteTime ? result.replaceAll('20261106100000', quoteTime) : result;
+      };
+    }
+
+    it('keeps quotes from before the request instant when the quote fetch returns late', async () => {
+      slowTencent(`${day}T02:00:40.000Z`);
+      const response = await app().request('/v1/funds/estimates?codes=000001');
+      const body = (await response.json()) as EstimateBatchResponse;
+      expect(body.time).toBe('2026-11-06T02:00:00.000Z');
+      expect(body.items[0]).toMatchObject({
+        status: 'estimated',
+        estimate: {
+          source: 'calculated',
+          time: '2026-11-06T02:00:00.000Z',
+          calculation: { quoteTimeEnd: '2026-11-06T02:00:00.000Z' },
+        },
+      });
+    });
+
+    it('rejects quotes stamped after the request instant even though holdings accept them', async () => {
+      slowTencent(`${day}T02:00:40.000Z`, '20261106100030');
+      expect(await current()).toEqual({ code: '000001', status: 'unavailable', estimate: null });
+
+      // The holdings endpoint starts at 10:00:40, so the same 10:00:30 snapshot is current there.
+      const holdings = await app().request('/v1/funds/000001/holdings');
+      expect(holdings.status).toBe(200);
+      const items = (
+        (await holdings.json()) as { items: { quote: { quoteTime: string } | null }[] }
+      ).items;
+      const quoted = items.filter((item) => item.quote !== null);
+      expect(quoted.length).toBeGreaterThan(0);
+      expect(quoted.every((item) => item.quote!.quoteTime === '2026-11-06T02:00:30.000Z')).toBe(
+        true,
+      );
+    });
+
+    it('rejects a slow fetch whose quotes became stale only after the request instant', async () => {
+      // 10:04:30 quotes are fresh at a 10:09:00 request, but the fetch returns at 10:09:40,
+      // more than five minutes after the quotes: holdings drop them, so no estimate is formed.
+      control.now = `${day}T02:09:00.000Z`;
+      const replay = control.replay;
+      control.replay = (url) => {
+        const result = replay(url);
+        return url.hostname === 'qt.gtimg.cn' && typeof result === 'string'
+          ? result.replaceAll('20261106100000', '20261106100430')
+          : result;
+      };
+      expect((await current()).status).toBe('estimated');
+
+      control.replay = replay;
+      slowTencent(`${day}T02:09:40.000Z`, '20261106100430');
+      expect((await current()).status).toBe('unavailable');
+    });
+  });
 });

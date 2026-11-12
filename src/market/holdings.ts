@@ -15,15 +15,36 @@ export interface TopHolding {
   quoteSource: 'tencent' | 'ths' | null;
   quoteFallback: boolean;
 }
+export type HoldingsSource = 'eastmoney' | 'sina';
 type Report = {
   reportDate: string;
+  /** Cached with the list: a Sina list holds only A shares and may not be the full top ten. */
+  source: HoldingsSource;
   items: Omit<TopHolding, 'quote' | 'quoteSource' | 'quoteFallback'>[];
 };
 export interface HoldingsService {
-  get(code: string, asOf?: Date): Promise<{ reportDate: string; items: TopHolding[] } | null>;
+  get(
+    code: string,
+    asOf?: Date,
+  ): Promise<{
+    reportDate: string;
+    holdingsSource: HoldingsSource;
+    holdingsFallback: boolean;
+    items: TopHolding[];
+  } | null>;
 }
 
 type ResolvedQuote = Pick<TopHolding, 'quote' | 'quoteSource' | 'quoteFallback'>;
+
+type QuoteEntry = {
+  value: ResolvedQuote;
+  /** When this request observed the result: drives freshness, cache eligibility and expiry. */
+  sampledAt: number;
+  expiresAt: number;
+  /** Request start and sequence: orders concurrent writes, independent of completion. */
+  requestedAt: number;
+  requestId: number;
+};
 
 const EM = 'https://fundf10.eastmoney.com/FundArchivesDatas.aspx';
 
@@ -34,10 +55,7 @@ export function createHoldingsService(deps: {
 }): HoldingsService {
   const cache = new DailyCache<Report>();
   let cachedReportDay: string | undefined;
-  const quotes = new Map<
-    string,
-    { value: ResolvedQuote; expiresAt: number; sampledAt: number; requestId: number }
-  >();
+  const quotes = new Map<string, QuoteEntry>();
   let lastRequestId = 0;
   return {
     async get(code, asOf = deps.clock.now()) {
@@ -86,32 +104,54 @@ export function createHoldingsService(deps: {
       const symbols = parsed.items
         .map((i) => symbolFor(i.code))
         .filter((x): x is string => x !== null);
-      // Capture eligible entries before any await: another request may advance the cache.
+      // Every quote is judged at the moment this request observes it (cache lookup, upstream
+      // return or failure), never at the request start: a slow report fetch or another slow
+      // stock must not turn current snapshots into "future" ones or keep expired ones alive.
+      const usable = (entry: QuoteEntry, at: Date) =>
+        entry.sampledAt <= at.getTime() &&
+        entry.expiresAt > at.getTime() &&
+        !(entry.value.quote && stale(entry.value.quote, at, deps.calendar));
+      const fetchPrimary = async (batch: string[]) => {
+        let result = new Map<string, Quote | null>();
+        if (batch.length > 0) {
+          try {
+            result = await fetchTencentQuotes(deps.upstream, batch);
+          } catch (error) {
+            if (!(error instanceof UpstreamError)) throw error;
+            console.warn('[bafang-core] tencent holdings quotes failed', error.kind, error.message);
+          }
+        }
+        // One sample time for the whole Tencent batch keeps its stocks on the same market date.
+        return { result, at: deps.clock.now() };
+      };
+      // Capture entries before any await so another request's later writes are never borrowed.
+      const lookupAt = deps.clock.now();
       const hits = new Map(
         symbols.flatMap((symbol) => {
           const entry = quotes.get(symbol);
-          return entry && entry.sampledAt <= asOf.getTime() && entry.expiresAt > asOf.getTime()
-            ? [[symbol, entry.value] as const]
-            : [];
+          return entry && usable(entry, lookupAt) ? [[symbol, entry] as const] : [];
         }),
       );
-      const pending = symbols.filter((symbol) => !hits.has(symbol));
-      let primary = new Map<string, Quote | null>();
-      if (pending.length > 0) {
-        try {
-          primary = await fetchTencentQuotes(deps.upstream, pending);
-        } catch (error) {
-          if (!(error instanceof UpstreamError)) throw error;
-          console.warn('[bafang-core] tencent holdings quotes failed', error.kind, error.message);
-        }
+      const primary = new Map<string, { quote: Quote | null; at: Date }>();
+      let batch = symbols.filter((symbol) => !hits.has(symbol));
+      for (;;) {
+        const { result, at } = await fetchPrimary(batch);
+        for (const symbol of batch) primary.set(symbol, { quote: result.get(symbol) ?? null, at });
+        // Captured hits are rechecked after the wait; expired ones are fetched again. The
+        // set of hits only shrinks, so this ends after at most one extra batch per hit.
+        batch = [...hits].filter(([, entry]) => !usable(entry, at)).map(([symbol]) => symbol);
+        if (batch.length === 0) break;
+        for (const symbol of batch) hits.delete(symbol);
       }
       const items = await Promise.all(
         parsed.items.map(async (item) => {
           const symbol = symbolFor(item.code);
           const hit = symbol ? hits.get(symbol) : undefined;
-          if (hit) return { ...item, ...hit };
-          let quote = symbol ? (primary.get(symbol) ?? null) : null;
-          if (quote && stale(quote, asOf, deps.calendar)) quote = null;
+          if (hit) return { ...item, ...hit.value };
+          const observed = symbol ? primary.get(symbol) : undefined;
+          let quote = observed?.quote ?? null;
+          let sampledAt = observed?.at ?? lookupAt;
+          if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
           let source: 'tencent' | 'ths' | null = quote ? 'tencent' : null;
           const fallback = !quote && symbol !== null;
           if (fallback) {
@@ -120,8 +160,6 @@ export function createHoldingsService(deps: {
                 deps.upstream,
                 symbol!.startsWith('sh') ? `hs_${item.code}` : `sz_${item.code}`,
               );
-              if (quote && stale(quote, asOf, deps.calendar)) quote = null;
-              source = quote ? 'ths' : null;
             } catch (error) {
               if (!(error instanceof UpstreamError)) throw error;
               console.warn(
@@ -131,6 +169,11 @@ export function createHoldingsService(deps: {
                 error.message,
               );
             }
+            // A success or failure is observed when the backup call ends; this also starts
+            // the short TTL of an unavailable result.
+            sampledAt = deps.clock.now();
+            if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
+            source = quote ? 'ths' : null;
           }
           const value = { quote, quoteSource: source, quoteFallback: fallback };
           if (symbol) {
@@ -142,20 +185,33 @@ export function createHoldingsService(deps: {
               quote && previousQuote && quote.time.getTime() !== previousQuote.time.getTime()
                 ? quote.time.getTime() > previousQuote.time.getTime()
                 : !existing ||
-                  asOf.getTime() > existing.sampledAt ||
-                  (asOf.getTime() === existing.sampledAt && requestId > existing.requestId);
+                  asOf.getTime() > existing.requestedAt ||
+                  (asOf.getTime() === existing.requestedAt && requestId > existing.requestId);
             if (newer)
               quotes.set(symbol, {
                 value,
-                expiresAt: quoteExpiry(asOf, deps.calendar, quote),
-                sampledAt: asOf.getTime(),
+                expiresAt: quoteExpiry(sampledAt, deps.calendar, quote),
+                sampledAt: sampledAt.getTime(),
+                requestedAt: asOf.getTime(),
                 requestId,
               });
           }
           return { ...item, ...value };
         }),
       );
-      return { reportDate: parsed.reportDate, items };
+      // A slow backup for one stock can end after a session boundary that another stock's
+      // already observed quote no longer satisfies; such quotes are reported as unavailable.
+      const doneAt = deps.clock.now();
+      return {
+        reportDate: parsed.reportDate,
+        holdingsSource: parsed.source,
+        holdingsFallback: parsed.source === 'sina',
+        items: items.map((item) =>
+          item.quote && stale(item.quote, doneAt, deps.calendar)
+            ? { ...item, quote: null, quoteSource: null }
+            : item,
+        ),
+      };
     },
   };
 }
@@ -195,10 +251,10 @@ function holding(
   if (!Number.isFinite(weight) || weight > 100) bad('holding weight out of range');
   return { code, name, weight, reportDate };
 }
-function report(reportDate: string, items: Report['items']): Report {
+function report(source: HoldingsSource, reportDate: string, items: Report['items']): Report {
   if (!items.length || new Set(items.map((item) => item.code)).size !== items.length)
     bad('holdings rows empty or duplicated');
-  return { reportDate, items: items.slice(0, 10) };
+  return { reportDate, source, items: items.slice(0, 10) };
 }
 function parseEastmoney(text: string, asOfDay: string): Report | null {
   // Decode the string without executing upstream JavaScript. Arbitrary HTML is not this protocol.
@@ -233,7 +289,7 @@ function parseEastmoney(text: string, asOfDay: string): Report | null {
     // The F10 stock table has rank, code, name, quote, change, links, allocation.
     items.push(holding(cells[1] ?? '', cells[2] ?? '', cells[6] ?? '', latest.date));
   }
-  return report(latest.date, items);
+  return report('eastmoney', latest.date, items);
 }
 function parseSina(text: string, asOfDay: string): Report {
   const section = /<div\b[^>]*\bid=["']sdzc_blk["'][^>]*>([\s\S]*?<\/table>)/i.exec(text)?.[1];
@@ -259,9 +315,10 @@ function parseSina(text: string, asOfDay: string): Report {
     items.push(holding(symbol.replace(/^(?:sh|sz|hk)/, ''), cells[0] ?? '', cells[3] ?? '', date));
   }
   if (items.length !== symbols.length || items.length > 10) bad('sina holdings incomplete table');
-  return report(date, items);
+  return report('sina', date, items);
 }
 
+/** Judges a quote against the clock reading taken when it was returned (`asOf`). */
 export function stale(quote: Quote, asOf: Date, calendar: TradingCalendar): boolean {
   const day = shanghaiDate(asOf);
   const minute = shanghaiMinutesOfDay(asOf);

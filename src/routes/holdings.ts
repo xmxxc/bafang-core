@@ -40,11 +40,25 @@ export const fundHoldingsRoute = createRoute({
       content: { 'application/json': { schema: ErrorResponseSchema } },
     },
     200: {
-      description: '最新季报前十大重仓股',
+      description:
+        '最新季报前十大重仓股。东方财富为主；回退新浪时 holdingsFallback 为 true，名单只含 A 股持仓，不保证是完整前十大',
       content: {
         'application/json': {
           schema: z
-            .object({ reportDate: z.string(), items: z.array(Holding) })
+            .object({
+              reportDate: z.string(),
+              holdingsSource: z
+                .enum(['eastmoney', 'sina'])
+                .describe(
+                  '重仓名单来源：eastmoney 为东方财富 F10（主）；sina 为新浪基金页面（东方财富失败时的备用）',
+                ),
+              holdingsFallback: z
+                .boolean()
+                .describe(
+                  '为 true 表示名单来自新浪回退：新浪官方表只列 A 股持仓，港股等境外持仓会缺失，不保证是完整的前十大重仓；新浪页面没有重仓区块时返回 502',
+                ),
+              items: z.array(Holding),
+            })
             .openapi('FundHoldings'),
         },
       },

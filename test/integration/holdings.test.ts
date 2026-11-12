@@ -74,6 +74,8 @@ class Replay implements UpstreamFetcher {
 const endpoint = '/v1/funds/000001/holdings';
 interface Body {
   reportDate: string;
+  holdingsSource: 'eastmoney' | 'sina';
+  holdingsFallback: boolean;
   items: Array<{
     code: string;
     name: string;
@@ -121,6 +123,7 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
     replay.sinaDown = false;
     const body = await get();
     expect(body.reportDate).toBe('2026-09-30');
+    expect(body).toMatchObject({ holdingsSource: 'sina', holdingsFallback: true });
     expect(body.items.map(({ code }) => code)).toEqual([
       '300308',
       '688361',
@@ -177,6 +180,7 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       replay.em = fixture(`eastmoney/holdings-${code}.txt`);
       const body = await get(app(), `/v1/funds/${code}/holdings`);
       expect(body.reportDate).toBe('2026-09-30');
+      expect(body).toMatchObject({ holdingsSource: 'eastmoney', holdingsFallback: false });
       expect(body.items.map((item) => item.code)).toEqual(codes);
       expect(body.items.every((item) => item.reportDate === '2026-09-30')).toBe(true);
       expect(
@@ -190,6 +194,51 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       });
     },
   );
+  it('labels the real 005827 Sina fallback that lists only its A-share holdings', async () => {
+    replay.emDown = true;
+    replay.sinaDown = false;
+    replay.sina = fixture('sina/holdings-005827-page.txt');
+    const body = await get(app(), '/v1/funds/005827/holdings');
+    expect(body).toMatchObject({
+      reportDate: '2026-09-30',
+      holdingsSource: 'sina',
+      holdingsFallback: true,
+    });
+    expect(body.items.map((item) => [item.code, item.weight])).toEqual([
+      ['600519', 6.37],
+      ['000568', 4.58],
+      ['600809', 2.89],
+      ['000858', 2.79],
+      ['600674', 2.55],
+      ['300502', 2.33],
+    ]);
+  });
+  it('returns 502 when the real 110011 Sina page has no holdings section', async () => {
+    replay.emDown = true;
+    replay.sinaDown = false;
+    replay.sina = fixture('sina/holdings-110011-page.txt');
+    const response = await app().request('/v1/funds/110011/holdings');
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: { code: 'upstream_unavailable', message: '行情上游暂不可用' },
+    });
+  });
+  it('keeps the Sina label on the cached daily list until the next Shanghai day', async () => {
+    replay.emDown = true;
+    replay.sinaDown = false;
+    const target = app();
+    expect(await get(target)).toMatchObject({ holdingsSource: 'sina', holdingsFallback: true });
+    replay.emDown = false;
+    replay.now = new Date('2026-11-09T06:00:10Z');
+    const cached = await get(target);
+    expect(cached).toMatchObject({ holdingsSource: 'sina', holdingsFallback: true });
+    expect(cached.items).toHaveLength(10);
+    replay.now = new Date('2026-11-10T06:00:00Z');
+    replay.stamp = '20261110140000';
+    const next = await get(target);
+    expect(next).toMatchObject({ holdingsSource: 'eastmoney', holdingsFallback: false });
+    expect(next.items.map((item) => item.code)).toEqual(['600519']);
+  });
   it('ignores future EM quarters and selects the latest report no later than asOf', async () => {
     replay.em = script(
       block('2026-09-30', row('600519', '旧季股票')) +
@@ -713,19 +762,224 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       ).items[0]!.quote,
     ).toMatchObject({ tradeDate: '2026-11-06' });
   });
-  it('keeps one asOf for every stock when upstream work crosses Shanghai midnight', async () => {
-    replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
-    replay.stamp = '20261109150000';
-    let samples = 0;
-    const body = await get(
-      app({
-        clock: {
-          now: () => new Date(++samples <= 2 ? '2026-11-09T15:59:59Z' : '2026-11-10T02:00:00Z'),
+  it.each([
+    ['a slow report fetch', 'FundArchivesDatas', '20261109140010', true],
+    ['a slow quote fetch', 'qt.gtimg.cn', '20261109140012', true],
+    [
+      'a slow quote fetch with a snapshot after the return time',
+      'qt.gtimg.cn',
+      '20261109140016',
+      false,
+    ],
+  ])(
+    'judges quote freshness at the return time after %s',
+    async (_label, slowUrl, stamp, available) => {
+      replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
+      replay.stamp = stamp;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            const text = await replay.fetchText(request);
+            // The upstream call takes 15 seconds; Tencent snapshots are newer than request start.
+            if (request.url.includes(slowUrl)) replay.now = new Date('2026-11-09T06:00:15Z');
+            return text;
+          },
         },
-      }),
-    );
-    expect(body.items.map((item) => item.quote?.tradeDate)).toEqual(['2026-11-09', '2026-11-09']);
+      });
+      const body = await get(target);
+      for (const item of body.items) {
+        if (available)
+          expect(item).toMatchObject({
+            quote: { price: '100.00' },
+            quoteSource: 'tencent',
+            quoteFallback: false,
+          });
+        else expect(item).toMatchObject({ quote: null, quoteSource: null, quoteFallback: true });
+      }
+    },
+  );
+  it('rechecks a cached quote after waiting for other stocks crosses the close', async () => {
+    replay.em = script(block('2026-09-30', row()));
+    replay.now = new Date('2026-11-09T06:59:59Z');
+    replay.stamp = '20261109145959';
+    const target = app({
+      upstream: {
+        async fetchText(request) {
+          if (request.url.includes('FundArchivesDatas') && request.url.includes('code=000002'))
+            return script(block('2026-09-30', row() + row('300308', '中际旭创')));
+          if (request.url.includes('q=sz300308')) {
+            // The uncached stock is slow and returns after the 15:00 close.
+            replay.now = new Date('2026-11-09T07:00:05Z');
+            return qt('sz300308', '101.00', '20261109150005');
+          }
+          if (request.url.includes('qt.gtimg.cn') && replay.now >= new Date('2026-11-09T07:00:00Z'))
+            return qt('sh600519', '102.00', '20261109150005');
+          return replay.fetchText(request);
+        },
+      },
+    });
+    expect((await get(target)).items[0]!.quote).toMatchObject({
+      price: '100.00',
+      quoteTime: '2026-11-09T06:59:59.000Z',
+    });
+    replay.now = new Date('2026-11-09T06:59:59.500Z');
+    const mixed = await get(target, '/v1/funds/000002/holdings');
+    expect(
+      mixed.items.map((item) => [item.code, item.quote?.price, item.quote?.quoteTime]),
+    ).toEqual([
+      ['600519', '102.00', '2026-11-09T07:00:05.000Z'],
+      ['300308', '101.00', '2026-11-09T07:00:05.000Z'],
+    ]);
   });
+  it('does not return an intraday quote once a slow backup for another stock ends after the close', async () => {
+    replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
+    replay.now = new Date('2026-11-09T06:59:59Z');
+    const target = app({
+      upstream: {
+        async fetchText(request) {
+          if (request.url.includes('qt.gtimg.cn'))
+            return qt('sh600519', '100.00', '20261109145959') + '\nv_sz300308="";';
+          if (request.url.includes('10jqka')) replay.now = new Date('2026-11-09T07:00:05Z');
+          return replay.fetchText(request);
+        },
+      },
+    });
+    const body = await get(target);
+    expect(body.items.map((item) => [item.code, item.quote])).toEqual([
+      ['600519', null],
+      ['300308', null],
+    ]);
+  });
+  it.each([
+    ['slow', '2026-11-09T06:00:15Z'],
+    ['fast', '2026-11-09T06:00:05Z'],
+  ])(
+    'caches an unavailable result for ten seconds after a %s THS failure ends',
+    async (speed, secondAt) => {
+      replay.em = script(block('2026-09-30', row()));
+      replay.missingQuote = true;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            if (speed === 'slow' && request.url.includes('10jqka'))
+              replay.now = new Date('2026-11-09T06:00:15Z');
+            return replay.fetchText(request);
+          },
+        },
+      });
+      expect((await get(target)).items[0]).toMatchObject({ quote: null, quoteFallback: true });
+      replay.missingQuote = false;
+      replay.price = '101.00';
+      replay.stamp = '20261109140015';
+      replay.now = new Date(secondAt);
+      expect((await get(target)).items[0]).toMatchObject({ quote: null, quoteFallback: true });
+      replay.now = new Date('2026-11-09T06:00:25Z');
+      expect((await get(target)).items[0]).toMatchObject({
+        quoteSource: 'tencent',
+        quote: { price: '101.00', quoteTime: '2026-11-09T06:00:15.000Z' },
+      });
+    },
+  );
+  it('caches a slow quote from its return time rather than the request start', async () => {
+    replay.stamp = '20261109140010';
+    let slow = true;
+    const target = app({
+      upstream: {
+        async fetchText(request) {
+          const text = await replay.fetchText(request);
+          if (slow && request.url.includes('qt.gtimg.cn')) {
+            slow = false;
+            replay.now = new Date('2026-11-09T06:00:15Z');
+          }
+          return text;
+        },
+      },
+    });
+    expect((await get(target)).items[0]!.quote).toMatchObject({
+      price: '100.00',
+      quoteTime: '2026-11-09T06:00:10.000Z',
+    });
+    // Upstream moves on, but the quote returned at 06:00:15 keeps a ten-second TTL.
+    replay.price = '102.00';
+    replay.stamp = '20261109140018';
+    replay.now = new Date('2026-11-09T06:00:20Z');
+    expect((await get(target)).items[0]).toMatchObject({
+      quoteSource: 'tencent',
+      quote: { price: '100.00', quoteTime: '2026-11-09T06:00:10.000Z' },
+    });
+    replay.now = new Date('2026-11-09T06:00:25Z');
+    expect((await get(target)).items[0]).toMatchObject({
+      quoteSource: 'tencent',
+      quote: { price: '102.00', quoteTime: '2026-11-09T06:00:18.000Z' },
+    });
+  });
+  it.each([
+    ['a later return', '2026-11-09T06:00:05Z'],
+    ['the same return time', '2026-11-09T06:00:01Z'],
+  ])(
+    'keeps the later-started equal snapshot when the earlier request completes at %s',
+    async (_label, lateReturn) => {
+      const aStarted = gate(),
+        aRelease = gate();
+      let first = true;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            if (request.url.includes('qt.gtimg.cn')) {
+              if (first) {
+                first = false;
+                aStarted.open();
+                await aRelease.promise;
+                return qt('sh600519', '100.00', '20261109140000');
+              }
+              return qt('sh600519', '101.00', '20261109140000');
+            }
+            return replay.fetchText(request);
+          },
+        },
+      });
+      const a = get(target);
+      await aStarted.promise;
+      replay.now = new Date('2026-11-09T06:00:01Z');
+      let aBody: Body;
+      try {
+        expect((await get(target)).items[0]!.quote).toMatchObject({ price: '101.00' });
+        replay.now = new Date(lateReturn);
+      } finally {
+        aRelease.open();
+        aBody = await a;
+      }
+      expect(aBody.items[0]!.quote).toMatchObject({ price: '100.00' });
+      // B (started later) is still valid until 06:00:11 and must not be rolled back by A.
+      expect((await get(target)).items[0]!.quote).toMatchObject({
+        price: '101.00',
+        quoteTime: '2026-11-09T06:00:00.000Z',
+      });
+    },
+  );
+  it.each([
+    ['before', '2026-11-09T15:59:59Z', ['2026-11-09', '2026-11-09']],
+    ['after', '2026-11-10T02:00:00Z', [undefined, undefined]],
+  ])(
+    'judges one Tencent batch at one sample time when it returns %s Shanghai midnight',
+    async (_label, returnedAt, tradeDates) => {
+      replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
+      replay.stamp = '20261109150000';
+      replay.now = new Date('2026-11-09T15:59:58Z');
+      const body = await get(
+        app({
+          upstream: {
+            async fetchText(request) {
+              const text = await replay.fetchText(request);
+              if (request.url.includes('qt.gtimg.cn')) replay.now = new Date(returnedAt);
+              return text;
+            },
+          },
+        }),
+      );
+      expect(body.items.map((item) => item.quote?.tradeDate)).toEqual(tradeDates);
+    },
+  );
   it.each([
     ['maintenance HTML', '<html><h1>maintenance</h1>' + block() + '</html>'],
     ['invalid date', script(block('2026-99-99'))],

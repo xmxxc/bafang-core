@@ -43,7 +43,7 @@ export interface MarketIndex {
 }
 
 export interface IndexService {
-  list(): Promise<MarketIndex[]>;
+  list(asOf?: Date): Promise<MarketIndex[]>;
 }
 
 export interface IndexServiceDeps {
@@ -119,8 +119,8 @@ export function createIndexService(deps: IndexServiceDeps): IndexService {
   const cache = new Map<string, { resolved: ResolvedQuote; expiresAt: number }>();
 
   return {
-    async list() {
-      const now = deps.clock.now();
+    async list(asOf) {
+      const now = asOf ?? deps.clock.now();
       const nowMs = now.getTime();
       const stale = INDICES.filter((index) => {
         const entry = cache.get(index.code);
