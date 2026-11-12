@@ -51,6 +51,28 @@ function tiantianWith(code: string, patch: Record<string, unknown>): Replay {
 }
 
 function tiantianFrom(code: string, patch: Record<string, unknown>, intraday: boolean): Replay {
+  return tiantianSamples(tiantianBody(code, patch, intraday));
+}
+
+/**
+ * 天天基金响应原文，指定字段写成手写的 JSON 数字 token（例如 `"GSZ":1.00004999999999999999`）。
+ * 原文直接回放，不经过 JSON.parse / JSON.stringify，否则 token 会先变成 binary64。
+ */
+function tiantianRawTokens(code: string, tokens: Record<string, string>): Replay {
+  const placeholders = Object.fromEntries(Object.keys(tokens).map((key) => [key, `@@${key}`]));
+  let text = tiantianBody(code, placeholders, true);
+  for (const [key, token] of Object.entries(tokens)) {
+    text = text.replace(`"${key}":"@@${key}"`, `"${key}":${token}`);
+  }
+  return (url) => {
+    if (url.hostname !== 'fundcomapi.tiantianfunds.com') {
+      throw new Error(`no recorded sample for ${url.href}`);
+    }
+    return text;
+  };
+}
+
+function tiantianBody(code: string, patch: Record<string, unknown>, intraday: boolean): string {
   const body = JSON.parse(sample('tiantian/valuation-000001-110020-040046-999999.json')) as {
     data: Record<string, unknown>[];
   };
@@ -71,7 +93,7 @@ function tiantianFrom(code: string, patch: Record<string, unknown>, intraday: bo
           : row;
     return row.FCODE === code ? { ...base, ...patch } : base;
   });
-  return tiantianSamples(JSON.stringify(body));
+  return JSON.stringify(body);
 }
 
 /**
@@ -391,6 +413,42 @@ describe('GET /v1/funds/estimates over in-process HTTP against a real PostgreSQL
       ['a value with more than 4 decimals', '1.702950000000000000001'], // toFixed: 1.7029
     ])('rounds %s of the Tiantian base NAV before checking it', async (_name, NAV) => {
       upstream.use(samples({ tiantian: tiantianWith('110020', { NAV }) }));
+      expect((await get(app(), '110020')).items).toEqual([
+        { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
+      ]);
+    });
+
+    // 天天基金的 GSZ / NAV 在上游是 JSON 数字：舍入用响应里的原始 token，而不是 JSON.parse 后的
+    // binary64（括号里是 String(number) 再舍入会给出的错值）。
+    it.each<[string, string, string]>([
+      ['just below half', '1.00004999999999999999', '1.0000'], // binary64: 1.00005 → 1.0001
+      ['a positive half value', '10.00005', '10.0001'],
+      ['more than 4 decimals', '1.678450000000000000001', '1.6785'],
+      ['an exponent', '16784.4999999999999999e-4', '1.6784'], // binary64: 1.67845 → 1.6785
+    ])('rounds the raw Tiantian estimate token %s', async (_name, token, value) => {
+      upstream.use(samples({ tiantian: tiantianRawTokens('110020', { GSZ: token }) }));
+      expect((await get(app(), '110020')).items).toEqual([
+        { code: '110020', status: 'estimated', estimate: { ...TIANTIAN_110020, value } },
+      ]);
+    });
+
+    it('rejects a raw Tiantian base NAV token just below half of the recorded base', async () => {
+      // 1.70294999999999999999 舍入为 1.7029，与历史基准 1.7030 不符，回退到新浪；
+      // binary64 会把它恢复成 1.70295、舍入为 1.7030，错误通过基准核对。
+      upstream.use(
+        samples({ tiantian: tiantianRawTokens('110020', { NAV: '1.70294999999999999999' }) }),
+      );
+      expect((await get(app(), '110020')).items).toEqual([
+        { code: '110020', status: 'estimated', estimate: SINA_110020 },
+      ]);
+    });
+
+    it('accepts a raw Tiantian base NAV token that rounds to the recorded base', async () => {
+      upstream.use(
+        samples({
+          tiantian: tiantianRawTokens('110020', { NAV: '1.702950000000000000001', GSZ: '1.6785' }),
+        }),
+      );
       expect((await get(app(), '110020')).items).toEqual([
         { code: '110020', status: 'estimated', estimate: TIANTIAN_110020 },
       ]);
