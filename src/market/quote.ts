@@ -1,3 +1,5 @@
+import { divRound, formatFixed, parseFixed, rescale } from '../fixed-point';
+
 /**
  * 股票与指数行情的统一报价：腾讯、同花顺等适配器都解析成这个形状，再由各业务（大盘指数，
  * 以后的个股行情）决定回退与可信度校验。点位、涨跌额用十进制字符串表示，计算不经过二进制浮点。
@@ -17,35 +19,17 @@ export interface Quote {
   time: Date;
 }
 
-/** 内部定点表示：放大 10^4 的整数。 */
-const SCALE = 10_000n;
-const DECIMAL = /^-?\d+(\.\d{1,4})?$/;
+/** 内部定点精度：4 位小数。 */
+const SCALE = 4;
 
-/** 解析上游给出的十进制字符串；不是合法的、最多 4 位小数的数时返回 null。 */
+/** 解析上游给出的十进制字符串（放大 10^4 的整数）；不是合法的、最多 4 位小数的数时返回 null。 */
 export function parseDecimal(text: string | undefined | null): bigint | null {
-  const value = text?.trim();
-  if (!value || !DECIMAL.test(value)) return null;
-  const negative = value.startsWith('-');
-  const [whole = '0', fraction = ''] = value.replace('-', '').split('.');
-  const scaled = BigInt(whole) * SCALE + BigInt(fraction.padEnd(4, '0'));
-  return negative ? -scaled : scaled;
-}
-
-/** 整数除法，按「四舍五入、远离零」舍入。 */
-function divRound(numerator: bigint, denominator: bigint): bigint {
-  const negative = numerator < 0n !== denominator < 0n;
-  const n = numerator < 0n ? -numerator : numerator;
-  const d = denominator < 0n ? -denominator : denominator;
-  const quotient = (n * 2n + d) / (d * 2n);
-  return negative ? -quotient : quotient;
+  return parseFixed(text ?? '', SCALE)?.value ?? null;
 }
 
 /** 把放大 10^4 的整数格式化为保留 2 位小数的字符串（四舍五入）。 */
 function format2(scaled: bigint): string {
-  const cents = divRound(scaled, 100n);
-  const sign = cents < 0n ? '-' : '';
-  const abs = cents < 0n ? -cents : cents;
-  return `${sign}${abs / 100n}.${(abs % 100n).toString().padStart(2, '0')}`;
+  return formatFixed(rescale({ value: scaled, scale: SCALE }, 2));
 }
 
 /**

@@ -285,6 +285,33 @@ describe('GET /v1/market/indices over in-process HTTP against a real PostgreSQL 
       }
     });
 
+    // 点位、涨跌额与涨跌幅都按全精度计算后四舍五入、远离零地舍入到 2 位小数。
+    it.each([
+      ['a positive half', '100.005', { point: '100.01', change: '0.01', changePercent: 0.01 }],
+      ['a negative half', '99.995', { point: '100.00', change: '-0.01', changePercent: -0.01 }],
+      [
+        'just below a positive half',
+        '100.004',
+        { point: '100.00', change: '0.00', changePercent: 0 },
+      ],
+      [
+        'just below a negative half',
+        '99.996',
+        { point: '100.00', change: '0.00', changePercent: 0 },
+      ],
+      ['zero change', '100.0000', { point: '100.00', change: '0.00', changePercent: 0 }],
+      ['a positive change', '101.2345', { point: '101.23', change: '1.23', changePercent: 1.23 }],
+      ['a negative change', '98.7655', { point: '98.77', change: '-1.23', changePercent: -1.23 }],
+    ])('rounds a Tencent quote with %s away from zero', async (_name, price, expected) => {
+      upstream.use(tencentWith('sh000001', tencentLine(price, '100.00', '20261106150002')));
+      expect(byCode(await indices(), '000001.SH')).toMatchObject({
+        prevClose: '100.00',
+        ...expected,
+        source: 'tencent',
+        fallback: false,
+      });
+    });
+
     it.each([
       ['a placeholder price', tencentLine('--', '3689.91', '20261106161401')],
       ['a zero price', tencentLine('0.00', '3689.91', '20261106161401')],
