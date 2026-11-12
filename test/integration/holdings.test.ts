@@ -798,6 +798,88 @@ describe('fund top holdings over HTTP with an isolated PostgreSQL schema per cas
       }
     },
   );
+  it('rechecks a cached quote after waiting for other stocks crosses the close', async () => {
+    replay.em = script(block('2026-09-30', row()));
+    replay.now = new Date('2026-11-09T06:59:59Z');
+    replay.stamp = '20261109145959';
+    const target = app({
+      upstream: {
+        async fetchText(request) {
+          if (request.url.includes('FundArchivesDatas') && request.url.includes('code=000002'))
+            return script(block('2026-09-30', row() + row('300308', '中际旭创')));
+          if (request.url.includes('q=sz300308')) {
+            // The uncached stock is slow and returns after the 15:00 close.
+            replay.now = new Date('2026-11-09T07:00:05Z');
+            return qt('sz300308', '101.00', '20261109150005');
+          }
+          if (request.url.includes('qt.gtimg.cn') && replay.now >= new Date('2026-11-09T07:00:00Z'))
+            return qt('sh600519', '102.00', '20261109150005');
+          return replay.fetchText(request);
+        },
+      },
+    });
+    expect((await get(target)).items[0]!.quote).toMatchObject({
+      price: '100.00',
+      quoteTime: '2026-11-09T06:59:59.000Z',
+    });
+    replay.now = new Date('2026-11-09T06:59:59.500Z');
+    const mixed = await get(target, '/v1/funds/000002/holdings');
+    expect(
+      mixed.items.map((item) => [item.code, item.quote?.price, item.quote?.quoteTime]),
+    ).toEqual([
+      ['600519', '102.00', '2026-11-09T07:00:05.000Z'],
+      ['300308', '101.00', '2026-11-09T07:00:05.000Z'],
+    ]);
+  });
+  it('does not return an intraday quote once a slow backup for another stock ends after the close', async () => {
+    replay.em = script(block('2026-09-30', row() + row('300308', '中际旭创')));
+    replay.now = new Date('2026-11-09T06:59:59Z');
+    const target = app({
+      upstream: {
+        async fetchText(request) {
+          if (request.url.includes('qt.gtimg.cn'))
+            return qt('sh600519', '100.00', '20261109145959') + '\nv_sz300308="";';
+          if (request.url.includes('10jqka')) replay.now = new Date('2026-11-09T07:00:05Z');
+          return replay.fetchText(request);
+        },
+      },
+    });
+    const body = await get(target);
+    expect(body.items.map((item) => [item.code, item.quote])).toEqual([
+      ['600519', null],
+      ['300308', null],
+    ]);
+  });
+  it.each([
+    ['slow', '2026-11-09T06:00:15Z'],
+    ['fast', '2026-11-09T06:00:05Z'],
+  ])(
+    'caches an unavailable result for ten seconds after a %s THS failure ends',
+    async (speed, secondAt) => {
+      replay.em = script(block('2026-09-30', row()));
+      replay.missingQuote = true;
+      const target = app({
+        upstream: {
+          async fetchText(request) {
+            if (speed === 'slow' && request.url.includes('10jqka'))
+              replay.now = new Date('2026-11-09T06:00:15Z');
+            return replay.fetchText(request);
+          },
+        },
+      });
+      expect((await get(target)).items[0]).toMatchObject({ quote: null, quoteFallback: true });
+      replay.missingQuote = false;
+      replay.price = '101.00';
+      replay.stamp = '20261109140015';
+      replay.now = new Date(secondAt);
+      expect((await get(target)).items[0]).toMatchObject({ quote: null, quoteFallback: true });
+      replay.now = new Date('2026-11-09T06:00:25Z');
+      expect((await get(target)).items[0]).toMatchObject({
+        quoteSource: 'tencent',
+        quote: { price: '101.00', quoteTime: '2026-11-09T06:00:15.000Z' },
+      });
+    },
+  );
   it('caches a slow quote from its return time rather than the request start', async () => {
     replay.stamp = '20261109140010';
     let slow = true;
