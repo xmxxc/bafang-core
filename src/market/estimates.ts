@@ -1,4 +1,4 @@
-import { shanghaiDate, type Clock } from '../clock';
+import { shanghaiDate, shanghaiMinutesOfDay, type Clock } from '../clock';
 import type { TradingCalendar } from '../trading-calendar';
 import {
   fetchSinaEstimates,
@@ -8,9 +8,15 @@ import {
 import { formatNav } from './estimate-sources';
 import type { NavService } from './nav';
 import type { FundService } from './funds';
+import type { HoldingsService } from './holdings';
 import { DailyCache } from './daily-cache';
 import { marketStatus, type MarketStatus } from './status';
 import { UpstreamError, type UpstreamFetcher } from './upstream';
+import {
+  createCalculatedEstimates,
+  type Calculation,
+  type IntradayEstimate,
+} from './calculated-estimates';
 
 /** 交易时段内估值的缓存时长（秒级）。 */
 const TRADING_TTL_MS = 30_000;
@@ -18,11 +24,12 @@ const TRADING_TTL_MS = 30_000;
 const MAX_CACHE_ENTRIES = 5000;
 const MARKET_OPEN = '09:30';
 
-export type EstimateSource = 'tiantian' | 'sina';
+export type EstimateSource = 'tiantian' | 'sina' | 'calculated';
 
 export const ESTIMATE_SOURCE_NAMES: Record<EstimateSource, string> = {
   tiantian: '天天基金',
   sina: '新浪财经',
+  calculated: '自算',
 };
 
 export interface Estimate {
@@ -34,6 +41,7 @@ export interface Estimate {
   /** 一级来源（天天基金）没有给出估值，改用了后面的来源。 */
   fallback: boolean;
   referenceOnly: true;
+  calculation?: Calculation;
 }
 
 /**
@@ -56,10 +64,10 @@ export interface EstimateBatch {
   time: string;
   items: EstimateItem[];
 }
-
 export interface EstimateService {
   /** 批量估值；codes 已去重，顺序即返回顺序。 */
   batch(codes: readonly string[], asOf?: Date): Promise<EstimateBatch>;
+  intraday(code: string, asOf?: Date): Promise<IntradayEstimate>;
 }
 
 export interface EstimateServiceDeps {
@@ -69,6 +77,7 @@ export interface EstimateServiceDeps {
   /** 用来核对估值基准的净值模块；与净值接口共用同一个实例与缓存。 */
   nav: NavService;
   funds: FundService;
+  holdings: HoldingsService;
 }
 
 interface CacheEntry {
@@ -78,7 +87,7 @@ interface CacheEntry {
 }
 
 /**
- * 估值服务：天天基金 → 新浪两级回退。
+ * 估值服务：天天基金 → 新浪 → 可信自算三级回退。
  *
  * - 盘前、休市不访问上游，直接返回对应状态。
  * - 交易时段（含午休）每只基金的结果缓存 `TRADING_TTL_MS`。
@@ -99,6 +108,7 @@ interface CacheEntry {
  */
 export function createEstimateService(deps: EstimateServiceDeps): EstimateService {
   const cache = new Map<string, CacheEntry>();
+  const calculatedService = createCalculatedEstimates(deps);
   const calendarKnown = new DailyCache<boolean>();
 
   async function fundCalendar(code: string, asOf: Date): Promise<TradingCalendar | null> {
@@ -122,6 +132,12 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
     return known ? deps.calendar : null;
   }
 
+  /** Loads a source and records when its result was observed (returned or failed). */
+  async function observed<T>(load: () => Promise<T>): Promise<[T, Date]> {
+    const result = await load();
+    return [result, deps.clock.now()];
+  }
+
   function remember(code: string, entry: CacheEntry): void {
     cache.delete(code);
     cache.set(code, entry);
@@ -132,8 +148,7 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
   }
 
   return {
-    async batch(codes, asOf) {
-      const now = asOf ?? deps.clock.now();
+    async batch(codes, now = deps.clock.now()) {
       const status = marketStatus(now, deps.calendar);
       const time = now.toISOString();
       if (deps.calendar.hasCoverage?.(now) !== true) {
@@ -157,7 +172,8 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
           cachedSources.set(code, entry.source);
         }
       }
-      const checkedCache = await verify(cachedSources);
+      // A cached source was observed when it was written, before this lookup.
+      const checkedCache = await verify(cachedSources, deps.clock.now());
       for (const code of codes) {
         const entry = cache.get(code);
         if (entry && entry.expiresAt > nowMs) {
@@ -170,15 +186,46 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
       if (missing.length > 0) {
         const today = shanghaiDate(now);
         const primary = await verify(
-          await trySource('tiantian', () => fetchTiantianEstimates(deps.upstream, missing, today)),
+          ...(await observed(() =>
+            trySource('tiantian', () => fetchTiantianEstimates(deps.upstream, missing, today)),
+          )),
         );
         const rest = missing.filter((code) => !primary.has(code));
         const secondary =
           rest.length > 0
             ? await verify(
-                await trySource('sina', () => fetchSinaEstimates(deps.upstream, rest, today)),
+                ...(await observed(() =>
+                  trySource('sina', () => fetchSinaEstimates(deps.upstream, rest, today)),
+                )),
               )
             : new Map<string, SourceEstimate>();
+
+        const calculated = new Map<string, SourceEstimate>();
+        for (const code of missing) {
+          if (primary.has(code) || secondary.has(code)) continue;
+          try {
+            const candidate = await calculatedService.current(code, now);
+            // Every participating quote was observed before calculation finished.
+            if (
+              candidate &&
+              (await verify(new Map([[code, candidate]]), deps.clock.now())).has(code)
+            )
+              calculated.set(code, candidate);
+          } catch (error) {
+            // A missing report or quote is an unavailable estimate. Upstream adapters normally
+            // expose UpstreamError; defensive handling keeps a broken optional fallback isolated.
+            if (error instanceof UpstreamError) {
+              console.warn(
+                '[bafang-core] calculated estimate unavailable',
+                code,
+                error.kind,
+                error.message,
+              );
+            } else {
+              console.warn('[bafang-core] calculated estimate unavailable', code, String(error));
+            }
+          }
+        }
 
         const closeAt = new Date(`${today}T15:00:00+08:00`).getTime();
         const nextOpenMs = nextMarketOpen(now, deps.calendar).getTime();
@@ -189,13 +236,20 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
             ? toEstimate(fromPrimary, 'tiantian', false)
             : fromSecondary
               ? toEstimate(fromSecondary, 'sina', true)
-              : null;
+              : calculated.has(code)
+                ? toEstimate(calculated.get(code)!, 'calculated', true)
+                : null;
           const closingEstimate =
             status === 'closed' && estimate !== null && Date.parse(estimate.time) >= closeAt;
           remember(code, {
             estimate,
             source: fromPrimary ?? fromSecondary ?? null,
-            expiresAt: closingEstimate ? nextOpenMs : nowMs + TRADING_TTL_MS,
+            expiresAt:
+              estimate?.source === 'calculated'
+                ? nowMs
+                : closingEstimate
+                  ? nextOpenMs
+                  : nowMs + TRADING_TTL_MS,
           });
           resolved.set(code, estimate);
         }
@@ -209,6 +263,32 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
           return { code, status: estimate ? 'estimated' : 'unavailable', estimate };
         }),
       };
+    },
+    async intraday(code, asOf = deps.clock.now()) {
+      const status = marketStatus(asOf, deps.calendar);
+      const empty: IntradayEstimate = {
+        code,
+        tradeDate: shanghaiDate(asOf),
+        status: 'unavailable',
+        source: 'calculated',
+        fallback: true,
+        referenceOnly: true,
+        calculation: null,
+        points: [],
+        coverage: { returnedPoints: 0, omittedPoints: 0 },
+      };
+      if (deps.calendar.hasCoverage?.(asOf) !== true) return empty;
+      if (status === 'pre_market' || status === 'holiday') return { ...empty, status };
+      const calendar = await fundCalendar(code, asOf);
+      if (!calendar) return empty;
+      const base = await deps.nav.latestBefore(code, empty.tradeDate, asOf);
+      if (
+        !base ||
+        base.date !== previousTradingDate(empty.tradeDate, calendar) ||
+        !formatNav(base.unitNav)
+      )
+        return empty;
+      return calculatedService.intraday(code, asOf);
     },
   };
 }
@@ -226,6 +306,7 @@ function toEstimate(source: SourceEstimate, name: EstimateSource, fallback: bool
     sourceName: ESTIMATE_SOURCE_NAMES[name],
     fallback,
     referenceOnly: true,
+    ...('calculation' in source ? { calculation: source.calculation as Calculation } : {}),
   };
 }
 
@@ -279,7 +360,10 @@ function baseVerifier(
     }
   }
 
-  return async (candidates: Map<string, SourceEstimate>): Promise<Map<string, SourceEstimate>> => {
+  return async (
+    candidates: Map<string, SourceEstimate>,
+    observedAt: Date,
+  ): Promise<Map<string, SourceEstimate>> => {
     const checked = await Promise.all(
       [...candidates].map(async ([code, source]) => {
         const date = shanghaiDate(source.time);
@@ -291,6 +375,8 @@ function baseVerifier(
             ? await undatedBaseDate(code, source, date, previousDate, calendar)
             : source.base.date;
         const matches =
+          calendar !== null &&
+          sourceUsable(source.time, observedAt, calendar) &&
           expected !== null &&
           expected.date === previousDate &&
           formatNav(expected.unitNav) === source.base.unitNav &&
@@ -302,6 +388,33 @@ function baseVerifier(
     for (const [code, source] of checked) if (source) accepted.set(code, source);
     return accepted;
   };
+}
+
+/**
+ * 来源估值按它被取回（观察到）的时刻判定，与重仓股报价同一口径：不能晚于取回时刻，
+ * 不能来自盘前或休市；盘中沿用行情的五分钟预算，午休允许沿用 11:30 的午前快照，
+ * 收盘后保留已完成的收盘点。取回慢不会让当时有效的估值被当成未来数据。
+ */
+function sourceUsable(sourceTime: Date, asOf: Date, calendar: TradingCalendar): boolean {
+  if (
+    sourceTime.getTime() > asOf.getTime() ||
+    shanghaiDate(sourceTime) !== shanghaiDate(asOf) ||
+    !calendar.isTradingDay(asOf)
+  )
+    return false;
+  const sourceMinute = shanghaiMinutesOfDay(sourceTime);
+  const requestMinute = shanghaiMinutesOfDay(asOf);
+  if (sourceMinute < 570) return false;
+  // A source may timestamp a closing estimate after 15:00, but only after the request has closed.
+  if (requestMinute < 900 && sourceMinute > 900) return false;
+  const lunch = requestMinute >= 690 && requestMinute < 780;
+  if (requestMinute >= 570 && requestMinute < 900) {
+    const target = lunch
+      ? new Date(`${shanghaiDate(asOf)}T11:30:00+08:00`).getTime()
+      : asOf.getTime();
+    return target - sourceTime.getTime() <= 5 * 60_000;
+  }
+  return true;
 }
 
 /** 只在有可靠日历且能找到前一个交易日时接受估值。 */

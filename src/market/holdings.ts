@@ -23,7 +23,10 @@ type Report = {
   items: Omit<TopHolding, 'quote' | 'quoteSource' | 'quoteFallback'>[];
 };
 export interface HoldingsService {
-  get(code: string): Promise<{
+  get(
+    code: string,
+    asOf?: Date,
+  ): Promise<{
     reportDate: string;
     holdingsSource: HoldingsSource;
     holdingsFallback: boolean;
@@ -55,9 +58,8 @@ export function createHoldingsService(deps: {
   const quotes = new Map<string, QuoteEntry>();
   let lastRequestId = 0;
   return {
-    async get(code) {
+    async get(code, asOf = deps.clock.now()) {
       const requestId = ++lastRequestId;
-      const asOf = deps.clock.now();
       const day = shanghaiDate(asOf);
       let parsed: Report | null | undefined = cache.get(day, code);
       if (!parsed) {
@@ -317,7 +319,7 @@ function parseSina(text: string, asOfDay: string): Report {
 }
 
 /** Judges a quote against the clock reading taken when it was returned (`asOf`). */
-function stale(quote: Quote, asOf: Date, calendar: TradingCalendar): boolean {
+export function stale(quote: Quote, asOf: Date, calendar: TradingCalendar): boolean {
   const day = shanghaiDate(asOf);
   const minute = shanghaiMinutesOfDay(asOf);
   const trading = calendar.isTradingDay(asOf);

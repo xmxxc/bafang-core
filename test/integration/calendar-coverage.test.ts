@@ -67,7 +67,7 @@ describe('年度日历覆盖与估值（生产加载器和 HTTP）', () => {
                 FCODE: '000001',
                 GSZ: '1.0100',
                 GSZZL: 1,
-                GZTIME: `${now.toISOString().slice(0, 10)} 15:00`,
+                GZTIME: `${now.toISOString().slice(0, 10)} 10:00`,
                 PDATE: baseDate,
                 NAV: '1.0000',
               },

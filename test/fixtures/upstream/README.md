@@ -125,6 +125,69 @@ single-letter / punctuation-bearing identifiers and concurrent cache reports or
 quotes are synthetic boundary controls, not first-party market authenticity
 claims. Identifier syntax does not establish an exchange or supported quote.
 
+### #7 calculated estimate identity evidence (2026-11-10 UTC)
+
+`eastmoney/fund-110020.txt` is the verbatim official fund page capture for
+`https://fund.eastmoney.com/110020.html`; its page header names request code
+110020 and contains the explicit `查看相关ETF` relation to 510310. SHA256:
+`d264b1bf3d6ef1f7afe63098568569cf1f876c74ba4942c25f8843dd12ef6278`.
+`eastmoney/base-510310.json` is the official Eastmoney base response used as
+secondary metadata evidence (SHA256
+`2f89813fe06d702905de1dc0c11ce67d3db03a345d090306442541aa6f2afaae`).
+
+`sse/fund-510310.txt` is the verbatim Shanghai Stock Exchange `FUND_LIST`
+response for `commonSoaQuery.do` with `fundCode=510310`, `fundType=00`,
+`subClass=03`, and listing date 20130325. This is the identity proof used by
+core: the official script `sse/fund-type-protocol.txt` maps subClass `03` to
+cross-market mainland equity ETF; it is preserved as raw evidence and is not
+executed. SHA256 values are respectively
+`07ad33267a570ea8c1751020eb1811885ed94262b5ab8621cda5debc5bbdbcf9` and
+`ee70d82951b241476dfeceaae265adaccc0a3e059b65459c72c911f15117559c`.
+The page capture is fetched evidence only; no page timestamp is used as a
+quote timestamp. Synthetic mutations in `estimates-calculated.test.ts` cover
+wrong pages, missing/duplicate/external/self links, non-ETF identity, upstream
+failure and recovery.
+
+The r3 identity extension preserves official relation pages for 001051→510050,
+110021→510130, and 110019→159901 under `eastmoney/fund-*.txt`. The Shanghai
+01-class responses are `sse/fund-510050.json` and `sse/fund-510130.json`;
+the Shenzhen fund list `szse/fund-159901.json` proves ETF identity using
+`jjlb=ETF`, `ssrq=2006-04-24`, and the exact requested code. Investment
+classification (`tzlb`) is not used as an ETF identity filter.
+The raw listing notice `szse/notice-159901.html` is supporting evidence only;
+production uses the parameterised official fund-list endpoint for any candidate
+Shenzhen code. Shanghai accepts all documented domestic ETF subclasses
+01/02/03/06/08/09/31/32/36/37/38 documented in `sse/fund-type-protocol.txt`. A real query with
+an empty subclass parameter is preserved in `sse/fund-510050-all.json`.
+The request fund must still pass the domestic fund calendar checks; QDII and
+unproven identities remain unavailable. URL, capture window and byte hashes
+are in `estimate-r3-evidence.json`; the THS pair has separate metadata and a
+242-session-point summary under `ths/`.
+
+`ths/time-hs_510310.jsonp` and `ths/realhead-hs_510310.jsonp` are the raw
+mother-ETF pair used for the 242 valid session labels plus 15:05–15:30
+attached labels. The parser retains the session points and filters the
+post-session labels instead of treating the valid response as malformed.
+
+### #7 r4: non-equity ETF identity and raw-price conflicts
+
+`eastmoney/fund-000216.txt`, `eastmoney/base-000216.json`, and
+`sse/fund-518880.json` preserve the independent review's original official
+gold-feeder relation, non-QDII type and exchange class06 identity.
+`szse/fund-159972.json` and `szse/fund-159934.json` are live official fund-list
+responses for bond and gold ETFs. The gold row uses `tzlb=其它基金`, while the
+bond row uses `tzlb=债券基金`; both explicitly have `jjlb=ETF`. Production
+requests leave `selectTzlb` empty and validate ETF identity separately from
+asset classification. The preserved SSE `typeConversion` script documents
+equity, bond, gold and commodity ETF classes; explicitly cross-border classes
+and non-ETF monetary classes remain outside the verified domestic mapping.
+
+Request URLs, capture metadata and hashes are in `estimate-r4-evidence.json`.
+Tests distinguish the real 000216→518880 mapping from synthetic relation/class
+controls using real exchange rows. Duplicate-price mutations use raw fixed-point
+values; same-valued decimal spellings deduplicate, while tick/sub-tick differences
+produce502 before percentage/price display rounding.
+
 ### Holdings r9: Sina fallback lists only A shares (D33)
 
 Captured in this implementation session with `curl` and the
