@@ -1,0 +1,135 @@
+# CD：main 上的 CI 成功后把 core 部署到 VPS，也可以手动触发（#26）。
+# 镜像在 Actions 里构建，用 docker save | ssh docker load 传到 VPS，VPS 不访问 GitHub 或境外镜像仓库。
+# 仓库变量 CD_ENABLED=true 才部署，否则只给出"CD 未开通"提示、不算失败。
+# 切换、健康检查与回滚在 scripts/deploy/ 里；需要的变量、secrets 与开通步骤见 docs/deployment.md 的"持续部署"。
+name: CD
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+# 同一时间只部署一次；后来的排队等待，不取消正在进行的部署。
+concurrency:
+  group: cd-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # 开关：仓库变量 CD_ENABLED 不等于 true 时只写提示、跳过 deploy，workflow 不算失败。
+  gate:
+    name: gate
+    # 只处理本仓库 main 上 push 触发且成功的 CI；手动触发时在 deploy 的第一步检查分支。
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - name: Check CD_ENABLED
+        id: check
+        env:
+          CD_ENABLED: ${{ vars.CD_ENABLED }}
+        run: |
+          if [ "$CD_ENABLED" = true ]; then
+            echo "enabled=true" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "enabled=false" >>"$GITHUB_OUTPUT"
+          message="CD 未开通：设置仓库变量 CD_ENABLED=true 并配置 secrets 后生效（见 docs/deployment.md 的「持续部署」）。本次未部署。"
+          echo "::notice title=CD 未开通::$message"
+          {
+            echo "### CD 未开通"
+            echo
+            echo "$message"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: deploy
+    needs: gate
+    if: needs.gate.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    env:
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    steps:
+      - name: Check trigger and secrets
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          HAS_HOST: ${{ secrets.DEPLOY_SSH_HOST != '' }}
+          HAS_USER: ${{ secrets.DEPLOY_SSH_USER != '' }}
+          HAS_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+          HAS_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS != '' }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ] && [ "$REF" != refs/heads/main ]; then
+            echo "::error::只能从 main 手动部署，当前是 $REF"
+            exit 1
+          fi
+          missing=""
+          [ "$HAS_HOST" = true ] || missing="$missing DEPLOY_SSH_HOST"
+          [ "$HAS_USER" = true ] || missing="$missing DEPLOY_SSH_USER"
+          [ "$HAS_KEY" = true ] || missing="$missing DEPLOY_SSH_KEY"
+          [ "$HAS_KNOWN_HOSTS" = true ] || missing="$missing DEPLOY_SSH_KNOWN_HOSTS"
+          if [ -n "$missing" ]; then
+            echo "::error title=CD 缺少 secrets::CD_ENABLED=true，但缺少 Actions secrets:$missing。未部署任何内容；开通步骤见 docs/deployment.md 的「持续部署」。"
+            {
+              echo "### CD 缺少 secrets"
+              echo
+              echo "CD_ENABLED=true，但缺少 Actions secrets:$missing，未部署任何内容。开通步骤见 \`docs/deployment.md\` 的「持续部署」。"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+
+      - name: Build image
+        id: image
+        run: |
+          tag="${DEPLOY_SHA:0:12}"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          docker build -t "bafang-core:$tag" .
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_SSH_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$DEPLOY_SSH_KEY" >"$RUNNER_TEMP/ssh/key"
+          printf '%s\n' "$DEPLOY_SSH_KNOWN_HOSTS" >"$RUNNER_TEMP/ssh/known_hosts"
+          chmod 600 "$RUNNER_TEMP/ssh/key" "$RUNNER_TEMP/ssh/known_hosts"
+
+      - name: Deploy
+        env:
+          DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          DEPLOY_SSH_KEY_FILE: ${{ runner.temp }}/ssh/key
+          DEPLOY_SSH_KNOWN_HOSTS_FILE: ${{ runner.temp }}/ssh/known_hosts
+          DEPLOY_IMAGE: bafang-core
+          DEPLOY_TAG: ${{ steps.image.outputs.tag }}
+        run: bash scripts/deploy/deploy.sh
+
+      - name: Summary
+        if: success()
+        env:
+          TAG: ${{ steps.image.outputs.tag }}
+        run: echo "已部署 \`bafang-core:$TAG\`（$DEPLOY_SHA）" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Remove SSH key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ssh"
