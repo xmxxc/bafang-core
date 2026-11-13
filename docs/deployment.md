@@ -333,6 +333,30 @@ rsync -R compose.prod.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.p
 
 6. **首次运行。** Actions → CD → Run workflow，看 Deploy 步骤日志依次出现"当前版本""已备份数据库""健康检查通过"，再按"首次部署"第 7 步从公网验证。
 
+### 自托管 runner
+
+GitHub 托管的 runner 在境外，`docker save | ssh` 到国内 VPS 的速度可能只有几十 KiB/s，镜像（压缩后约 55 MiB）在 `deploy` job 的 30 分钟期限内传不完。这时把 `deploy` job 放到一台到 VPS 带宽充足的自托管 runner 上（构建机或开发机），`gate` job 仍在 GitHub 托管 runner 上运行。
+
+1. **runner 机器。** 需要 Docker（运行 runner 的用户能执行 `docker build`）、`ssh`、`gzip`、`bash`，并能访问 github.com。建议用一个专用的系统用户运行 runner，不要用日常登录、存有其他凭据的用户：job 能读到运行用户的主目录。该用户加入 `docker` 组即等同于这台机器的 root 权限。
+
+2. **注册。** 在仓库 Settings → Actions → Runners → New self-hosted runner 取得下载命令，或用 `gh` 取注册令牌（1 小时有效）：
+
+   ```bash
+   gh api -X POST repos/<owner>/<repo>/actions/runners/registration-token --jq .token
+   ./config.sh --url https://github.com/<owner>/<repo> --token <令牌> --name <名称> --labels bafang-cd --unattended
+   sudo ./svc.sh install <运行用户> && sudo ./svc.sh start
+   ```
+
+3. **切换。** 设置仓库变量 `CD_RUNNER` 为第 2 步的标签：
+
+   ```bash
+   gh variable set CD_RUNNER --body bafang-cd
+   ```
+
+   删除该变量（`gh variable delete CD_RUNNER`）即回到 GitHub 托管 runner。runner 离线时 `deploy` job 会排队等待，直到 runner 上线或超出 GitHub 的排队期限（24 小时）后失败；排队期间不会部署。
+
+4. **公开仓库的风险。** 公开仓库里，fork 提交的 PR 可以在自己的 workflow 里指定同一标签，从而在这台 runner 上执行代码。至少把 Settings → Actions → General → "Fork pull request workflows from outside collaborators" 设为 **Require approval for all outside collaborators**（`gh api -X PUT repos/<owner>/<repo>/actions/permissions/fork-pr-contributor-approval -f approval_policy=all_external_contributors`），审批前先看清 PR 改了哪些 workflow。
+
 ### 手动回滚
 
 自动回滚之外，要退回更早的版本时：

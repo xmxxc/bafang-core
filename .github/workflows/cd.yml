@@ -56,7 +56,9 @@ jobs:
     name: deploy
     needs: gate
     if: needs.gate.outputs.enabled == 'true'
-    runs-on: ubuntu-latest
+    # 仓库变量 CD_RUNNER 设为自托管 runner 的标签时在该机器上构建并传输镜像（境外 runner 到 VPS 带宽不足时用）；
+    # 未设置时用 GitHub 托管的 ubuntu-latest。见 docs/deployment.md「自托管 runner」。
+    runs-on: ${{ vars.CD_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 30
 
     env:
