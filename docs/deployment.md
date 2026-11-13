@@ -125,6 +125,14 @@ alias dc='docker compose -f compose.prod.yaml --env-file .env.production'
 
 镜像内置 Docker `HEALTHCHECK`，每 30 秒请求一次 `/v1/health`，非 200 记为失败，连续 3 次后容器标为 `unhealthy`（`dc ps` 可见）。
 
+## 停止与排空
+
+core 收到 SIGTERM 后立即停止接收新连接，等在途请求和定时任务结束、关闭数据库连接池，日志最后一行是 `shutdown complete`，以 0 退出；排空期限是 30 秒（`src/shutdown.ts`），到期仍未结束则记 `shutdown timed out after 30000ms` 并以 1 退出。冷缓存的行情请求要逐个访问上游，常常超过 10 秒。
+
+Docker 在停止宽限到期后发 SIGKILL，默认只有 10 秒，会在排空中途杀掉 core（退出码 137），在途请求的客户端收到 502。所以 `compose.prod.yaml` 给 core 设了 `stop_grace_period: 40s`：比排空期限多 10 秒，正常排空总能先结束，Docker 的 SIGKILL 只兜底卡死的进程。`dc stop core`、`dc restart core`、`dc down` 和换镜像时的 `dc up -d core` 都按这个宽限；空闲时停止不受影响，不到 1 秒。CD 的 `remote-update.sh` 停止或替换 core 时显式带 `-t 40`，不依赖 VPS 上的 compose 文件。
+
+调整排空期限时，同时调整 `stop_grace_period` 和 `remote-update.sh` 的 `CORE_STOP_TIMEOUT`，保持宽限大于排空期限。
+
 ## 升级
 
 1. 按"首次部署"第 3 步构建并导入新标签的镜像。
@@ -140,6 +148,10 @@ alias dc='docker compose -f compose.prod.yaml --env-file .env.production'
    `up core` 会先用新镜像重新运行 `migrate`：迁移幂等，已执行过的不会重跑。**迁移失败时 `migrate` 以非零状态退出，`up` 报 `service "migrate" didn't complete successfully` 并返回非零，core 不会被启动**（新 core 容器停在 Created）；看 `dc logs migrate` 排查，修复后再次 `dc up -d --no-build core`。
 
 4. 验证 `/v1/health`；版本说明里要求重新导入日历等额外步骤时照做（例如 `docs/deployment-calendar-coverage.md`）。
+
+替换 core 时旧容器按 40 秒宽限排空在途请求（见"停止与排空"），慢请求在途时 `up` 会多等一会儿，属正常。
+
+**部署文件要手工同步。** 无论手动升级还是 CD，传到 VPS 的都只有镜像（CD 另外经 stdin 执行 `remote-update.sh`）。`compose.prod.yaml`、`docker/caddy/Caddyfile`、`docker/postgres/initdb/` 和 `.env.production.example` 不会自动更新：仓库改了这些文件，要在升级前人工同步到 VPS。VPS 上的副本有本地改动时（例如为接到已有反向代理之后给 core 加的端口映射），不要整份覆盖：先 `diff` 仓库版本与 VPS 副本，把仓库的改动合进去，保留本地改动，再 `dc config --quiet` 检查。做法与 CD 的要求见"持续部署"。
 
 **回滚：** 新版本没有带迁移（`dc logs migrate` 与 `__drizzle_migrations` 条数可确认）时，把 `BAFANG_CORE_TAG` 改回旧标签再 `dc up -d --no-build core` 即可。新版本执行过迁移时，迁移只向前、旧版本不会撤销它们，必须按下节"恢复"流程把升级前的备份恢复到新库再切换，期间 core 保持停止，最后用旧标签创建容器。
 
@@ -266,19 +278,31 @@ $L down -v   # 用完删除容器和数据卷
    - 记录当前 core 容器实际运行的**镜像 ID**，打上本地标签 `bafang-core:rollback` 作为回滚目标。不按标签记：同一提交重新部署时，`docker load` 会让同名标签指向新构建的镜像，旧容器却还在用原来的镜像；
    - 先确保 postgres 运行并健康（已停止的会被启动，最多等 120 秒），再以超级用户 `postgres` 把业务库备份到 `backups/pre-deploy-<UTC 时间>-<标签>.dump`。数据库起不来或备份失败都拒绝部署，core 不切换；
    - 先用新镜像单独执行一次性迁移服务（`run --rm migrate`），以它的退出码为准。**迁移失败时旧 core 容器没有动过、继续服务**：记录 `migrate-failed`，workflow 失败，不回滚。之所以单独先跑：直接 `up core` 时 Compose 会先删掉旧 core、建好新容器，再执行 migrate，迁移失败时旧版本已经停了；
-   - 迁移成功后以新标签执行 `up -d --no-build core`（Compose 会再跑一次 migrate，已执行过的迁移不会重跑）；
-   - 在容器内轮询 `/v1/health`，按实际经过的时间计算上限：默认 180 秒，单次请求最多 5 秒且不超过剩余时间。通过后把 `BAFANG_CORE_IMAGE`、`BAFANG_CORE_TAG` 写回 `.env.production`（已有该行则原地替换，否则另起一行追加；其他行不变，文件没有末尾换行也可以），之后手动执行 `dc` 也是新版本；
-   - 新 core 未能创建、启动，或健康检查不过：打印 core 与迁移日志，停止 core，用 `bafang-core:rollback` 以 `up -d --no-build core` 重建容器，复检上限默认 120 秒，然后让 workflow 失败。回滚通过后 `.env.production` 一律改写为 `bafang-core:rollback`：原来写的标签可能已被同名新镜像覆盖（包括连续几次失败部署的情况），之后手动执行 `dc` 会起坏镜像。成功部署和成功回滚后，脚本都会核对 `.env.production` 展开出的镜像 ID 与运行中 core 的镜像 ID 一致，不一致就报错。
+   - 迁移成功后以新标签执行 `up -d --no-build -t 40 core`（Compose 会再跑一次 migrate，已执行过的迁移不会重跑）。替换时旧 core 最多有 40 秒排空在途请求（见"停止与排空"）；
+   - 在容器内轮询 `/v1/health`，按实际经过的时间计算上限：默认 180 秒，从 `up` 返回后起算，旧 core 排空的时间不占用这份预算；单次请求最多 5 秒且不超过剩余时间。通过后把 `BAFANG_CORE_IMAGE`、`BAFANG_CORE_TAG` 写回 `.env.production`（已有该行则原地替换，否则另起一行追加；其他行不变，文件没有末尾换行也可以），之后手动执行 `dc` 也是新版本；
+   - 新 core 未能创建、启动，或健康检查不过：打印 core 与迁移日志，停止 core（同样带 `-t 40`），用 `bafang-core:rollback` 以 `up -d --no-build core` 重建容器，复检上限默认 120 秒，然后让 workflow 失败。回滚通过后 `.env.production` 一律改写为 `bafang-core:rollback`：原来写的标签可能已被同名新镜像覆盖（包括连续几次失败部署的情况），之后手动执行 `dc` 会起坏镜像。成功部署和成功回滚后，脚本都会核对 `.env.production` 展开出的镜像 ID 与运行中 core 的镜像 ID 一致，不一致就报错。
 4. 每次结果追加到部署目录的 `deploy-history.log`（`deployed` / `migrate-failed` / `failed` / `rolled-back` / `rollback-failed`，回滚行记"原标签@镜像 ID"）。
 
 标签 `rollback` 保留给回滚目标，不能用作部署标签。VPS 上需要 Docker Compose v2.17 及以上（`up --wait-timeout`）和 `timeout` 命令（coreutils 或 busybox，常见发行版自带）。
 
 自动回滚（迁移成功、新 core 不健康时）只换回旧镜像，**不恢复数据库**：新版本的迁移已经执行过，旧版本要在新结构上运行。新版本的迁移与旧版本不兼容时，用这次的部署前备份按"数据库备份与恢复"的**恢复**流程处理：core 全程停止，恢复到新的空库、核验后改名切换，最后用旧标签 `up -d --no-build core`。
 
-CD 只更新镜像，不同步部署目录里的 `compose.prod.yaml`、`docker/postgres/initdb/`、`docker/caddy/Caddyfile` 与 `.env.production`。升级到改动了这些文件或新增配置的版本（例如数据库角色拆分新增的 `POSTGRES_PASSWORD`、`PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`）之前，先在 VPS 上把文件和配置同步好，并按该版本文档做好一次性的准备，再合并或触发 CD；否则新镜像会以旧配置运行：迁移失败时停在旧版本，迁移通过但健康检查不过时自动回滚。同步文件同"首次部署"第 2 步：
+CD 只更新镜像，不同步部署目录里的 `compose.prod.yaml`、`docker/postgres/initdb/`、`docker/caddy/Caddyfile` 与 `.env.production`；VPS 上的副本有本地改动时，同步要保留这些改动（见"升级"）。升级到改动了这些文件或新增配置的版本（例如数据库角色拆分新增的 `POSTGRES_PASSWORD`、`PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`）之前，先在 VPS 上把文件和配置同步好，并按该版本文档做好一次性的准备，再合并或触发 CD；否则新镜像会以旧配置运行：迁移失败时停在旧版本，迁移通过但健康检查不过时自动回滚。同步文件同"首次部署"第 2 步：
 
 ```bash
 rsync -R compose.prod.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.production.example vps:/srv/bafang-core/
+```
+
+这条命令整份覆盖 VPS 上的同名文件。VPS 副本有本地改动时改为先同步到旁边的目录，对比合并后再放回：
+
+```bash
+rsync -R compose.prod.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.production.example vps:/srv/bafang-core/incoming/
+# 在 VPS 的部署目录里：
+diff -u compose.prod.yaml incoming/compose.prod.yaml
+diff -u docker/caddy/Caddyfile incoming/docker/caddy/Caddyfile
+diff -ru docker/postgres/initdb incoming/docker/postgres/initdb
+# 把仓库的改动合进现有文件（保留本地改动），然后：
+dc config --quiet && rm -rf incoming
 ```
 
 ### 开通
