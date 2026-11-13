@@ -199,6 +199,9 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
                 )),
               )
             : new Map<string, SourceEstimate>();
+        // 只有估值通过行格式、数值、当日与基准核对、被实际采纳时，才算该来源成功。
+        if (primary.size > 0) deps.upstream.recordSuccess?.('tiantian');
+        if (secondary.size > 0) deps.upstream.recordSuccess?.('sina');
 
         const calculated = new Map<string, SourceEstimate>();
         for (const code of missing) {
@@ -209,8 +212,12 @@ export function createEstimateService(deps: EstimateServiceDeps): EstimateServic
             if (
               candidate &&
               (await verify(new Map([[code, candidate]]), deps.clock.now())).has(code)
-            )
+            ) {
               calculated.set(code, candidate);
+              // Quotes fetched for the calculation count only once the estimate is adopted.
+              for (const source of candidate.fetchedQuoteSources)
+                deps.upstream.recordSuccess?.(source);
+            }
           } catch (error) {
             // A missing report or quote is an unavailable estimate. Upstream adapters normally
             // expose UpstreamError; defensive handling keeps a broken optional fallback isolated.

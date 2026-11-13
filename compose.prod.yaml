@@ -1,0 +1,106 @@
+# 生产部署：core + PostgreSQL + Caddy（自动 HTTPS 反代）。说明见 docs/deployment.md。
+#
+#   cp .env.production.example .env.production   # 填入真实值，不提交
+#   docker compose -f compose.prod.yaml --env-file .env.production up -d
+#
+# 只有 Caddy 对外暴露端口；core 与 PostgreSQL 只在 Compose 内部网络可达。
+name: bafang-core
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # 超级用户 postgres 只用于首次初始化与运维；core 用下面两个非超级用户角色（见 docker/postgres/initdb）。
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD 必填}
+      BAFANG_DATABASE: ${PGDATABASE:-bafang}
+      BAFANG_MIGRATION_USER: ${PG_MIGRATION_USER:-bafang_owner}
+      BAFANG_MIGRATION_PASSWORD: ${PG_MIGRATION_PASSWORD:?PG_MIGRATION_PASSWORD 必填}
+      BAFANG_APP_USER: ${PGUSER:-bafang_app}
+      BAFANG_APP_PASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d "$$BAFANG_DATABASE"']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # 一次性迁移：与 core 同一镜像，用迁移角色（库 owner）执行迁移后退出。
+  # 迁移凭据只交给这个服务；`up core` 会先运行它，迁移失败则 core 不启动。
+  migrate:
+    image: ${BAFANG_CORE_IMAGE:-bafang-core}:${BAFANG_CORE_TAG:-latest}
+    build: .
+    command: ['migrate']
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGUSER: ${PG_MIGRATION_USER:-bafang_owner}
+      PGPASSWORD: ${PG_MIGRATION_PASSWORD:?PG_MIGRATION_PASSWORD 必填}
+      PGDATABASE: ${PGDATABASE:-bafang}
+      PGSCHEMA: ${PGSCHEMA:-public}
+
+  core:
+    # 镜像名与标签可由环境变量指定，便于 CD 用 docker save | docker load 推送同一标签后切换。
+    image: ${BAFANG_CORE_IMAGE:-bafang-core}:${BAFANG_CORE_TAG:-latest}
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # 只把下面列出的配置传给 core；空值等同未配置（见 .env.production.example）。
+    # 这里没有迁移凭据：长期运行的容器（含 Docker 健康检查进程）只有运行角色。
+    environment:
+      NODE_ENV: production
+      PORT: '3000'
+      PGHOST: postgres
+      PGPORT: '5432'
+      # 长期运行角色：非超级用户，只有表数据权限。
+      PGUSER: ${PGUSER:-bafang_app}
+      PGPASSWORD: ${PGPASSWORD:?PGPASSWORD 必填}
+      PGDATABASE: ${PGDATABASE:-bafang}
+      PGSCHEMA: ${PGSCHEMA:-public}
+      SETTLEMENT_ROUNDS: ${SETTLEMENT_ROUNDS:-21:30,22:30,23:30}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      RESEND_FROM: ${RESEND_FROM:-}
+      MAIL_TRANSPORT: ${MAIL_TRANSPORT:-}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GITHUB_CALLBACK_URL: ${GITHUB_CALLBACK_URL:-}
+      GITHUB_LOGIN_REDIRECT_URL: ${GITHUB_LOGIN_REDIRECT_URL:-}
+      WECHAT_APP_ID: ${WECHAT_APP_ID:-}
+      WECHAT_APP_SECRET: ${WECHAT_APP_SECRET:-}
+      WECHAT_QR_TTL_SECONDS: ${WECHAT_QR_TTL_SECONDS:-300}
+      BIND_CODE_SECRET: ${BIND_CODE_SECRET:-}
+    expose:
+      - '3000'
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - core
+    environment:
+      CORE_DOMAIN: ${CORE_DOMAIN:?CORE_DOMAIN 必填}
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL 必填}
+    ports:
+      - '${HTTP_PORT:-80}:80'
+      - '${HTTPS_PORT:-443}:443'
+      - '${HTTPS_PORT:-443}:443/udp'
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

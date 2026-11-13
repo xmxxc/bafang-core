@@ -44,9 +44,13 @@ docker compose up -d
 
 首次启动会自动执行 `docker/initdb` 里的初始化脚本，创建 `test_bafang` 角色与数据库。之后按上面的步骤 `cp .env.example .env`、`pnpm db:migrate` 即可，`.env` 的用法不变。
 
+## 生产部署
+
+生产环境用 `compose.prod.yaml`（core + PostgreSQL + Caddy 自动 HTTPS）部署，配置示例在 `.env.production.example`。首次部署、升级与数据库备份恢复见 [docs/deployment.md](docs/deployment.md)。
+
 ## 接口
 
-- `GET /v1/health` — 健康检查，返回存活状态与数据库连通性。
+- `GET /v1/health` — 健康检查，返回存活状态、数据库连通性（不可达时 503 `database_unavailable`），以及各行情上游（`eastmoney`、`tiantian`、`sina`、`tencent`、`ths`）最近一次成功的时间（进程内记录，从未成功为 `null`）。
 - `GET /v1/openapi` — 由请求/响应 schema 自动生成的 OpenAPI 文档（JSON）。同一份文档提交在根目录 `openapi.json`，作为 studio 与 glance 的接口契约；改动接口后运行 `pnpm openapi:generate` 并一起提交，CI 会用 `pnpm openapi:check` 检查两者一致。
 - `GET /v1/funds/search?q=` — 基金搜索，按基金代码、名称或拼音首字母匹配，只返回基金（过滤上游混入的股票、指数）。
 - `GET /v1/funds/{code}` — 基金基础信息：名称、代码、类别（`domestic` 境内 / `qdii` / `etf_feeder` ETF 联接，QDII 的 ETF 联接归为 `qdii`）与 T+N 确认规则；上游取不到 T+N 时按类别默认（境内与 ETF 联接 T+1，QDII T+2），并以 `settlement.source` 标明来源。

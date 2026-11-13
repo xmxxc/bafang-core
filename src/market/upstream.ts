@@ -12,9 +12,19 @@ export interface UpstreamRequest {
   encoding?: string;
 }
 
+/** 行情模块实际使用的上游。健康检查按这些名字报告最近一次成功的时间。 */
+export const UPSTREAM_SOURCES = ['eastmoney', 'tiantian', 'sina', 'tencent', 'ths'] as const;
+
+export type UpstreamSource = (typeof UPSTREAM_SOURCES)[number];
+
 export interface UpstreamFetcher {
   /** 返回解码后的响应体文本；失败时抛出 UpstreamError。 */
   fetchText(request: UpstreamRequest): Promise<string>;
+  /**
+   * 上游响应通过各来源的格式校验后，由来源模块调用，报告该上游这一次成功。
+   * 可选：录制样本等测试替身可以不实现。
+   */
+  recordSuccess?(source: UpstreamSource): void;
 }
 
 export type UpstreamErrorKind =

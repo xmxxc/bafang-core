@@ -1,0 +1,11 @@
+# 本机验证用覆盖：Caddy 改用内部 CA（tls internal），端口只绑定 127.0.0.1。
+# 不用于生产。用法见 docs/deployment.md「本机验证」。
+services:
+  caddy:
+    ports: !override
+      - '127.0.0.1:${HTTP_PORT:-3165}:80'
+      - '127.0.0.1:${HTTPS_PORT:-3166}:443'
+    volumes: !override
+      - ./docker/caddy/Caddyfile.local:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config

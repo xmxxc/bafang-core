@@ -157,7 +157,7 @@ async function resolveQuotes(
     console.warn('[bafang-core] tencent quotes failed', error.kind, error.message);
   }
 
-  return Promise.all(
+  const resolved = await Promise.all(
     indices.map(async (index): Promise<ResolvedQuote> => {
       const fromPrimary = trusted(index, primary.get(index.tencent) ?? null, now, deps);
       if (fromPrimary) return { quote: fromPrimary, source: 'tencent', fallback: false };
@@ -166,6 +166,11 @@ async function resolveQuotes(
       return { quote: null, source: null, fallback: true };
     }),
   );
+  // 只有报价通过字段解析、交叉校验与交易日核对、被实际采纳时，才算该上游成功。
+  for (const source of new Set(resolved.map((item) => item.source))) {
+    if (source) deps.upstream.recordSuccess?.(source);
+  }
+  return resolved;
 }
 
 async function fetchBackup(index: IndexDefinition, deps: IndexServiceDeps): Promise<Quote | null> {

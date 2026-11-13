@@ -49,6 +49,7 @@ import { createEstimateService } from './market/estimates';
 import { marketStatus } from './market/status';
 import { createIndexService } from './market/indices';
 import { HttpUpstreamFetcher, UpstreamError, type UpstreamFetcher } from './market/upstream';
+import { trackUpstreamHealth, UpstreamHealth } from './market/upstream-health';
 import {
   QR_TICKET_CREATE_RATE_LIMIT,
   QR_TICKET_POLL_IP_RATE_LIMIT,
@@ -246,6 +247,9 @@ export function createApp(deps: AppDeps = {}): App {
     description: '申请扫码登录票据时设置的临时浏览器凭据',
   });
 
+  const upstreamHealth = new UpstreamHealth(resolved.clock);
+  const upstream = trackUpstreamHealth(resolved.upstream, upstreamHealth);
+
   app.openapi(healthRoute, async (c) => {
     const connected = resolved.db ? await resolved.db.ping() : false;
     if (!connected) {
@@ -255,25 +259,26 @@ export function createApp(deps: AppDeps = {}): App {
       {
         status: 'ok' as const,
         database: { connected: true },
+        upstreams: upstreamHealth.snapshot(),
         time: resolved.clock.now().toISOString(),
       },
       200,
     );
   });
 
-  const funds = createFundService({ upstream: resolved.upstream, clock: resolved.clock });
+  const funds = createFundService({ upstream, clock: resolved.clock });
   const holdings = createHoldingsService({
-    upstream: resolved.upstream,
+    upstream,
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
   });
   const nav = createNavService({
-    upstream: resolved.upstream,
+    upstream,
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
   });
   const estimates = createEstimateService({
-    upstream: resolved.upstream,
+    upstream,
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
     nav,
@@ -405,7 +410,7 @@ export function createApp(deps: AppDeps = {}): App {
   });
 
   const indices = createIndexService({
-    upstream: resolved.upstream,
+    upstream,
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
     hkCalendar: resolved.hkTradingCalendar,

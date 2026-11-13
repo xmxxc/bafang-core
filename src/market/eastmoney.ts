@@ -223,13 +223,16 @@ export async function searchFunds(
     SearchResponseSchema,
     await upstream.fetchText({ url: url.href, referer: REFERER }),
   );
-  return (body.Datas ?? [])
+  const hits = (body.Datas ?? [])
     .filter((item) => item.CATEGORY === FUND_CATEGORY && /^\d{6}$/.test(item.CODE))
     .map((item) => ({
       code: item.CODE,
       name: item.NAME,
       type: item.FundBaseInfo?.FTYPE ?? null,
     }));
+  // 无匹配是合法空结果：不算失败，但也没有证明接口给出了可用数据，不刷新成功时间。
+  if (hits.some((hit) => hit.name.trim() !== '')) upstream.recordSuccess?.('eastmoney');
+  return hits;
 }
 
 export async function fetchFundBaseInfo(
@@ -247,7 +250,9 @@ export async function fetchFundBaseInfo(
     await upstream.fetchText({ url: url.href, referer: REFERER }),
   );
   const data = body.Datas;
+  // 基金不存在（Datas 为空）是合法空结果，不刷新成功时间。
   if (!data) return null;
+  if (data.FCODE === code && data.SHORTNAME.trim() !== '') upstream.recordSuccess?.('eastmoney');
   return {
     code: data.FCODE,
     name: data.SHORTNAME,
@@ -329,12 +334,32 @@ export async function fetchNavPage(
     NavResponseSchema,
     await upstream.fetchText({ url: url.href, referer: NAV_REFERER }),
   );
-  return (body.Data?.LSJZList ?? []).map((item) => ({
+  const points = (body.Data?.LSJZList ?? []).map((item) => ({
     date: item.FSRQ,
     unitNav: item.DWJZ,
     cumulativeNav: item.LJJZ ?? null,
     dailyChange: parsePercent(item.JZZZL),
   }));
+  // 空页是合法空结果；只有每一行的日期与单位净值都合法时才算成功。
+  if (points.length > 0 && points.every(isWellFormedNav)) upstream.recordSuccess?.('eastmoney');
+  return points;
+}
+
+/** 日期必须是真实的日历日期（解析后 ISO 往返一致），单位净值必须是有限正数。 */
+function isWellFormedNav(point: UpstreamNavPoint): boolean {
+  const unitNav = Number(point.unitNav);
+  return (
+    isCalendarDate(point.date) &&
+    /^\d+(\.\d+)?$/.test(point.unitNav) &&
+    Number.isFinite(unitNav) &&
+    unitNav > 0
+  );
+}
+
+function isCalendarDate(text: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const parsed = new Date(`${text}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === text;
 }
 
 /**

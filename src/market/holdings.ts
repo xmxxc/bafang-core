@@ -73,6 +73,7 @@ export function createHoldingsService(deps: {
           );
           // Only a recognized, successful empty report proves absence of a report.
           if (!parsed) return null;
+          deps.upstream.recordSuccess?.('eastmoney');
         } catch (error) {
           if (!(error instanceof UpstreamError)) throw error;
           console.warn('[bafang-core] eastmoney holdings failed', error.kind, error.message);
@@ -85,6 +86,7 @@ export function createHoldingsService(deps: {
               }),
               day,
             );
+            deps.upstream.recordSuccess?.('sina');
           } catch (backupError) {
             if (!(backupError instanceof UpstreamError)) throw backupError;
             console.warn(
@@ -143,8 +145,11 @@ export function createHoldingsService(deps: {
         if (batch.length === 0) break;
         for (const symbol of batch) hits.delete(symbol);
       }
+      // Source of each quote fetched by this request (cache hits stay null); success is
+      // reported only for those still adopted after the final recheck below.
+      const fetched: ('tencent' | 'ths' | null)[] = parsed.items.map(() => null);
       const items = await Promise.all(
-        parsed.items.map(async (item) => {
+        parsed.items.map(async (item, index) => {
           const symbol = symbolFor(item.code);
           const hit = symbol ? hits.get(symbol) : undefined;
           if (hit) return { ...item, ...hit.value };
@@ -175,6 +180,7 @@ export function createHoldingsService(deps: {
             if (quote && stale(quote, sampledAt, deps.calendar)) quote = null;
             source = quote ? 'ths' : null;
           }
+          fetched[index] = source;
           const value = { quote, quoteSource: source, quoteFallback: fallback };
           if (symbol) {
             const existing = quotes.get(symbol);
@@ -202,15 +208,18 @@ export function createHoldingsService(deps: {
       // A slow backup for one stock can end after a session boundary that another stock's
       // already observed quote no longer satisfies; such quotes are reported as unavailable.
       const doneAt = deps.clock.now();
+      const adopted = items.map((item) =>
+        item.quote && stale(item.quote, doneAt, deps.calendar)
+          ? { ...item, quote: null, quoteSource: null }
+          : item,
+      );
+      for (const source of new Set(adopted.flatMap((item, i) => (item.quote ? fetched[i] : null))))
+        if (source) deps.upstream.recordSuccess?.(source);
       return {
         reportDate: parsed.reportDate,
         holdingsSource: parsed.source,
         holdingsFallback: parsed.source === 'sina',
-        items: items.map((item) =>
-          item.quote && stale(item.quote, doneAt, deps.calendar)
-            ? { ...item, quote: null, quoteSource: null }
-            : item,
-        ),
+        items: adopted,
       };
     },
   };

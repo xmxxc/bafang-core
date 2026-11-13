@@ -21,6 +21,11 @@ export interface Calculation {
 }
 export interface CalculatedSource extends SourceEstimate {
   calculation: Calculation;
+  /**
+   * Upstreams whose quotes this calculation fetched itself (parent ETF). The caller reports
+   * them only once the estimate is adopted. Never serialized into the response.
+   */
+  fetchedQuoteSources: ('tencent' | 'ths')[];
 }
 export interface IntradayEstimate {
   code: string;
@@ -80,6 +85,9 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
       ) {
         const parent = await fetchLinkedEtfCode(deps.upstream, code);
         if (!parent || !(await fetchVerifiedEtfCode(deps.upstream, parent, asOf))) return null;
+        // The fund page relationship is adopted only after the exchange confirms the ETF.
+        // The exchange lists (SSE/SZSE) are not health-reported upstreams.
+        deps.upstream.recordSuccess?.('eastmoney');
         entry = { code: parent, at: asOf.getTime(), day: shanghaiDate(asOf) };
         if (mappings.size >= 5000) mappings.delete(mappings.keys().next().value!);
         mappings.set(code, entry);
@@ -208,6 +216,8 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         ...point,
         time: new Date(first),
         base: { date: base.date, unitNav: formatNav(base.unitNav)! },
+        fetchedQuoteSources:
+          model.method === 'parent_etf' ? [...quoteSources].filter((x) => x !== undefined) : [],
         calculation: {
           method: model.method,
           reportDate: model.reportDate,
@@ -248,7 +258,7 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
           const points = await fetchThsIntraday(deps.upstream, symbol);
           const observedAt = deps.clock.now();
           if (shanghaiDate(observedAt) !== result.tradeDate) return null;
-          return new Map(
+          const usable = new Map(
             points
               .filter(
                 (point) =>
@@ -256,6 +266,7 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
               )
               .map((point) => [point.time.getTime(), point]),
           );
+          return usable;
         }),
       );
       // A series observed after the Shanghai date changed belongs to a previous day: no points,
@@ -281,6 +292,8 @@ export function createCalculatedEstimates(deps: EstimateServiceDeps) {
         else result.coverage.omittedPoints++;
       }
       result.coverage.returnedPoints = result.points.length;
+      // Every returned point uses every THS series; an empty result is not a success.
+      if (result.points.length > 0) deps.upstream.recordSuccess?.('ths');
       result.status = result.points.length ? 'estimated' : 'unavailable';
       result.calculation = {
         method: model.method,
