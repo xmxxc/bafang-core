@@ -52,6 +52,10 @@ services:
     image: ${BAFANG_CORE_IMAGE:-bafang-core}:${BAFANG_CORE_TAG:-latest}
     build: .
     restart: unless-stopped
+    # 停止时 core 收到 SIGTERM 后最多排空 30 秒（src/shutdown.ts）；Docker 默认 10 秒就 SIGKILL，
+    # 慢请求在途时会被切断。宽限设为 40 秒，比排空期限多留 10 秒收尾。
+    # 改这个值时同步 scripts/deploy/remote-update.sh 的 CORE_STOP_TIMEOUT。
+    stop_grace_period: 40s
     depends_on:
       postgres:
         condition: service_healthy

@@ -14,11 +14,12 @@
 #   3. 先用新镜像单独跑一次性迁移服务 migrate（`run --rm migrate`），以它的退出码为准。
 #      迁移失败：旧 core 容器没有动过、继续服务，记录失败并以非零退出，不回滚。
 #      不能直接 `up core` 了事：Compose 会先删掉旧 core、建好新容器，再跑 migrate，迁移失败时旧版本已经停了
-#   4. 迁移成功后用环境变量覆盖 BAFANG_CORE_IMAGE / BAFANG_CORE_TAG 执行 `up -d --no-build core`
-#      （Compose 会再跑一次 migrate，已执行过的迁移不会重跑）
-#   5. 在容器内轮询 /v1/health，按墙钟截止时间判断：部署检查默认 180 秒，单次请求最多 5 秒且不超过剩余时间
+#   4. 迁移成功后用环境变量覆盖 BAFANG_CORE_IMAGE / BAFANG_CORE_TAG 执行 `up -d --no-build -t 40 core`
+#      （Compose 会再跑一次 migrate，已执行过的迁移不会重跑；旧 core 有 40 秒排空在途请求）
+#   5. 在容器内轮询 /v1/health，按墙钟截止时间判断：部署检查默认 180 秒，单次请求最多 5 秒且不超过剩余时间。
+#      截止时间从 up 返回后起算，旧 core 排空的时间不占用检查预算
 #   6. 通过：把新镜像名、标签写回 .env.production，之后手动执行 Compose 也用新版本
-#      core 创建/启动失败或健康检查不过：打印日志，停止 core，用 <镜像名>:rollback 重建容器并复检（默认 120 秒），
+#      core 创建/启动失败或健康检查不过：打印日志，停止 core（同样 40 秒宽限），用 <镜像名>:rollback 重建容器并复检（默认 120 秒），
 #      通过后把 .env.production 写成 <镜像名>:rollback，然后以非零退出
 #   成功部署和成功回滚后都核对：.env.production 展开出的镜像 ID 必须等于运行中 core 的镜像 ID
 # 自动回滚只换镜像、不恢复数据库：新版本的迁移已经执行，旧版本与新结构不兼容时按部署文档手动恢复备份。
@@ -30,6 +31,11 @@ set -eu
 
 # 等待 postgres 健康的上限（秒）
 DB_READY_TIMEOUT=120
+
+# 停止旧 core 的宽限（秒），与 compose.prod.yaml 的 stop_grace_period 一致：core 排空最多 30 秒，
+# 超过宽限 Docker 才 SIGKILL。CD 不同步 compose 文件，VPS 上的副本可能没有 stop_grace_period，
+# 所以每次停止或替换 core 都显式带这个超时，不依赖 Compose 默认的 10 秒。
+CORE_STOP_TIMEOUT=40
 
 log() { printf '[deploy] %s\n' "$*"; }
 
@@ -56,8 +62,9 @@ show_logs() {
 
 # 切换到 <镜像名>:<标签>：Compose 发现镜像变化会删除旧容器、用该镜像新建 core 容器；
 # core depends_on 一次性迁移服务 migrate，up 会先用同一镜像跑完迁移。
+# 替换运行中的旧容器时同样按 CORE_STOP_TIMEOUT 等它排空。
 switch_to() {
-  BAFANG_CORE_IMAGE=$1 BAFANG_CORE_TAG=$2 dc up -d --no-build core
+  BAFANG_CORE_IMAGE=$1 BAFANG_CORE_TAG=$2 dc up -d --no-build -t "$CORE_STOP_TIMEOUT" core
 }
 
 # wait_healthy <秒数>：从调用时起算墙钟截止时间。单次请求（含 docker compose exec 开销，由 timeout 限住）
@@ -197,7 +204,7 @@ main() {
   fi
   show_logs
   record "$image:$tag" failed
-  dc stop core || true
+  dc stop -t "$CORE_STOP_TIMEOUT" core || true
 
   [ -n "$prev_id" ] || fail "没有可回滚的旧版本，core 已停止，请手动处理"
 
