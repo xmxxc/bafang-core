@@ -48,7 +48,14 @@ fail() {
 
 # 部署在已有反向代理之后时，.env.production 里设了非空的 CORE_HOST_BIND；此时要叠加
 # compose.prod.reverse-proxy.yaml 让 core 发布宿主端口，否则反代连不上 core。
-core_bind() { sed -n 's/^CORE_HOST_BIND=//p' .env.production | tail -n 1; }
+# 不自己解析 .env.production（空格、引号会被误判），而是让 Compose 解释 x-bafang 探针，
+# 与手动 `dc` 的入口形态判定保持一致。
+core_bind() {
+  docker compose -f compose.prod.yaml --env-file .env.production config --format json \
+    | grep -o '"core-host-bind"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | head -n1 \
+    | sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/'
+}
 
 dc() {
   if [ -n "$(core_bind)" ]; then

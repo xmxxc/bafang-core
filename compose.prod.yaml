@@ -3,11 +3,14 @@
 #   cp .env.production.example .env.production   # 填入真实值，不提交
 #   docker compose -f compose.prod.yaml --env-file .env.production up -d
 #
-# 默认形态（.env.production 里 COMPOSE_PROFILES=caddy）：只有 Caddy 对外暴露 80/443，
-# core 与 PostgreSQL 只在 Compose 内部网络可达。
-# 部署在已有反向代理（nginx/宝塔）之后时：把 COMPOSE_PROFILES 设为空（不启动 Caddy），并叠加
-# compose.prod.reverse-proxy.yaml，用 CORE_HOST_BIND 把 core 端口只绑到 127.0.0.1（见 docs/deployment.md）。
+# 默认形态：只有 Caddy 对外暴露 80/443，core 与 PostgreSQL 只在 Compose 内部网络可达。
+# 部署在已有反向代理（nginx/宝塔）之后时：叠加 compose.prod.reverse-proxy.yaml，用 CORE_HOST_BIND
+# 把 core 端口只绑到 127.0.0.1，并把 Caddy 关掉（见 docs/deployment.md）。
 name: bafang-core
+
+# remote-update.sh 用这里让 Compose 自己解释 CORE_HOST_BIND（判定入口形态），不另解析 .env.production。
+x-bafang:
+  core-host-bind: ${CORE_HOST_BIND:-}
 
 services:
   postgres:
@@ -91,12 +94,11 @@ services:
     expose:
       - '3000'
 
-  # Caddy 放进 profile：默认形态（COMPOSE_PROFILES=caddy，见 .env.production.example）一条命令
-  # 启动全部；部署在已有反向代理之后时把 COMPOSE_PROFILES 设为空，不启动它。
+  # Caddy 默认启动（不放 profile）：旧配置不加任何新变量也保持一条命令启动全部。
+  # 部署在已有反向代理之后时，由 compose.prod.reverse-proxy.yaml 给它加一个永不激活的 profile 关掉它。
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
-    profiles: ['caddy']
     depends_on:
       - core
     environment:
