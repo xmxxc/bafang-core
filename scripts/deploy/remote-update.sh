@@ -5,8 +5,12 @@
 #
 # 通常由 scripts/deploy/deploy.sh 经 `ssh … sh -s -- … < remote-update.sh` 执行，脚本本身不需要放到 VPS 上。
 # 前提：部署目录里有 compose.prod.yaml 与 .env.production，镜像 <镜像名>:<标签> 已经 docker load 进来。
+# 部署在已有反向代理之后时，目录里还要有 compose.prod.reverse-proxy.yaml，且 .env.production 设了非空的
+# CORE_HOST_BIND；本脚本检测到 CORE_HOST_BIND 后会自动叠加该覆盖文件。
 #
 # 流程：
+#   0. 在改动任何现场前，用 Compose 一次性解析并固定入口形态（是否叠加 compose.prod.reverse-proxy.yaml）
+#      与服务清单（是否含 migrate 服务）；解析失败立即终止。之后各阶段都用这份固定值，不再重复探测。
 #   1. 记录当前 core 容器实际运行的镜像 ID（不可变），打上本地标签 <镜像名>:rollback 作为回滚目标。
 #      不用标签字符串：同一标签重新 docker load 后会指向新镜像，旧容器却还在用原来的镜像
 #   2. 确保 postgres 运行并健康，以超级用户 postgres 备份业务库到 backups/pre-deploy-<时间>-<标签>.dump；
@@ -44,7 +48,39 @@ fail() {
   exit 1
 }
 
-dc() { docker compose -f compose.prod.yaml --env-file .env.production "$@" </dev/null; }
+# 全局固定值：main 一开始（任何现场变更前）由 resolve_entry 解析一次，贯穿整次部署；
+# 之后 dc()/wait_healthy() 只执行、不再重复探测，避免切换后某次探测失败绕过回滚或误报。
+compose_files=
+has_migrate=
+
+# 在首次改动现场前解析并固定：入口形态（compose 文件列表）与服务清单（是否含 migrate 服务）。
+# 判定失败（Compose config 退出非零、探针字段缺失、服务清单读取失败）返回非零，由 main 直接终止；
+# 空 CORE_HOST_BIND 是「有效空绑定」= 默认形态（不叠加覆盖文件、core 不映射端口），不算失败。
+resolve_entry() {
+  cfg=$(docker compose -f compose.prod.yaml --env-file .env.production config --format json) || return 1
+  printf '%s\n' "$cfg" | grep -q '"core-host-bind"[[:space:]]*:[[:space:]]*"[^"]*"' || return 1
+  bind=$(printf '%s\n' "$cfg" | grep -o '"core-host-bind"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 |
+    sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/')
+  if [ -n "$bind" ]; then
+    compose_files='-f compose.prod.yaml -f compose.prod.reverse-proxy.yaml'
+  else
+    compose_files='-f compose.prod.yaml'
+  fi
+  # 服务清单单独解析一次，退出非零即失败（不能由管道吞掉）；「没有 migrate」是有效的历史形态。
+  # shellcheck disable=SC2086 # $compose_files 是待展开的 -f 参数
+  services=$(docker compose $compose_files --env-file .env.production config --services) || return 1
+  if printf '%s\n' "$services" | grep -qx migrate; then
+    has_migrate=1
+  else
+    has_migrate=
+  fi
+}
+
+# dc：只执行，不再做任何探测（入口形态与服务清单已由 resolve_entry 固定）。
+dc() {
+  # shellcheck disable=SC2086 # $compose_files 是待展开的 -f 参数
+  docker compose $compose_files --env-file .env.production "$@" </dev/null;
+}
 
 now() { date +%s; }
 
@@ -55,9 +91,11 @@ record() { printf '%s %s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$1" "$2" >>depl
 
 # 打印失败排查用的日志：core，以及存在时的一次性迁移服务 migrate。
 show_logs() {
-  services=$(dc config --services 2>/dev/null | grep -Ex 'migrate|core' || true)
-  # shellcheck disable=SC2086 # 服务名逐个作为参数
-  dc logs --no-color --tail 80 ${services:-core} || true
+  if [ -n "$has_migrate" ]; then
+    dc logs --no-color --tail 80 migrate core || true
+  else
+    dc logs --no-color --tail 80 core || true
+  fi
 }
 
 # 切换到 <镜像名>:<标签>：Compose 发现镜像变化会删除旧容器、用该镜像新建 core 容器；
@@ -69,12 +107,14 @@ switch_to() {
 
 # wait_healthy <秒数>：从调用时起算墙钟截止时间。单次请求（含 docker compose exec 开销，由 timeout 限住）
 # 和间隔都不超过剩余时间，总耗时不超过上限（另加进程收尾的少许误差）。
+# 这里不能经 dc()（timeout 只能执行外部命令，不能执行 shell 函数），所以用已固定的 compose_files 就地展开。
 wait_healthy() {
   deadline=$(($(now) + $1))
   while :; do
     left=$((deadline - $(now)))
     [ "$left" -gt 0 ] || return 1
-    if timeout "$(min 10 "$left")" docker compose -f compose.prod.yaml --env-file .env.production \
+    # shellcheck disable=SC2086 # $compose_files 是待展开的 -f 参数
+    if timeout "$(min 10 "$left")" docker compose $compose_files --env-file .env.production \
       exec -T core wget -q -T "$(min 5 "$left")" -O /dev/null "http://127.0.0.1:3000/v1/health" \
       </dev/null >/dev/null 2>&1; then
       return 0
@@ -156,6 +196,9 @@ main() {
   [ -f compose.prod.yaml ] || fail "$deploy_path 下缺少 compose.prod.yaml"
   [ -f .env.production ] || fail "$deploy_path 下缺少 .env.production（见 docs/deployment.md 的首次部署）"
 
+  # 在改动任何现场前，一次性解析并固定入口形态与服务清单；失败立即终止，不碰容器/标签/环境文件。
+  resolve_entry || fail "无法解析 Compose 配置（入口形态或服务清单判定失败），拒绝部署，未改动任何容器"
+
   docker image inspect "$image:$tag" </dev/null >/dev/null 2>&1 || fail "VPS 上没有镜像 $image:$tag"
 
   # 回滚目标：当前 core 容器（含已停止的）实际运行的镜像 ID。
@@ -176,7 +219,7 @@ main() {
   backup_database
 
   # 先单独迁移：失败时旧 core 不受影响，继续服务。
-  if dc config --services | grep -qx migrate; then
+  if [ -n "$has_migrate" ]; then
     log "用 $image:$tag 执行数据库迁移（旧版本 core 继续服务）"
     migrate_status=0
     BAFANG_CORE_IMAGE=$image BAFANG_CORE_TAG=$tag dc run --rm -T migrate || migrate_status=$?

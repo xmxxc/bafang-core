@@ -3,8 +3,14 @@
 #   cp .env.production.example .env.production   # 填入真实值，不提交
 #   docker compose -f compose.prod.yaml --env-file .env.production up -d
 #
-# 只有 Caddy 对外暴露端口；core 与 PostgreSQL 只在 Compose 内部网络可达。
+# 默认形态：只有 Caddy 对外暴露 80/443，core 与 PostgreSQL 只在 Compose 内部网络可达。
+# 部署在已有反向代理（nginx/宝塔）之后时：叠加 compose.prod.reverse-proxy.yaml，用 CORE_HOST_BIND
+# 把 core 端口只绑到 127.0.0.1，并把 Caddy 关掉（见 docs/deployment.md）。
 name: bafang-core
+
+# remote-update.sh 用这里让 Compose 自己解释 CORE_HOST_BIND（判定入口形态），不另解析 .env.production。
+x-bafang:
+  core-host-bind: ${CORE_HOST_BIND:-}
 
 services:
   postgres:
@@ -88,14 +94,18 @@ services:
     expose:
       - '3000'
 
+  # Caddy 默认启动（不放 profile）：旧配置不加任何新变量也保持一条命令启动全部。
+  # 部署在已有反向代理之后时，由 compose.prod.reverse-proxy.yaml 给它加一个永不激活的 profile 关掉它。
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
     depends_on:
       - core
     environment:
-      CORE_DOMAIN: ${CORE_DOMAIN:?CORE_DOMAIN 必填}
-      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL 必填}
+      # 用空默认（:-）而不是必填（:?）：反代形态不启动 Caddy，dc config 不应因缺这两项报错；
+      # 默认（caddy）形态必须填好，否则 Caddy 拿不到域名与邮箱、无法签发证书。
+      CORE_DOMAIN: ${CORE_DOMAIN:-}
+      ACME_EMAIL: ${ACME_EMAIL:-}
     ports:
       - '${HTTP_PORT:-80}:80'
       - '${HTTPS_PORT:-443}:443'

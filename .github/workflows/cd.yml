@@ -64,11 +64,13 @@ jobs:
 
     steps:
       - name: Check trigger and secrets
+        id: check
         env:
           EVENT: ${{ github.event_name }}
           REF: ${{ github.ref }}
+          USER_VAR: ${{ vars.DEPLOY_SSH_USER }}
+          USER_SECRET: ${{ secrets.DEPLOY_SSH_USER }}
           HAS_HOST: ${{ secrets.DEPLOY_SSH_HOST != '' }}
-          HAS_USER: ${{ secrets.DEPLOY_SSH_USER != '' }}
           HAS_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
           HAS_KNOWN_HOSTS: ${{ secrets.DEPLOY_SSH_KNOWN_HOSTS != '' }}
         run: |
@@ -76,9 +78,19 @@ jobs:
             echo "::error::只能从 main 手动部署，当前是 $REF"
             exit 1
           fi
+          # DEPLOY_SSH_USER 现为仓库变量（vars.DEPLOY_SSH_USER），不再是 secret：作为 secret 时
+          # GitHub 会把日志里所有 "deploy" 字样打码。兼容旧配置：先取变量、回退到旧 secret；
+          # 迁移完成后再删除旧 secret。
+          if [ -n "$USER_VAR" ]; then
+            user="$USER_VAR"
+          elif [ -n "$USER_SECRET" ]; then
+            user="$USER_SECRET"
+          else
+            user=""
+          fi
           missing=""
           [ "$HAS_HOST" = true ] || missing="$missing DEPLOY_SSH_HOST"
-          [ "$HAS_USER" = true ] || missing="$missing DEPLOY_SSH_USER"
+          [ -n "$user" ] || missing="$missing DEPLOY_SSH_USER"
           [ "$HAS_KEY" = true ] || missing="$missing DEPLOY_SSH_KEY"
           [ "$HAS_KNOWN_HOSTS" = true ] || missing="$missing DEPLOY_SSH_KNOWN_HOSTS"
           if [ -n "$missing" ]; then
@@ -90,6 +102,7 @@ jobs:
             } >>"$GITHUB_STEP_SUMMARY"
             exit 1
           fi
+          echo "user=$user" >>"$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v4
         with:
@@ -115,7 +128,7 @@ jobs:
       - name: Deploy
         env:
           DEPLOY_SSH_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
-          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_USER: ${{ steps.check.outputs.user }}
           DEPLOY_SSH_PORT: ${{ secrets.DEPLOY_SSH_PORT }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
           DEPLOY_SSH_KEY_FILE: ${{ runner.temp }}/ssh/key

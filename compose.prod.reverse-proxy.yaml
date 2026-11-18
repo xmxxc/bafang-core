@@ -1,0 +1,13 @@
+# 部署在已有反向代理（nginx/宝塔）之后时叠加到 compose.prod.yaml（见 docs/deployment.md）。
+#
+#   docker compose -f compose.prod.yaml -f compose.prod.reverse-proxy.yaml --env-file .env.production up -d
+#
+# 叠加时必须设置 CORE_HOST_BIND（core 端口绑定的宿主地址，务必只绑 127.0.0.1，别对公网暴露），
+# 并借此把 Caddy 关掉（放进永不激活的 disabled profile）。留空不映射：不叠加本文件就是默认形态，
+# core 不发布宿主端口；若叠加了却没设 CORE_HOST_BIND，Compose 会在这里报错，而不是静默映射到别的端口。
+services:
+  caddy:
+    profiles: ['disabled']
+  core:
+    ports:
+      - '${CORE_HOST_BIND:?设置 CORE_HOST_BIND 才能叠加 compose.prod.reverse-proxy.yaml}:3000'
