@@ -1,0 +1,11 @@
+# 部署在已有反向代理（nginx/宝塔）之后时叠加到 compose.prod.yaml（见 docs/deployment.md）。
+#
+#   docker compose -f compose.prod.yaml -f compose.prod.reverse-proxy.yaml --env-file .env.production up -d
+#
+# 配合 .env.production：COMPOSE_PROFILES=（空，不启动 Caddy）、CORE_HOST_BIND=127.0.0.1:3100。
+# core 只把 3000 端口绑到 CORE_HOST_BIND 指定的宿主地址（默认 127.0.0.1:3100），不对公网暴露；
+# 绑定地址务必填 127.0.0.1，反代（nginx/宝塔）只允许本机回环连到这个端口。
+services:
+  core:
+    ports:
+      - '${CORE_HOST_BIND:-127.0.0.1:3100}:3000'

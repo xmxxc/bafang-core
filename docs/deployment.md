@@ -2,12 +2,17 @@
 
 core 在国内 VPS 上用 Docker Compose 运行，服务定义在 `compose.prod.yaml`：
 
-| 服务       | 镜像                             | 说明                                                                                     |
-| ---------- | -------------------------------- | ---------------------------------------------------------------------------------------- |
-| `postgres` | `postgres:16-alpine`             | 数据卷 `pgdata`；只在 Compose 内部网络可达，不映射端口；首次初始化建出迁移角色与运行角色 |
-| `migrate`  | `bafang-core:${BAFANG_CORE_TAG}` | 一次性任务：与 core 同一镜像，用迁移角色执行迁移后退出；业务服务中只有它拿迁移凭据       |
-| `core`     | `bafang-core:${BAFANG_CORE_TAG}` | 本仓库 `Dockerfile` 构建；`migrate` 成功退出后才启动，用运行角色监听 3000；不映射端口    |
-| `caddy`    | `caddy:2-alpine`                 | 唯一对外的服务（80/443），为 `CORE_DOMAIN` 自动签发、续期证书并反代到 `core:3000`        |
+| 服务       | 镜像                             | 说明                                                                                                                                                   |
+| ---------- | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `postgres` | `postgres:16-alpine`             | 数据卷 `pgdata`；只在 Compose 内部网络可达，不映射端口；首次初始化建出迁移角色与运行角色                                                               |
+| `migrate`  | `bafang-core:${BAFANG_CORE_TAG}` | 一次性任务：与 core 同一镜像，用迁移角色执行迁移后退出；业务服务中只有它拿迁移凭据                                                                     |
+| `core`     | `bafang-core:${BAFANG_CORE_TAG}` | 本仓库 `Dockerfile` 构建；`migrate` 成功退出后才启动，用运行角色监听 3000；默认不映射端口，部署在已有反代之后时用 `CORE_HOST_BIND` 映射到宿主          |
+| `caddy`    | `caddy:2-alpine`                 | 默认形态唯一对外的服务（80/443），为 `CORE_DOMAIN` 自动签发、续期证书并反代到 `core:3000`；放在 profile `caddy` 里，由 `COMPOSE_PROFILES` 决定是否启动 |
+
+两种入口形态：
+
+- **默认（Caddy 终止 TLS）**：`.env.production` 里 `COMPOSE_PROFILES=caddy`，一条命令启动全部；只有 Caddy 暴露 80/443，core 不映射端口。
+- **由已有反向代理终止 TLS**：宿主上已有 nginx/宝塔占用 80/443 时，把 `COMPOSE_PROFILES` 设为空（不启动 Caddy），叠加 `compose.prod.reverse-proxy.yaml`，用 `CORE_HOST_BIND` 把 core 端口只绑到 `127.0.0.1`，由反代转给它。详见"由已有 nginx/宝塔 终止 TLS"。
 
 ## 数据库角色
 
@@ -29,23 +34,25 @@ core 不使用 PostgreSQL 超级用户。postgres 首次初始化（空数据卷
 
 全部配置来自环境变量。把 `.env.production.example` 复制为 `.env.production`，填入真实值（该文件已被 gitignore，不要提交，也不要放进镜像），每次执行 Compose 时用 `--env-file .env.production` 传入。Compose 只把 `compose.prod.yaml` 里 `core.environment` 列出的变量传给 core；空值等同未配置。
 
-| 变量                                                                                              | 必填     | 说明                                                                                                                              |
-| ------------------------------------------------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `CORE_DOMAIN`                                                                                     | 是       | core 对外域名，例如 `core.example.com`。DNS 指向本机，80/443 对公网开放，国内 VPS 需完成备案                                      |
-| `ACME_EMAIL`                                                                                      | 是       | 证书账号邮箱，用于到期提醒                                                                                                        |
-| `HTTP_PORT` / `HTTPS_PORT`                                                                        | 否       | 对外端口，默认 80 / 443。自动签发证书要求外部能从 80/443 访问到 Caddy                                                             |
-| `BAFANG_CORE_IMAGE` / `BAFANG_CORE_TAG`                                                           | 否       | core 镜像名与标签，默认 `bafang-core:latest`                                                                                      |
-| `POSTGRES_PASSWORD`                                                                               | 是       | 超级用户 `postgres` 的密码，只用于初始化与运维                                                                                    |
-| `PGDATABASE`                                                                                      | 否       | 业务库名，默认 `bafang`                                                                                                           |
-| `PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`                                                     | 密码必填 | 迁移角色（库 owner），默认 `bafang_owner`                                                                                         |
-| `PGUSER` / `PGPASSWORD`                                                                           | 密码必填 | 运行角色，默认 `bafang_app`                                                                                                       |
-| `PGSCHEMA`                                                                                        | 否       | 默认 `public`；初始化脚本只为 `public` 设置运行角色权限                                                                           |
-| `SETTLEMENT_ROUNDS`                                                                               | 否       | 交易确认任务的上海时间轮次，默认 `21:30,22:30,23:30`                                                                              |
-| `RESEND_API_KEY` / `RESEND_FROM`                                                                  | 是       | 邮箱验证码发信。两项缺一，core 启动即报错退出；`MAIL_TRANSPORT=dev-log` 只把验证码打到日志，生产不要用                            |
-| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_CALLBACK_URL` / `GITHUB_LOGIN_REDIRECT_URL` | 否       | GitHub 网页登录，四项都非空才启用；回调地址用 `https://<CORE_DOMAIN>/v1/auth/github/callback`，并在 GitHub OAuth App 登记同一地址 |
-| `WECHAT_APP_ID` / `WECHAT_APP_SECRET`                                                             | 否       | 微信小程序登录与扫码登录，两项都非空才启用                                                                                        |
-| `WECHAT_QR_TTL_SECONDS`                                                                           | 否       | 扫码登录票据有效秒数（60–600），默认 300                                                                                          |
-| `BIND_CODE_SECRET`                                                                                | 生产必填 | 绑定码 HMAC 密钥，用 `openssl rand -base64 48` 生成。留空时绑定码能力禁用                                                         |
+| 变量                                                                                              | 必填         | 说明                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `COMPOSE_PROFILES`                                                                                | 否           | 默认 `caddy`，启动 Caddy（自动签发证书，core 不映射端口）；部署在已有反代之后时设为空，不启动 Caddy                                                                                    |
+| `CORE_HOST_BIND`                                                                                  | 否           | 部署在已有反代之后时，core 端口绑定的宿主地址，例如 `127.0.0.1:3100`。务必只绑 `127.0.0.1`，不对公网暴露；叠加 `compose.prod.reverse-proxy.yaml` 时生效，留空则用默认 `127.0.0.1:3100` |
+| `CORE_DOMAIN`                                                                                     | 默认形态必填 | core 对外域名，例如 `core.example.com`。DNS 指向本机，80/443 对公网开放，国内 VPS 需完成备案；已有反代形态可留空                                                                       |
+| `ACME_EMAIL`                                                                                      | 默认形态必填 | 证书账号邮箱，用于到期提醒；已有反代形态可留空                                                                                                                                         |
+| `HTTP_PORT` / `HTTPS_PORT`                                                                        | 否           | 对外端口，默认 80 / 443。自动签发证书要求外部能从 80/443 访问到 Caddy                                                                                                                  |
+| `BAFANG_CORE_IMAGE` / `BAFANG_CORE_TAG`                                                           | 否           | core 镜像名与标签，默认 `bafang-core:latest`                                                                                                                                           |
+| `POSTGRES_PASSWORD`                                                                               | 是           | 超级用户 `postgres` 的密码，只用于初始化与运维                                                                                                                                         |
+| `PGDATABASE`                                                                                      | 否           | 业务库名，默认 `bafang`                                                                                                                                                                |
+| `PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`                                                     | 密码必填     | 迁移角色（库 owner），默认 `bafang_owner`                                                                                                                                              |
+| `PGUSER` / `PGPASSWORD`                                                                           | 密码必填     | 运行角色，默认 `bafang_app`                                                                                                                                                            |
+| `PGSCHEMA`                                                                                        | 否           | 默认 `public`；初始化脚本只为 `public` 设置运行角色权限                                                                                                                                |
+| `SETTLEMENT_ROUNDS`                                                                               | 否           | 交易确认任务的上海时间轮次，默认 `21:30,22:30,23:30`                                                                                                                                   |
+| `RESEND_API_KEY` / `RESEND_FROM`                                                                  | 是           | 邮箱验证码发信。两项缺一，core 启动即报错退出；`MAIL_TRANSPORT=dev-log` 只把验证码打到日志，生产不要用                                                                                 |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` / `GITHUB_CALLBACK_URL` / `GITHUB_LOGIN_REDIRECT_URL` | 否           | GitHub 网页登录，四项都非空才启用；回调地址用 `https://<CORE_DOMAIN>/v1/auth/github/callback`，并在 GitHub OAuth App 登记同一地址                                                      |
+| `WECHAT_APP_ID` / `WECHAT_APP_SECRET`                                                             | 否           | 微信小程序登录与扫码登录，两项都非空才启用                                                                                                                                             |
+| `WECHAT_QR_TTL_SECONDS`                                                                           | 否           | 扫码登录票据有效秒数（60–600），默认 300                                                                                                                                               |
+| `BIND_CODE_SECRET`                                                                                | 生产必填     | 绑定码 HMAC 密钥，用 `openssl rand -base64 48` 生成。留空时绑定码能力禁用                                                                                                              |
 
 数据库相关的值只在 postgres **首次初始化**时生效；之后修改 `.env.production` 不会改动库里已有的角色和密码，改密码按下文"数据库密码轮换"操作。值里含 `$` 时用单引号包起来（`PGPASSWORD='a$b'`），否则会被 Compose 当作变量展开。各登录方式的行为见 README。
 
@@ -57,13 +64,19 @@ core 不使用 PostgreSQL 超级用户。postgres 首次初始化（空数据卷
 alias dc='docker compose -f compose.prod.yaml --env-file .env.production'
 ```
 
+部署在已有反向代理之后时，把 `-f compose.prod.reverse-proxy.yaml` 加进去（见"由已有 nginx/宝塔 终止 TLS"）：
+
+```bash
+alias dc='docker compose -f compose.prod.yaml -f compose.prod.reverse-proxy.yaml --env-file .env.production'
+```
+
 1. **准备主机。** 安装 Docker Engine 与 Compose 插件；域名解析到本机；防火墙放行 80/tcp、443/tcp、443/udp。
 
-2. **放置部署文件。** 部署目录只需要 `compose.prod.yaml`、`docker/caddy/Caddyfile`、`docker/postgres/initdb/` 和 `.env.production.example`，保持相对路径。从构建机用 `scp` / `rsync` 复制即可，VPS 不需要访问 GitHub：
+2. **放置部署文件。** 部署目录只需要 `compose.prod.yaml`、`docker/caddy/Caddyfile`、`docker/postgres/initdb/`、`.env.production.example` 以及（部署在已有反代之后时）`compose.prod.reverse-proxy.yaml`，保持相对路径。从构建机用 `scp` / `rsync` 复制即可，VPS 不需要访问 GitHub：
 
    ```bash
-   rsync -R compose.prod.yaml docker/caddy/Caddyfile docker/postgres/initdb/10-bafang-roles.sh \
-     .env.production.example vps:/srv/bafang-core/
+   rsync -R compose.prod.yaml compose.prod.reverse-proxy.yaml docker/caddy/Caddyfile \
+     docker/postgres/initdb/10-bafang-roles.sh .env.production.example vps:/srv/bafang-core/
    ```
 
 3. **准备镜像。** 在构建机构建 core 镜像，经 SSH 导入 VPS（构建机访问 npm 慢时加 `--build-arg NPM_REGISTRY=https://registry.npmmirror.com`）：
@@ -84,7 +97,8 @@ alias dc='docker compose -f compose.prod.yaml --env-file .env.production'
    # 编辑 .env.production：CORE_DOMAIN、ACME_EMAIL、POSTGRES_PASSWORD、PG_MIGRATION_PASSWORD、
    # PGPASSWORD（三个数据库密码各不相同，例如 openssl rand -hex 24）、RESEND_*、BIND_CODE_SECRET，
    # 以及要启用的登录方式；BAFANG_CORE_TAG 设为上一步导入的标签
-   dc config --quiet   # 检查配置能否展开，必填项缺失会在这里报错
+   dc config --quiet   # 检查配置能否展开，数据库密码等必填项缺失会在这里报错；
+                        # CORE_DOMAIN/ACME_EMAIL 不在 config 阶段强制，默认形态务必确认已填好（否则 Caddy 起不来）
    ```
 
 5. **启动。** 用 `--no-build`，标签不存在时直接报错，而不是在 VPS 上构建：
@@ -114,6 +128,57 @@ alias dc='docker compose -f compose.prod.yaml --env-file .env.production'
    ```
 
    Caddy 首次签发证书需要几十秒；失败原因看 `dc logs caddy`（常见是 DNS 未生效、80/443 不可达、域名未备案被拦截）。
+
+## 由已有 nginx/宝塔 终止 TLS
+
+宿主上已有 nginx（或宝塔面板）占用 80/443、托管其他站点时，用它终止 TLS 并反代到 core，Caddy 不启动。core 的端口**只绑 `127.0.0.1`**，不对公网暴露；反代也只允许本机回环连它。
+
+1. **配置。** `.env.production` 里把 `COMPOSE_PROFILES` 设为空（不启动 Caddy），并设置 `CORE_HOST_BIND`：
+
+   ```bash
+   COMPOSE_PROFILES=
+   CORE_HOST_BIND=127.0.0.1:3100
+   ```
+
+2. **启动。** 用叠加了覆盖文件的 `dc` 别名（见"首次部署"），其余步骤与默认形态相同：
+
+   ```bash
+   dc config --quiet
+   dc up -d --no-build
+   curl -fsS http://127.0.0.1:3100/v1/health   # core 只在回环可达
+   ```
+
+3. **反代配置。** nginx 站点（或宝塔"反向代理"）把 `core.example.com` 转给 `http://127.0.0.1:3100`：
+
+   ```nginx
+   server {
+       listen 443 ssl;
+       server_name core.example.com;
+       ssl_certificate     /path/to/fullchain.pem;
+       ssl_certificate_key /path/to/privkey.pem;
+
+       location / {
+           proxy_pass http://127.0.0.1:3100;
+           proxy_http_version 1.1;
+           proxy_set_header Host $host;
+           # 关键：追加真实客户端 IP 到 X-Forwarded-For 末尾，不要透传客户端自己填的 X-Forwarded-For。
+           proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+       }
+   }
+   ```
+
+   `$proxy_add_x_forwarded_for` 展开成 `$http_x_forwarded_for, $remote_addr`：它把客户端送来的原值保留在左侧，把真实客户端地址 `$remote_addr` 追加到**最右**。core 的限流取 `X-Forwarded-For` **最右一项**当客户端地址（`src/rate-limit.ts`），因此客户端伪造的左侧各项不生效，限流按真实 IP 计。要更简单可以直接 `proxy_set_header X-Forwarded-For $remote_addr;`（整段覆盖，同样安全）。**不要**写 `proxy_set_header X-Forwarded-For $http_x_forwarded_for;`：那等于原样透传客户端的值，攻击者每次换一个最右值就能绕开限流。
+
+4. **验证限流确实按真实 IP 生效。** 行情匿名接口（`/v1/funds/*`、`/v1/market/*`）按客户端 IP 每分钟限流 60 次，响应头带 `RateLimit-Remaining`。连续请求同一个接口、每次伪造不同的 `X-Forwarded-For`，看 `RateLimit-Remaining` 是否单调递减：递减说明反代把真实客户端 IP 追加到了最右、限流按真实 IP 累计；不变说明反代在透传伪造值、可被绕过。
+
+   ```bash
+   for i in 1 2 3 4 5; do
+     curl -s -D - -o /dev/null -H "X-Forwarded-For: 1.2.3.$i" \
+       'https://core.example.com/v1/funds/000001' | grep -i '^ratelimit-remaining'
+   done
+   ```
+
+   正确时应输出逐次递减（`59`、`58`、`57`…；同一分钟窗口内其他真实请求也会占用额度，只要总体递减即可）。若每次都一样（例如始终 `59`），说明反代没有覆盖/追加真实 IP，要改成 `$proxy_add_x_forwarded_for`（或 `$remote_addr`）。要进一步确认硬限流，把循环加到 61 次，最后一次应返回 `429`（`rate_limited`）。行情接口首次访问会触发上游、响应较慢，用有效的基金代码并多等几秒即可。
 
 ## 健康检查
 
@@ -151,7 +216,9 @@ Docker 在停止宽限到期后发 SIGKILL，默认只有 10 秒，会在排空�
 
 替换 core 时旧容器按 40 秒宽限排空在途请求（见"停止与排空"），慢请求在途时 `up` 会多等一会儿，属正常。
 
-**部署文件要手工同步。** 无论手动升级还是 CD，传到 VPS 的都只有镜像（CD 另外经 stdin 执行 `remote-update.sh`）。`compose.prod.yaml`、`docker/caddy/Caddyfile`、`docker/postgres/initdb/` 和 `.env.production.example` 不会自动更新：仓库改了这些文件，要在升级前人工同步到 VPS。VPS 上的副本有本地改动时（例如为接到已有反向代理之后给 core 加的端口映射），不要整份覆盖：先 `diff` 仓库版本与 VPS 副本，把仓库的改动合进去，保留本地改动，再 `dc config --quiet` 检查。做法与 CD 的要求见"持续部署"。
+**部署文件要手工同步。** 无论手动升级还是 CD，传到 VPS 的都只有镜像（CD 另外经 stdin 执行 `remote-update.sh`）。`compose.prod.yaml`、`compose.prod.reverse-proxy.yaml`、`docker/caddy/Caddyfile`、`docker/postgres/initdb/` 和 `.env.production.example` 不会自动更新：仓库改了这些文件，要在升级前人工同步到 VPS。VPS 上的副本有本地改动时不要整份覆盖：先 `diff` 仓库版本与 VPS 副本，把仓库的改动合进去，保留本地改动，再 `dc config --quiet` 检查。做法与 CD 的要求见"持续部署"。
+
+本票引入"由已有 nginx/宝塔 终止 TLS"后，早先为接到已有反代而在 VPS 上手工给 core 加的 `ports: 127.0.0.1:3100:3000` 本地改动可以去掉：把仓库版 `compose.prod.yaml` 同步过去（不再带本地端口行），在 `.env.production` 里设 `COMPOSE_PROFILES=`（空）与 `CORE_HOST_BIND=127.0.0.1:3100`，并叠加 `compose.prod.reverse-proxy.yaml` 启动即可。
 
 **回滚：** 新版本没有带迁移（`dc logs migrate` 与 `__drizzle_migrations` 条数可确认）时，把 `BAFANG_CORE_TAG` 改回旧标签再 `dc up -d --no-build core` 即可。新版本执行过迁移时，迁移只向前、旧版本不会撤销它们，必须按下节"恢复"流程把升级前的备份恢复到新库再切换，期间 core 保持停止，最后用旧标签创建容器。
 
@@ -248,6 +315,7 @@ curl -fsS https://<CORE_DOMAIN>/v1/health
 
 ```bash
 cat > /tmp/bafang-local.env <<'EOF'
+COMPOSE_PROFILES=caddy
 CORE_DOMAIN=localhost
 ACME_EMAIL=ops@example.invalid
 BAFANG_CORE_TAG=local
@@ -264,7 +332,7 @@ curl -k https://localhost:3166/v1/health
 $L down -v   # 用完删除容器和数据卷
 ```
 
-本机验证证明镜像、自动迁移、反代与健康检查可用；公网证书签发只能在真实域名上验证。
+本机验证证明镜像、自动迁移、反代与健康检查可用；公网证书签发只能在真实域名上验证。要本机验证"由已有反代终止 TLS"形态，把上面的 `COMPOSE_PROFILES=caddy` 改成 `COMPOSE_PROFILES=`，并在 `-f` 列表里加上 `-f compose.prod.reverse-proxy.yaml`、设置 `CORE_HOST_BIND=127.0.0.1:3100`，然后 `curl http://127.0.0.1:3100/v1/health`。
 
 ## 持续部署
 
@@ -287,23 +355,26 @@ $L down -v   # 用完删除容器和数据卷
 
 自动回滚（迁移成功、新 core 不健康时）只换回旧镜像，**不恢复数据库**：新版本的迁移已经执行过，旧版本要在新结构上运行。新版本的迁移与旧版本不兼容时，用这次的部署前备份按"数据库备份与恢复"的**恢复**流程处理：core 全程停止，恢复到新的空库、核验后改名切换，最后用旧标签 `up -d --no-build core`。
 
-CD 只更新镜像，不同步部署目录里的 `compose.prod.yaml`、`docker/postgres/initdb/`、`docker/caddy/Caddyfile` 与 `.env.production`；VPS 上的副本有本地改动时，同步要保留这些改动（见"升级"）。升级到改动了这些文件或新增配置的版本（例如数据库角色拆分新增的 `POSTGRES_PASSWORD`、`PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`）之前，先在 VPS 上把文件和配置同步好，并按该版本文档做好一次性的准备，再合并或触发 CD；否则新镜像会以旧配置运行：迁移失败时停在旧版本，迁移通过但健康检查不过时自动回滚。同步文件同"首次部署"第 2 步：
+CD 只更新镜像，不同步部署目录里的 `compose.prod.yaml`、`compose.prod.reverse-proxy.yaml`、`docker/postgres/initdb/`、`docker/caddy/Caddyfile` 与 `.env.production`；VPS 上的副本有本地改动时，同步要保留这些改动（见"升级"）。升级到改动了这些文件或新增配置的版本（例如数据库角色拆分新增的 `POSTGRES_PASSWORD`、`PG_MIGRATION_USER` / `PG_MIGRATION_PASSWORD`，或本票新增的 `COMPOSE_PROFILES` / `CORE_HOST_BIND` 入口形态）之前，先在 VPS 上把文件和配置同步好，并按该版本文档做好一次性的准备，再合并或触发 CD；否则新镜像会以旧配置运行：迁移失败时停在旧版本，迁移通过但健康检查不过时自动回滚。同步文件同"首次部署"第 2 步：
 
 ```bash
-rsync -R compose.prod.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.production.example vps:/srv/bafang-core/
+rsync -R compose.prod.yaml compose.prod.reverse-proxy.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.production.example vps:/srv/bafang-core/
 ```
 
 这条命令整份覆盖 VPS 上的同名文件。VPS 副本有本地改动时改为先同步到旁边的目录，对比合并后再放回：
 
 ```bash
-rsync -R compose.prod.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.production.example vps:/srv/bafang-core/incoming/
+rsync -R compose.prod.yaml compose.prod.reverse-proxy.yaml docker/postgres/initdb/ docker/caddy/Caddyfile .env.production.example vps:/srv/bafang-core/incoming/
 # 在 VPS 的部署目录里：
 diff -u compose.prod.yaml incoming/compose.prod.yaml
+diff -u compose.prod.reverse-proxy.yaml incoming/compose.prod.reverse-proxy.yaml
 diff -u docker/caddy/Caddyfile incoming/docker/caddy/Caddyfile
 diff -ru docker/postgres/initdb incoming/docker/postgres/initdb
 # 把仓库的改动合进现有文件（保留本地改动），然后：
 dc config --quiet && rm -rf incoming
 ```
+
+`remote-update.sh` 检测到 `.env.production` 里设了非空的 `CORE_HOST_BIND` 时会自动叠加 `compose.prod.reverse-proxy.yaml`，所以 CD 在两种入口形态下都能升级与回滚，无需在 VPS 上额外配置。
 
 ### 开通
 
@@ -327,25 +398,28 @@ dc config --quiet && rm -rf incoming
 
    SSH 端口不是 22 时，`ssh-keyscan` 输出的主机名形如 `[地址]:端口`，原样保留。
 
-4. **配置 Actions secrets**（仓库 Settings → Secrets and variables → Actions 的 Secrets 页，或用 `gh`）。另有一个仓库变量 `CD_ENABLED` 作为开关，在第 5 步设置：
+4. **配置 Actions secrets 与变量**（仓库 Settings → Secrets and variables → Actions，或用 `gh`）。`DEPLOY_SSH_USER` 是仓库变量（不是 secret：作为 secret 时 GitHub 会把日志里所有 "deploy" 字样打码，干扰排障），其余是 secret：
 
    | Secret                   | 必填 | 说明                                         |
    | ------------------------ | ---- | -------------------------------------------- |
    | `DEPLOY_SSH_HOST`        | 是   | VPS 地址                                     |
-   | `DEPLOY_SSH_USER`        | 是   | 第 1 步的部署用户                            |
    | `DEPLOY_SSH_KEY`         | 是   | 第 2 步的私钥全文（`bafang-core-cd`）        |
    | `DEPLOY_SSH_KNOWN_HOSTS` | 是   | 第 3 步的 known_hosts 内容；严格校验主机密钥 |
    | `DEPLOY_SSH_PORT`        | 否   | 默认 22                                      |
    | `DEPLOY_PATH`            | 否   | 部署目录的绝对路径，默认 `/srv/bafang-core`  |
 
+   | 变量              | 必填 | 说明              |
+   | ----------------- | ---- | ----------------- |
+   | `DEPLOY_SSH_USER` | 是   | 第 1 步的部署用户 |
+
    ```bash
    gh secret set DEPLOY_SSH_HOST --body '<VPS 地址>'
-   gh secret set DEPLOY_SSH_USER --body deploy
+   gh variable set DEPLOY_SSH_USER --body deploy
    gh secret set DEPLOY_SSH_KEY < bafang-core-cd
    gh secret set DEPLOY_SSH_KNOWN_HOSTS < bafang-core-cd.known_hosts
    ```
 
-   配置完删除本地私钥文件。
+   配置完删除本地私钥文件。从旧配置迁移时：先 `gh variable set DEPLOY_SSH_USER --body deploy`，CD 会先读变量、回退到旧 secret；确认运行无误后再 `gh secret delete DEPLOY_SSH_USER` 删除旧 secret（这个版本兼容旧 secret，下个版本起不再读它）。
 
 5. **打开开关。** secrets 配齐后设置仓库变量（Settings → Secrets and variables → Actions 的 Variables 页，不是 Secrets）：
 
@@ -356,6 +430,40 @@ dc config --quiet && rm -rf incoming
    `CD_ENABLED=true` 但缺少任一必填 secret 时，CD 在 `deploy` 第一步以"CD 缺少 secrets"失败并列出缺少的名称，不构建、不连接 VPS。要暂停自动部署，把变量改成 `false` 或删除（`gh variable delete CD_ENABLED`）。
 
 6. **首次运行。** Actions → CD → Run workflow，看 Deploy 步骤日志依次出现"当前版本""已备份数据库""健康检查通过"，再按"首次部署"第 7 步从公网验证。
+
+### 自托管 runner 维护
+
+CD 的 `deploy` job 放在长驻自托管 runner 上运行时，那台机器会累积本项目构建产生的镜像层、builder 缓存与部署前备份。维护要**只清理本项目资产**（镜像名带 `bafang-core`、构建缓存按本项目标签区分），不要碰机器上其他项目或其他用途的镜像与卷：
+
+1. **磁盘占用巡检。** 定期看磁盘与 Docker 占用，重点盯镜像层和 builder 缓存：
+
+   ```bash
+   df -h
+   docker system df
+   docker images bafang-core          # 本项目镜像与各标签
+   ```
+
+2. **清理旧镜像与 builder 缓存。** 只清理本项目镜像（仓库名 `bafang-core`），按保留期删除旧标签（保留当前版本、上一个版本和 `rollback`，与"手动回滚"的一致）：
+
+   ```bash
+   docker images bafang-core --format '{{.Repository}}:{{.Tag}} {{.ID}}'
+   docker rmi bafang-core:<旧标签>   # 逐个删，保留最近几个标签
+   docker image prune --filter 'dangling=true'   # 清悬空镜像
+   docker builder du                            # 先看构建缓存占用
+   docker builder prune --filter 'until=720h'   # 只删超过 30 天的构建缓存
+   ```
+
+   构建缓存目前没有按项目打 label，`docker builder prune` 会连同其它构建的缓存一起算 `until` 保留期，先 `docker builder du` 核对再清；宁可保守，不要整机 `docker system prune -a`。
+
+3. **检查残留的临时私钥。** CD 的 "Configure SSH" 步骤把部署私钥写到 `$RUNNER_TEMP/ssh/key`，正常结束由 "Remove SSH key" 步骤删掉；runner 被掉电或强杀时这两个步骤不会跑，私钥可能残留。异常退出后检查并清理 runner 工作目录下的临时目录（形如 `<runner>/_work/_temp/ssh/`）：
+
+   ```bash
+   find /path/to/actions-runner/_work/_temp -maxdepth 2 -name ssh -type d 2>/dev/null
+   # 确认是本项目 CD 残留后删除（key、known_hosts 都是这次运行临时生成的）
+   rm -rf /path/to/actions-runner/_work/_temp/ssh
+   ```
+
+   只删本项目的 `_temp/ssh`，不要动 runner 其他临时文件或正在进行的 job。
 
 ### 手动回滚
 

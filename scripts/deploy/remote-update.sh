@@ -5,6 +5,8 @@
 #
 # 通常由 scripts/deploy/deploy.sh 经 `ssh … sh -s -- … < remote-update.sh` 执行，脚本本身不需要放到 VPS 上。
 # 前提：部署目录里有 compose.prod.yaml 与 .env.production，镜像 <镜像名>:<标签> 已经 docker load 进来。
+# 部署在已有反向代理之后时，目录里还要有 compose.prod.reverse-proxy.yaml，且 .env.production 设了非空的
+# CORE_HOST_BIND；本脚本检测到 CORE_HOST_BIND 后会自动叠加该覆盖文件。
 #
 # 流程：
 #   1. 记录当前 core 容器实际运行的镜像 ID（不可变），打上本地标签 <镜像名>:rollback 作为回滚目标。
@@ -44,7 +46,17 @@ fail() {
   exit 1
 }
 
-dc() { docker compose -f compose.prod.yaml --env-file .env.production "$@" </dev/null; }
+# 部署在已有反向代理之后时，.env.production 里设了非空的 CORE_HOST_BIND；此时要叠加
+# compose.prod.reverse-proxy.yaml 让 core 发布宿主端口，否则反代连不上 core。
+core_bind() { sed -n 's/^CORE_HOST_BIND=//p' .env.production | tail -n 1; }
+
+dc() {
+  if [ -n "$(core_bind)" ]; then
+    docker compose -f compose.prod.yaml -f compose.prod.reverse-proxy.yaml --env-file .env.production "$@" </dev/null;
+  else
+    docker compose -f compose.prod.yaml --env-file .env.production "$@" </dev/null;
+  fi
+}
 
 now() { date +%s; }
 
@@ -69,12 +81,19 @@ switch_to() {
 
 # wait_healthy <秒数>：从调用时起算墙钟截止时间。单次请求（含 docker compose exec 开销，由 timeout 限住）
 # 和间隔都不超过剩余时间，总耗时不超过上限（另加进程收尾的少许误差）。
+# 这里不能经 dc()（timeout 只能执行外部命令，不能执行 shell 函数），所以把 -f 文件列表就地展开。
 wait_healthy() {
+  if [ -n "$(core_bind)" ]; then
+    files='-f compose.prod.yaml -f compose.prod.reverse-proxy.yaml'
+  else
+    files='-f compose.prod.yaml'
+  fi
   deadline=$(($(now) + $1))
   while :; do
     left=$((deadline - $(now)))
     [ "$left" -gt 0 ] || return 1
-    if timeout "$(min 10 "$left")" docker compose -f compose.prod.yaml --env-file .env.production \
+    # shellcheck disable=SC2086 # $files 是待展开的 -f 参数
+    if timeout "$(min 10 "$left")" docker compose $files --env-file .env.production \
       exec -T core wget -q -T "$(min 5 "$left")" -O /dev/null "http://127.0.0.1:3000/v1/health" \
       </dev/null >/dev/null 2>&1; then
       return 0
