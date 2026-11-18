@@ -46,19 +46,20 @@ fail() {
   exit 1
 }
 
-# 部署在已有反向代理之后时，.env.production 里设了非空的 CORE_HOST_BIND；此时要叠加
-# compose.prod.reverse-proxy.yaml 让 core 发布宿主端口，否则反代连不上 core。
-# 不自己解析 .env.production（空格、引号会被误判），而是让 Compose 解释 x-bafang 探针，
-# 与手动 `dc` 的入口形态判定保持一致。
+# 返回 core 的 CORE_HOST_BIND 实际值（由 Compose 解释 x-bafang 探针，空格/引号都能正确处理，
+# 与手动 `dc` 的入口形态判定一致）。空串是「有效空绑定」= 默认形态（不叠加覆盖文件、core 不映射端口）。
+# 判定失败（Compose config 退出非零、探针字段缺失、提取失败）返回非零退出码：调用方必须据此终止，
+# 不能把「无法判定绑定」当成「空绑定」继续按默认形态部署。
 core_bind() {
-  docker compose -f compose.prod.yaml --env-file .env.production config --format json \
-    | grep -o '"core-host-bind"[[:space:]]*:[[:space:]]*"[^"]*"' \
-    | head -n1 \
-    | sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/'
+  cfg=$(docker compose -f compose.prod.yaml --env-file .env.production config --format json) || return 1
+  printf '%s\n' "$cfg" | grep -q '"core-host-bind"[[:space:]]*:[[:space:]]*"[^"]*"' || return 1
+  printf '%s\n' "$cfg" | grep -o '"core-host-bind"[[:space:]]*:[[:space:]]*"[^"]*"' | head -n1 |
+    sed 's/.*"\([^"]*\)"[[:space:]]*$/\1/'
 }
 
 dc() {
-  if [ -n "$(core_bind)" ]; then
+  bind=$(core_bind) || fail "无法判定入口形态（CORE_HOST_BIND 解析失败），拒绝部署，未改动任何容器"
+  if [ -n "$bind" ]; then
     docker compose -f compose.prod.yaml -f compose.prod.reverse-proxy.yaml --env-file .env.production "$@" </dev/null;
   else
     docker compose -f compose.prod.yaml --env-file .env.production "$@" </dev/null;
@@ -90,7 +91,8 @@ switch_to() {
 # 和间隔都不超过剩余时间，总耗时不超过上限（另加进程收尾的少许误差）。
 # 这里不能经 dc()（timeout 只能执行外部命令，不能执行 shell 函数），所以把 -f 文件列表就地展开。
 wait_healthy() {
-  if [ -n "$(core_bind)" ]; then
+  bind=$(core_bind) || fail "无法判定入口形态（CORE_HOST_BIND 解析失败），拒绝部署，未改动任何容器"
+  if [ -n "$bind" ]; then
     files='-f compose.prod.yaml -f compose.prod.reverse-proxy.yaml'
   else
     files='-f compose.prod.yaml'

@@ -169,21 +169,44 @@ alias dc='docker compose -f compose.prod.yaml -f compose.prod.reverse-proxy.yaml
 
    `$proxy_add_x_forwarded_for` 展开成 `$http_x_forwarded_for, $remote_addr`：它把客户端送来的原值保留在左侧，把真实客户端地址 `$remote_addr` 追加到**最右**。core 的限流取 `X-Forwarded-For` **最右一项**当客户端地址（`src/rate-limit.ts`），因此客户端伪造的左侧各项不生效，限流按真实 IP 计。要更简单可以直接 `proxy_set_header X-Forwarded-For $remote_addr;`（整段覆盖，同样安全）。**不要**写 `proxy_set_header X-Forwarded-For $http_x_forwarded_for;`：那等于原样透传客户端的值，攻击者每次换一个最右值就能绕开限流。
 
-4. **验证限流确实生效（本机普通请求，不伪造任何头）。** 行情匿名接口（`/v1/funds/*`、`/v1/market/*`）按客户端 IP 每分钟限流 60 次。用只绑回环的普通请求验证，不面向公网、不发送伪造的 `X-Forwarded-For`。路径取格式无效的基金代码 `/v1/funds/invalid`：请求在访问行情上游之前就返回 `400` 校验错误，不产生上游流量，但仍经过限流中间件。经回环入口（例如 `http://127.0.0.1:3100`，或经回环 nginx 反代到它）连发 61 次：
+4. **验证限流确实生效（本机普通请求，经回环代理，不伪造任何头）。** 行情匿名接口（`/v1/funds/*`、`/v1/market/*`）按客户端 IP 每分钟限流 60 次，响应头带 `RateLimit-Remaining`。用一个只绑回环的临时 nginx 代理转发到 core（不是直连 core），路径取格式无效的基金代码 `/v1/funds/invalid`：它在访问行情上游之前就返回 `400` 校验错误，不产生上游流量，但仍经过限流中间件：
 
    ```bash
+   cat > /tmp/bf80-rate-proxy.conf <<'EOF'
+   events {}
+   http {
+       server {
+           listen 127.0.0.1:3281;
+           location / {
+               proxy_pass http://127.0.0.1:3100;
+               proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+           }
+       }
+   }
+   EOF
+   docker run -d --rm --name bf80-rate-proxy --network host \
+     -v /tmp/bf80-rate-proxy.conf:/etc/nginx/nginx.conf:ro nginx:alpine
+   ```
+
+   先在**同一个** 60 秒窗口内看剩余额度递减（第一次是 `59`，接着 `58`、`57`…），再连续发满 61 次看阈值：
+
+   ```bash
+   for i in 1 2 3; do
+     curl -s -D - -o /dev/null 'http://127.0.0.1:3281/v1/funds/invalid' | grep -i '^ratelimit-remaining'
+   done
    for i in $(seq 1 61); do
-     curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:3100/v1/funds/invalid'
+     curl -s -o /dev/null -w '%{http_code}\n' 'http://127.0.0.1:3281/v1/funds/invalid'
    done | sort | uniq -c
    ```
 
-   预期输出前 60 次为 `400`、第 61 次为 `429`（错误体 `rate_limited`）。单发一次看额度递减：
+   预期：前 60 次为 `400`（含上面观察额度的几次），随后为 `429`（错误体 `rate_limited`）。窗口是固定的 60 秒：测完等一分钟过去（或换一个客户端地址）再测正常请求，否则会一直撞到限流。这只验证限流中间件按 IP 计数；反代是否正确追加真实客户端 IP，按上一段「追加真实客户端 IP」的配置要求核对，不向公网发请求、不伪造请求头。用完清理临时代理与配置：
 
    ```bash
-   curl -s -D - -o /dev/null 'http://127.0.0.1:3100/v1/funds/invalid' | grep -i '^ratelimit-remaining'
+   docker rm -f bf80-rate-proxy
+   rm -f /tmp/bf80-rate-proxy.conf
    ```
 
-   连续几次时 `RateLimit-Remaining` 应从 `59` 递减。窗口是固定的 60 秒：测完等一分钟过去（或换一个客户端地址）再测正常请求，否则会一直撞到限流。这只验证限流中间件按 IP 计数；反代是否正确追加真实客户端 IP，按上一段「追加真实客户端 IP」的配置要求核对，不向公网发请求、不伪造请求头。
+   已有 nginx/宝塔 时也可以直接在它的站点里加一个只绑 `127.0.0.1` 的临时 server（`listen 127.0.0.1:3281`），把上面的 `proxy_pass`、`proxy_set_header` 加进去即可，无需另起容器。
 
 ## 健康检查
 
