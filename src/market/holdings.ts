@@ -3,7 +3,7 @@ import { DailyCache } from './daily-cache';
 import { fetchTencentQuotes } from './tencent';
 import { fetchThsQuote } from './ths';
 import type { Quote } from './quote';
-import { UpstreamError, type UpstreamFetcher } from './upstream';
+import { UpstreamError, withDeadline, type UpstreamFetcher } from './upstream';
 import type { TradingCalendar } from '../trading-calendar';
 
 export interface TopHolding {
@@ -48,61 +48,57 @@ type QuoteEntry = {
 
 const EM = 'https://fundf10.eastmoney.com/FundArchivesDatas.aspx';
 
+/**
+ * Wall-clock budget for one holdings lookup, covering every upstream call it makes. Production
+ * sits behind nginx, whose default 60 s proxy timeout turns a hung request into a 504 that
+ * still holds the connection. 45 s leaves 15 s of margin below it, yet still fits the report
+ * fallback chain: EastMoney and then Sina each take at most about 16 s with the adapter's
+ * 5 s per attempt and two retries. After the budget, report failure is the usual 502 and
+ * unfinished quotes are unavailable (`quote: null`).
+ */
+const HOLDINGS_DEADLINE_MS = 45_000;
+
 export function createHoldingsService(deps: {
   upstream: UpstreamFetcher;
   clock: Clock;
   calendar: TradingCalendar;
+  /** Overrides {@link HOLDINGS_DEADLINE_MS}; tests use a short budget. */
+  deadlineMs?: number;
 }): HoldingsService {
   const cache = new DailyCache<Report>();
+  const pendingReports = new Map<string, Promise<Report | null>>();
   let cachedReportDay: string | undefined;
   const quotes = new Map<string, QuoteEntry>();
   let lastRequestId = 0;
+  async function loadReport(upstream: UpstreamFetcher, day: string, code: string) {
+    const key = `${day}:${code}`;
+    const pending = pendingReports.get(key);
+    if (pending) return pending;
+
+    // The first caller's deadline also bounds the wait for anyone joining this load.
+    const loading = fetchReport(upstream, day, code);
+    pendingReports.set(key, loading);
+    try {
+      const report = await loading;
+      // A response from yesterday may finish after today's reports have been cached.
+      if (report && (!cachedReportDay || day >= cachedReportDay)) {
+        cache.set(day, code, report);
+        cachedReportDay = day;
+      }
+      return report;
+    } finally {
+      pendingReports.delete(key);
+    }
+  }
+
   return {
     async get(code, asOf = deps.clock.now()) {
       const requestId = ++lastRequestId;
+      // Every upstream call below shares one deadline so the lookup always settles.
+      const upstream = withDeadline(deps.upstream, deps.deadlineMs ?? HOLDINGS_DEADLINE_MS);
       const day = shanghaiDate(asOf);
-      let parsed: Report | null | undefined = cache.get(day, code);
-      if (!parsed) {
-        try {
-          parsed = parseEastmoney(
-            await deps.upstream.fetchText({
-              url: `${EM}?type=jjcc&code=${code}&topline=10&year=&month=&rt=1`,
-              referer: 'https://fundf10.eastmoney.com/',
-            }),
-            day,
-          );
-          // Only a recognized, successful empty report proves absence of a report.
-          if (!parsed) return null;
-          deps.upstream.recordSuccess?.('eastmoney');
-        } catch (error) {
-          if (!(error instanceof UpstreamError)) throw error;
-          console.warn('[bafang-core] eastmoney holdings failed', error.kind, error.message);
-          try {
-            parsed = parseSina(
-              await deps.upstream.fetchText({
-                url: `https://finance.sina.com.cn/fund/quotes/${code}/bc.shtml`,
-                referer: 'https://finance.sina.com.cn/',
-                encoding: 'utf-8',
-              }),
-              day,
-            );
-            deps.upstream.recordSuccess?.('sina');
-          } catch (backupError) {
-            if (!(backupError instanceof UpstreamError)) throw backupError;
-            console.warn(
-              '[bafang-core] sina holdings failed',
-              backupError.kind,
-              backupError.message,
-            );
-            throw backupError;
-          }
-        }
-        // A response from yesterday may finish after today's reports have been cached.
-        if (!cachedReportDay || day >= cachedReportDay) {
-          cache.set(day, code, parsed);
-          cachedReportDay = day;
-        }
-      }
+      const parsed = cache.get(day, code) ?? (await loadReport(upstream, day, code));
+      if (!parsed) return null;
       const symbols = parsed.items
         .map((i) => symbolFor(i.code))
         .filter((x): x is string => x !== null);
@@ -117,7 +113,7 @@ export function createHoldingsService(deps: {
         let result = new Map<string, Quote | null>();
         if (batch.length > 0) {
           try {
-            result = await fetchTencentQuotes(deps.upstream, batch);
+            result = await fetchTencentQuotes(upstream, batch);
           } catch (error) {
             if (!(error instanceof UpstreamError)) throw error;
             console.warn('[bafang-core] tencent holdings quotes failed', error.kind, error.message);
@@ -162,7 +158,7 @@ export function createHoldingsService(deps: {
           if (fallback) {
             try {
               quote = await fetchThsQuote(
-                deps.upstream,
+                upstream,
                 symbol!.startsWith('sh') ? `hs_${item.code}` : `sz_${item.code}`,
               );
             } catch (error) {
@@ -214,7 +210,7 @@ export function createHoldingsService(deps: {
           : item,
       );
       for (const source of new Set(adopted.flatMap((item, i) => (item.quote ? fetched[i] : null))))
-        if (source) deps.upstream.recordSuccess?.(source);
+        if (source) upstream.recordSuccess?.(source);
       return {
         reportDate: parsed.reportDate,
         holdingsSource: parsed.source,
@@ -223,6 +219,45 @@ export function createHoldingsService(deps: {
       };
     },
   };
+}
+
+async function fetchReport(
+  upstream: UpstreamFetcher,
+  day: string,
+  code: string,
+): Promise<Report | null> {
+  try {
+    const parsed = parseEastmoney(
+      await upstream.fetchText({
+        url: `${EM}?type=jjcc&code=${code}&topline=10&year=&month=&rt=1`,
+        referer: 'https://fundf10.eastmoney.com/',
+      }),
+      day,
+    );
+    // Only a recognized, successful empty report proves absence of a report.
+    if (!parsed) return null;
+    upstream.recordSuccess?.('eastmoney');
+    return parsed;
+  } catch (error) {
+    if (!(error instanceof UpstreamError)) throw error;
+    console.warn('[bafang-core] eastmoney holdings failed', error.kind, error.message);
+    try {
+      const parsed = parseSina(
+        await upstream.fetchText({
+          url: `https://finance.sina.com.cn/fund/quotes/${code}/bc.shtml`,
+          referer: 'https://finance.sina.com.cn/',
+          encoding: 'utf-8',
+        }),
+        day,
+      );
+      upstream.recordSuccess?.('sina');
+      return parsed;
+    } catch (backupError) {
+      if (!(backupError instanceof UpstreamError)) throw backupError;
+      console.warn('[bafang-core] sina holdings failed', backupError.kind, backupError.message);
+      throw backupError;
+    }
+  }
 }
 
 // Only unambiguous six-digit Shanghai/Shenzhen equity identifiers are quoted.
