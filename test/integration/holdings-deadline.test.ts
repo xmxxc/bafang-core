@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../../src/app';
 import { createHealthProbe } from '../../src/db';
@@ -74,28 +75,36 @@ describe('fund holdings request deadline over HTTP with an isolated PostgreSQL s
   it.each(['before headers', 'reading body'])(
     'retries a stalled HTTP attempt (%s) even if the transport ignores abort',
     async (stage) => {
-      const stalled = new Response();
-      vi.spyOn(stalled, 'arrayBuffer').mockImplementation(() => new Promise(() => {}));
-      const transport = vi
-        .spyOn(globalThis, 'fetch')
-        .mockRejectedValue(new Error('unexpected upstream call'))
-        .mockImplementationOnce(() =>
-          stage === 'before headers' ? new Promise(() => {}) : Promise.resolve(stalled),
-        )
-        .mockResolvedValueOnce(new Response(report))
-        .mockResolvedValueOnce(new Response(quote()));
+      // The upstream has one slot. Aborting frees it for a retry, while the stalled
+      // fetch or body read itself deliberately never settles.
+      let slot: 'stall' | 'busy' | 'ready' = 'stall';
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const host = new URL(String(input)).hostname;
+        if (host === 'qt.gtimg.cn') return new Response(quote());
+        if (host !== 'fundf10.eastmoney.com' || slot === 'busy') {
+          return new Response(null, { status: 503 });
+        }
+        if (slot === 'ready') return new Response(report);
+        slot = 'busy';
+        init?.signal?.addEventListener(
+          'abort',
+          () => {
+            slot = 'ready';
+          },
+          { once: true },
+        );
+        return stage === 'before headers'
+          ? new Promise<Response>(() => {})
+          : new Response(new ReadableStream());
+      });
       const adapter = new HttpUpstreamFetcher({ timeoutMs: 30, retries: 1, retryDelayMs: 0 });
       const response = await bounded(app(adapter));
       expect(response.status).toBe(200);
       expect(await response.json()).toMatchObject({
+        holdingsSource: 'eastmoney',
+        holdingsFallback: false,
         items: [{ code: '600519', quote: { price: '101.00' } }],
       });
-      expect(transport.mock.calls[0]![1]?.signal?.aborted).toBe(true);
-      expect(transport.mock.calls.map(([url]) => new URL(String(url)).hostname)).toEqual([
-        'fundf10.eastmoney.com',
-        'fundf10.eastmoney.com',
-        'qt.gtimg.cn',
-      ]);
     },
   );
 
@@ -117,29 +126,52 @@ describe('fund holdings request deadline over HTTP with an isolated PostgreSQL s
     });
   });
 
-  it('gives the fallback only the remaining portion of the request deadline', async () => {
-    const target = app();
-    const fetch = vi.spyOn(upstream, 'fetchText').mockImplementationOnce(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      throw new UpstreamError('network', 'primary unavailable');
-    });
-    vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] });
-    try {
-      const completed = vi.fn();
-      const request = bounded(target).then(completed);
-      await vi.advanceTimersByTimeAsync(DEADLINE_MS - 1);
-      expect(fetch.mock.calls.map(([{ url }]) => new URL(url).hostname)).toEqual([
-        'fundf10.eastmoney.com',
-        'finance.sina.com.cn',
-      ]);
-      expect(completed).not.toHaveBeenCalled();
-      await vi.advanceTimersByTimeAsync(1);
-      expect(completed).toHaveBeenCalledWith(expect.objectContaining({ status: 502 }));
-      await request;
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  it.each([
+    { fallbackMs: 99, elapsed: 299, status: 200 },
+    { fallbackMs: 101, elapsed: 300, status: 502 },
+  ])(
+    'applies the remaining deadline to a $fallbackMs ms fallback',
+    async ({ fallbackMs, elapsed, status }) => {
+      const sina = readFileSync('test/fixtures/upstream/sina/holdings-000001-page.txt', 'utf8');
+      const target = app({
+        async fetchText({ url }) {
+          if (url.includes('FundArchivesDatas')) {
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            throw new UpstreamError('network', 'primary unavailable');
+          }
+          if (url.includes('/bc.shtml')) {
+            await new Promise((resolve) => setTimeout(resolve, fallbackMs));
+            return sina;
+          }
+          throw new UpstreamError('network', 'quote unavailable');
+        },
+      });
+      vi.useFakeTimers({ toFake: ['performance', 'setTimeout', 'clearTimeout'] });
+      try {
+        const started = performance.now();
+        const [result] = await Promise.all([
+          bounded(target).then((response) => ({ response, elapsed: performance.now() - started })),
+          vi.advanceTimersByTimeAsync(BOUND_MS),
+        ]);
+        expect(result.response.status).toBe(status);
+        expect(result.elapsed).toBe(elapsed);
+        const body = await result.response.json();
+        if (status === 200) {
+          expect(body).toMatchObject({
+            holdingsSource: 'sina',
+            holdingsFallback: true,
+            items: expect.arrayContaining([
+              expect.objectContaining({ code: '300308', name: '中际旭创' }),
+            ]),
+          });
+        } else {
+          expect(body).toMatchObject({ error: { code: 'upstream_unavailable' } });
+        }
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 
   it('returns unavailable quotes within the deadline when every quote upstream never settles, then recovers', async () => {
     upstream.hang = (url) => !url.includes('FundArchivesDatas');
@@ -161,19 +193,25 @@ describe('fund holdings request deadline over HTTP with an isolated PostgreSQL s
   });
 
   it('shares one pending report, bounds both callers and fetches again after timeout', async () => {
-    const fetch = vi.spyOn(upstream, 'fetchText');
+    // Only the first report stalls. Any independent lookup can already serve the list.
+    let stallNextReport = true;
+    upstream.hang = (url) => {
+      if (url.includes('/bc.shtml')) return true;
+      if (!stallNextReport || !url.includes('FundArchivesDatas')) return false;
+      stallNextReport = false;
+      return true;
+    };
     const target = app();
     const responses = await Promise.all([bounded(target), bounded(target)]);
     for (const response of responses) {
       expect(response.status).toBe(502);
       expect(await response.json()).toMatchObject({ error: { code: 'upstream_unavailable' } });
     }
-    const reports = () =>
-      fetch.mock.calls.filter(([request]) => request.url.includes('FundArchivesDatas'));
-    expect(reports()).toHaveLength(1);
-    upstream.hang = () => false;
     const recovered = await bounded(target);
     expect(recovered.status).toBe(200);
-    expect(reports()).toHaveLength(2);
+    expect(await recovered.json()).toMatchObject({
+      holdingsSource: 'eastmoney',
+      items: [{ code: '600519', name: '贵州茅台', quote: { price: '101.00' } }],
+    });
   });
 });
