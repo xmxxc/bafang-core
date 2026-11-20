@@ -10,6 +10,8 @@ export interface UpstreamRequest {
   headers?: Record<string, string>;
   /** 响应体编码；省略时取 Content-Type 的 charset，再缺省为 utf-8。 */
   encoding?: string;
+  /** 可选的整次查询截止时刻，与 performance.now() 使用同一时间基准。 */
+  deadline?: number;
 }
 
 /** 行情模块实际使用的上游。健康检查按这些名字报告最近一次成功的时间。 */
@@ -48,6 +50,39 @@ export class UpstreamError extends Error {
   }
 }
 
+/** 同时中止网络 I/O 和结束调用方的等待，包括忽略中止信号的传输或响应体。 */
+async function fetchWithin(
+  ms: number,
+  fetchText: (signal: AbortSignal) => Promise<string>,
+): Promise<string> {
+  const timeout = () => new UpstreamError('timeout', 'upstream request timed out');
+  if (ms <= 0) throw timeout();
+  const controller = new AbortController();
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(timeout()), Math.ceil(ms));
+  });
+  try {
+    return await Promise.race([expired, fetchText(controller.signal)]);
+  } catch (error) {
+    // A non-success HTTP status can arrive before its response body finishes streaming.
+    controller.abort(error);
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** 约束整次查询；传给 HTTP 适配器的剩余预算也限制单次尝试和后续重试。 */
+export function withDeadline(upstream: UpstreamFetcher, ms: number): UpstreamFetcher {
+  const deadline = performance.now() + ms;
+  return {
+    fetchText: (request) =>
+      fetchWithin(deadline - performance.now(), () => upstream.fetchText({ ...request, deadline })),
+    recordSuccess: (source) => upstream.recordSuccess?.(source),
+  };
+}
+
 export interface HttpUpstreamFetcherOptions {
   timeoutMs?: number;
   /** 首次请求之外的重试次数。 */
@@ -73,13 +108,19 @@ export class HttpUpstreamFetcher implements UpstreamFetcher {
   }
 
   async fetchText(request: UpstreamRequest): Promise<string> {
+    const deadline = request.deadline ?? Infinity;
     let lastError: UpstreamError | undefined;
     for (let attempt = 0; attempt <= this.retries; attempt++) {
       if (attempt > 0) {
-        await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs * attempt));
+        const delay = this.retryDelayMs * attempt;
+        if (performance.now() + delay >= deadline) break;
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
       try {
-        return await this.fetchOnce(request);
+        const remaining = deadline - performance.now();
+        return await fetchWithin(Math.min(this.timeoutMs, remaining), (signal) =>
+          this.fetchOnce(request, signal),
+        );
       } catch (error) {
         lastError = toUpstreamError(error);
         if (!lastError.retryable) break;
@@ -88,7 +129,7 @@ export class HttpUpstreamFetcher implements UpstreamFetcher {
     throw lastError ?? new UpstreamError('network', 'upstream request failed');
   }
 
-  private async fetchOnce(request: UpstreamRequest): Promise<string> {
+  private async fetchOnce(request: UpstreamRequest, signal: AbortSignal): Promise<string> {
     const response = await fetch(request.url, {
       headers: {
         'User-Agent': this.userAgent,
@@ -96,8 +137,9 @@ export class HttpUpstreamFetcher implements UpstreamFetcher {
         Referer: request.referer,
         ...request.headers,
       },
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal,
     });
+    signal.throwIfAborted();
     if (!response.ok) {
       throw new UpstreamError(
         'http_status',
@@ -106,6 +148,7 @@ export class HttpUpstreamFetcher implements UpstreamFetcher {
       );
     }
     const bytes = await response.arrayBuffer();
+    signal.throwIfAborted();
     const encoding = request.encoding ?? charsetOf(response.headers.get('content-type')) ?? 'utf-8';
     const text = decode(bytes, encoding);
     if (text.trim() === '') {

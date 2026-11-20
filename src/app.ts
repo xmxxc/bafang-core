@@ -144,6 +144,8 @@ export interface AppDeps {
   hkTradingCalendar?: SessionCalendar;
   /** 统一上游抓取适配器；测试时整体替换为录制样本。 */
   upstream?: UpstreamFetcher;
+  /** 一次重仓股查询全部上游调用的共同期限（毫秒），默认 45 秒；测试用短期限。 */
+  holdingsDeadlineMs?: number;
 }
 
 export interface ResolvedDeps {
@@ -271,6 +273,7 @@ export function createApp(deps: AppDeps = {}): App {
     upstream,
     clock: resolved.clock,
     calendar: resolved.tradingCalendar,
+    deadlineMs: deps.holdingsDeadlineMs,
   });
   const nav = createNavService({
     upstream,
